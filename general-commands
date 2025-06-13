@@ -1,0 +1,11 @@
+
+sudo apt update
+sudo apt install libvulkan-dev
+
+dpkg -L libvulkan-dev | grep vulkan/vulkan.h
+
+sudo apt-get install libglfw3-dev
+
+# compile to SPIR-V
+glslangValidator -V src/shaders/triangle.vert -o src/shaders/triangle.vert.spv
+glslangValidator -V src/shaders/triangle.frag -o src/shaders/triangle.frag.spv
