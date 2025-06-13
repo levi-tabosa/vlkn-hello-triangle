@@ -5,21 +5,6 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    //TODO: Ember shader source files here
-    // const shader_source_files = &[_][]const u8{
-    //     "src/shaders/code/triangle.vert",
-    //     "src/shaders/code/triangle.frag",
-    // };
-    // for (shader_source_files) |shader_file| {
-    //     b.addSystemCommand(&.{
-    //         "glslc",
-    //         shader_file,
-    //         "-o",
-    //         std.fmt.allocPrint(b.allocator, "src/shaders/{}.spv", .{std.fs.path.basename(shader_file)}) catch unreachable,
-    //     });
-    // }
-    // Add the executable target
-
     const exe = b.addExecutable(.{
         .name = "hello_triangle",
         .target = target,
@@ -27,18 +12,31 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/main.zig"),
     });
 
-    exe.linkSystemLibrary("vulkan");
-    exe.linkSystemLibrary("glfw");
+    const c_mod = b.addModule("c", .{
+        .root_source_file = b.path("src/c/c.zig"),
+        .target = target,
+    });
+
+    c_mod.linkSystemLibrary("vulkan", .{});
+    c_mod.linkSystemLibrary("glfw", .{});
 
     // Link flags for GLFW on Linux
     if (target.result.os.tag == .linux) {
-        exe.linkSystemLibrary("m");
-        exe.linkSystemLibrary("pthread");
-        exe.linkSystemLibrary("dl");
-        exe.linkSystemLibrary("X11");
-        exe.linkSystemLibrary("xcb");
-        exe.linkSystemLibrary("Xrandr");
+        c_mod.linkSystemLibrary("m", .{});
+        c_mod.linkSystemLibrary("pthread", .{});
+        c_mod.linkSystemLibrary("dl", .{});
+        c_mod.linkSystemLibrary("X11", .{});
+        c_mod.linkSystemLibrary("xcb", .{});
+        c_mod.linkSystemLibrary("Xrandr", .{});
     }
+
+    const spirv_mod = b.addModule("spirv", .{
+        .root_source_file = b.path("src/shaders/spirv/spirv.zig"),
+        .target = target,
+    });
+
+    exe.root_module.addImport("c", c_mod);
+    exe.root_module.addImport("spirv", spirv_mod);
 
     b.installArtifact(exe);
 
