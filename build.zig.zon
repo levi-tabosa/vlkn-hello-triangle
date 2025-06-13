@@ -37,12 +37,12 @@
     // internet connectivity.
     .dependencies = .{
         // .vulkan = .{
-        //     .url = "https://github.com/ziglibs/vulkan/archive/refs/tags/0.1.0.tar.gz",
-        //     .hash = "1220e1d7e8b1e1c9e8e5e2c7b1a1e1c9e8e5e2c7b1a1e1c9e8e5e2c7b1a1e1c9e8e5",
+        //     .url = "",
+        //     .hash = "",
         // },
         // .glsl = .{
-        //     .url = "https://github.com/ziglibs/glsl/archive/refs/tags/0.1.0.tar.gz",
-        //     .hash = "1220f2d7e8b1e1c9e8e5e2c7b1a1e1c9e8e5e2c7b1a1e1c9e8e5e2c7b1a1e1c9e8e5",
+        //     .url = "",
+        //     .hash = "",
         // },
         // See `zig fetch --save <url>` for a command-line interface for adding dependencies.
         //.example = .{
