@@ -1,8 +1,12 @@
 // build.zig
 const std = @import("std");
 
+// pub fn bilu(b: *std.Build) void {}
+
 pub fn build(b: *std.Build) void {
-    const target = b.standardTargetOptions(.{});
+    // const target = b.standardTargetOptions(.{});
+    const target = b.graph.host;
+
     const optimize = b.standardOptimizeOption(.{});
 
     const exe = b.addExecutable(.{
@@ -11,6 +15,13 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .root_source_file = b.path("src/main.zig"),
     });
+
+    // const example = b.addExecutable(.{
+    //     .name = "hello_triangle_example",
+    //     .target = target,
+    //     .optimize = optimize,
+    //     .root_source_file = b.path("example/example.zig"),
+    // });
 
     const c_mod = b.addModule("c", .{
         .root_source_file = b.path("src/c/c.zig"),

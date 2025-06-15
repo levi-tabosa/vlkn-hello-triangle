@@ -7,28 +7,6 @@ const glfw = c.glfw;
 const frag_shader_code = spirv.frag_code;
 const vert_shader_code = spirv.vert_code;
 
-const AppError = error{
-    GlfwInitFailed,
-    GlfwWindowFailed,
-    VulkanInstanceFailed,
-    VulkanSurfaceFailed,
-    NoSuitableGpu,
-    VulkanDeviceFailed,
-    VulkanSwapchainFailed,
-    VulkanImageViewsFailed,
-    VulkanRenderPassFailed,
-    VulkanCommandPoolFailed,
-    VulkanFramebuffersFailed,
-    VulkanSyncObjectsFailed,
-    VulkanCommandBuffersFailed,
-    VulkanDrawFailed,
-    VulkanPipelineFailed,
-    VulkanDescriptorSetLayoutFailed,
-    VulkanBufferCreationFailed,
-    VulkanMemoryAllocationFailed,
-    MissingMemoryType,
-};
-
 fn checkVk(result: vk.Result) !void {
     if (result == vk.SUCCESS) {
         return;
@@ -36,8 +14,13 @@ fn checkVk(result: vk.Result) !void {
     std.log.err("Vulkan call failed with code: {}", .{result});
     // TODO: improve error handling
     switch (result) {
-        vk.ERR_OUT_OF_DEVICE_MEMORY, vk.ERR_OUT_OF_HOST_MEMORY => return AppError.VulkanMemoryAllocationFailed,
-        else => return AppError.VulkanDrawFailed, // General error for drawing operations
+        vk.ERR_OUT_OF_DEVICE_MEMORY, vk.ERR_OUT_OF_HOST_MEMORY => return error.VulkanMemoryAllocationFailed,
+        vk.ERR_LAYER_NOT_PRESENT => return error.VulkanLayerMissing,
+        vk.ERR_INITIALIZATION_FAILED => return error.VulkanInitFailed,
+        vk.ERR_FORMAT_NOT_SUPPORTED => return error.VulkanUnsupportedFormat,
+        vk.ERR_DRAW_FAILED => return error.VulkanDrawFailed,
+        vk.ERR_UNKNOWN => return error.VulkanUnknown,
+        else => return error.VulkanDefault, // General error for drawing operations
     }
 }
 
@@ -66,7 +49,7 @@ fn findMemoryType(
             return i;
         }
     }
-    return AppError.MissingMemoryType;
+    return error.MissingMemoryType;
 }
 
 // --- NEW --- Helper to create a buffer (for vertices or uniforms)
@@ -111,16 +94,13 @@ fn createShaderModule(allocator: std.mem.Allocator, device: vk.Device, code: []c
     // The safest way is to allocate new memory with the required alignment
     // and copy the embedded data into it.
     const aligned_code = try allocator.alignedAlloc(u32, @alignOf(u32), code.len / @sizeOf(u32));
-    // We must free this temporary memory after the Vulkan call.
     defer allocator.free(aligned_code);
 
-    // Copy the bytes from the unaligned embedded file into our new aligned buffer.
     @memcpy(std.mem.sliceAsBytes(aligned_code), code);
 
     var create_info = vk.ShaderModuleCreateInfo{
         .sType = vk.STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
         .codeSize = code.len,
-        // Now we can use the pointer from our aligned_code slice.
         .pCode = aligned_code.ptr,
     };
 
@@ -133,14 +113,15 @@ pub fn main() !void {
     const allocator = std.heap.page_allocator;
 
     // 1. Initialize GLFW and create a window
-    if (glfw.init() == glfw.FALSE) return AppError.GlfwInitFailed;
+    if (glfw.init() == glfw.FALSE) return error.GlfwInitFailed;
     defer glfw.terminate();
 
     glfw.windowHint(glfw.CLIENT_API, glfw.NO_API);
-    const window = glfw.createWindow(800, 600, "Zig + Vulkan Triangle", null, null) orelse return AppError.GlfwWindowFailed;
+    const window = glfw.createWindow(800, 600, "Zig + Vulkan Triangle", null, null) orelse return error.GlfwWindowFailed;
     defer glfw.destroyWindow(window);
 
     // 2. Create Vulkan Instance
+
     var app_info = vk.ApplicationInfo{
         .sType = vk.STRUCTURE_TYPE_APPLICATION_INFO,
         .pApplicationName = "Zig Vulkan App",
@@ -154,11 +135,17 @@ pub fn main() !void {
     const extension_names_ptr = glfw.getRequiredInstanceExtensions(&extension_count);
     const extension_names = extension_names_ptr[0..extension_count];
 
+    const validation_layers = [_]?*const u8{
+        &("VK_LAYER_KHRONOS_validation\x00"[0]),
+    };
+
     var create_info = vk.InstanceCreateInfo{
         .sType = vk.STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
         .pApplicationInfo = &app_info,
         .enabledExtensionCount = extension_count,
         .ppEnabledExtensionNames = extension_names.ptr,
+        .enabledLayerCount = validation_layers.len,
+        .ppEnabledLayerNames = &validation_layers,
     };
 
     var instance: vk.Instance = undefined;
@@ -173,7 +160,7 @@ pub fn main() !void {
     // 4. Pick Physical Device (GPU)
     var device_count: u32 = 0;
     _ = vk.enumeratePhysicalDevices(instance, &device_count, null);
-    if (device_count == 0) return AppError.NoSuitableGpu;
+    if (device_count == 0) return error.NoSuitableGpu;
 
     const devices = try allocator.alloc(vk.PhysicalDevice, device_count);
     defer allocator.free(devices);
@@ -195,7 +182,7 @@ pub fn main() !void {
             break;
         }
     }
-    if (graphics_family_index == std.math.maxInt(u32)) return AppError.NoSuitableGpu;
+    if (graphics_family_index == std.math.maxInt(u32)) return error.NoSuitableGpu;
 
     const queue_priority: f32 = 1.0;
     var queue_create_info = vk.DeviceQueueCreateInfo{
@@ -673,8 +660,6 @@ pub fn main() !void {
 const Vertex = extern struct {
     pos: [2]f32,
 
-    // This function describes how vertex data is spaced in memory.
-    // It doesn't need an instance of a vertex, so there's no `self` parameter.
     pub fn getBindingDescription() vk.VertexInputBindingDescription {
         return .{
             .binding = 0, // We are using binding 0
