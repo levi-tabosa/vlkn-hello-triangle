@@ -394,13 +394,12 @@ const App = struct {
             .clipped = c.VK_TRUE,
             .oldSwapchain = null,
         };
-        var swapchain: c.VkSwapchainKHR = undefined;
-        try checkVk(c.vkCreateSwapchainKHR(app.device, &create_info, app.alloc_callbacks, &swapchain));
+        try checkVk(c.vkCreateSwapchainKHR(app.device, &create_info, app.alloc_callbacks, &app.swapchain));
 
         var img_count: u32 = undefined;
-        try checkVk(c.vkGetSwapchainImagesKHR(app.device, swapchain, &img_count, null));
+        try checkVk(c.vkGetSwapchainImagesKHR(app.device, app.swapchain, &img_count, null));
         const swapchain_images = app.allocator.alloc(c.VkImage, img_count) catch @panic("OOM");
-        try checkVk(c.vkGetSwapchainImagesKHR(app.device, swapchain, &img_count, swapchain_images.ptr));
+        try checkVk(c.vkGetSwapchainImagesKHR(app.device, app.swapchain, &img_count, swapchain_images.ptr));
         app.swapchain_images = swapchain_images;
     }
 
