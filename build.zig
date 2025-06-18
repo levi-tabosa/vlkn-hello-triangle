@@ -32,7 +32,6 @@ pub fn build(b: *std.Build) !void {
         .{ .step_id = "triangle", .source = "src/main.zig" },
         .{ .step_id = "example", .source = "example/example.zig" },
         .{ .step_id = "glfw", .source = "example/glfw.zig" },
-        // Add more executables here
     };
 
     const spirv_mod = b.addModule("spirv", .{
@@ -44,7 +43,7 @@ pub fn build(b: *std.Build) !void {
         const exe = b.addExecutable(.{
             .name = exe_info.name orelse try std.fmt.allocPrint(
                 allocator,
-                "{s} Name",
+                "{s}_name", // Formated name of the executable file
                 .{exe_info.step_id},
             ),
             .target = target,
@@ -64,7 +63,7 @@ pub fn build(b: *std.Build) !void {
         const cmd = b.addRunArtifact(exe);
         const step = b.step(
             exe_info.step_id,
-            exe_info.description orelse try std.fmt.allocPrint(allocator, "{s} Description", .{exe_info.step_id}),
+            exe_info.description orelse try std.fmt.allocPrint(allocator, "{s} description", .{exe_info.step_id}),
         );
         step.dependOn(&cmd.step);
         cmd.step.dependOn(&install.step);

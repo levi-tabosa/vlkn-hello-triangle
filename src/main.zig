@@ -619,8 +619,16 @@ pub fn main() !void {
         const vertex_buffers = [_]c.VkBuffer{vertex_buffer_obj.buffer};
         const offsets = [_]c.VkDeviceSize{0};
         c.vkCmdBindVertexBuffers(command_buffer, 0, 1, &vertex_buffers, &offsets);
-
-        c.vkCmdBindDescriptorSets(command_buffer, c.VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_layout, 0, 1, &descriptor_set, 0, null);
+        c.vkCmdBindDescriptorSets(
+            command_buffer,
+            c.VK_PIPELINE_BIND_POINT_GRAPHICS,
+            pipeline_layout,
+            0,
+            1,
+            &descriptor_set,
+            0,
+            null,
+        );
 
         c.vkCmdDraw(command_buffer, vertices.len, 1, 0, 0);
 

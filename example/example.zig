@@ -84,9 +84,11 @@ const UniformBufferObject = extern struct {
 
 // --- Vertex Data ---
 // These are the two 3D vectors that define our line.
-const vertices = [_]Vertex{
+var vertex_array = [_]Vertex{
     .{ .pos = .{ -0.5, -0.5, 0.0 } },
     .{ .pos = .{ 0.5, 0.5, 0.0 } },
+    .{ .pos = .{ 0.5, -0.5, 0.0 } },
+    .{ .pos = .{ 0.6, 0.25, 0.0 } },
 };
 
 // --- Main Application Struct ---
@@ -180,7 +182,7 @@ const App = struct {
         try app.createGraphicsPipeline();
         try app.createFramebuffers();
         try app.createCommandPool();
-        try app.createVertexBuffer();
+        try app.createVertexBuffer(&vertex_array);
         try app.createCommandBuffer();
         try app.createSyncObjects();
     }
@@ -721,7 +723,7 @@ const App = struct {
         return .{ .buffer = buffer, .memory = memory };
     }
 
-    fn createVertexBuffer(app: *App) !void {
+    fn createVertexBuffer(app: *App, vertices: []Vertex) !void {
         const buffer_size = @sizeOf(Vertex) * vertices.len;
 
         const buffer = try app.createBuffer(
@@ -738,7 +740,7 @@ const App = struct {
         defer c.vkUnmapMemory(app.device, buffer.memory);
 
         const mapped_vertex_slice = @as([*]Vertex, @ptrCast(@alignCast(data_ptr)));
-        @memcpy(mapped_vertex_slice, &vertices);
+        @memcpy(mapped_vertex_slice, vertices);
     }
 
     fn createCommandBuffer(app: *App) !void {
@@ -805,10 +807,12 @@ const App = struct {
     }
 
     fn recordCommandBuffer(app: *App, image_index: u32) !void {
+        //
         const begin_info = c.VkCommandBufferBeginInfo{};
         try checkVk(c.vkBeginCommandBuffer(app.command_buffer, &begin_info));
 
-        const clear_color = c.VkClearValue{ .color = .{ .float32 = .{ 0.0, 0.0, 0.0, 1.0 } } };
+        const clear_color = c.VkClearValue{ .color = .{ .float32 = .{ 0.0, 0.0, 1.0, 1.0 } } };
+
         const render_pass_info = c.VkRenderPassBeginInfo{
             .renderPass = app.render_pass,
             .framebuffer = app.framebuffers[@intCast(image_index)],
@@ -842,7 +846,7 @@ const App = struct {
         // !!! DRAW COMMAND !!!
         // We tell Vulkan to draw `vertices.len` (which is 2) vertices.
         // Because the topology is `line_list`, this will draw one line.
-        c.vkCmdDraw(app.command_buffer, vertices.len, 1, 0, 0);
+        c.vkCmdDraw(app.command_buffer, vertex_array.len, 1, 0, 0);
 
         // End the render pass and command buffer recording.
         c.vkCmdEndRenderPass(app.command_buffer);
