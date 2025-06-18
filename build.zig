@@ -64,7 +64,7 @@ pub fn build(b: *std.Build) void {
     exe.root_module.addImport("spirv", spirv_mod);
 
     b.installArtifact(exe);
-    const example_install = b.addInstallArtifact(example, .{});
+    const example_install = b.addInstallArtifact(example, .{ .dest_dir = .{ .override = .{ .custom = "example/bin/" } } });
 
     const run_cmd = b.addRunArtifact(exe);
     // if (b.args) |args| {
