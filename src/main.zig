@@ -574,15 +574,15 @@ pub fn main() !void {
     while (c.glfwWindowShouldClose(window) == 0) {
         c.glfwPollEvents();
 
-        _ = c.vkWaitForFences(device, 1, &in_flight_fence, c.VK_TRUE, std.math.maxInt(u64));
-        _ = c.vkResetFences(device, 1, &in_flight_fence);
+        try checkVk(c.vkWaitForFences(device, 1, &in_flight_fence, c.VK_TRUE, std.math.maxInt(u64)));
+        try checkVk(c.vkResetFences(device, 1, &in_flight_fence));
 
         var image_index: u32 = undefined;
-        _ = c.vkAcquireNextImageKHR(device, swapchain, std.math.maxInt(u64), image_available_semaphore, null, &image_index);
+        try checkVk(c.vkAcquireNextImageKHR(device, swapchain, std.math.maxInt(u64), image_available_semaphore, null, &image_index));
 
-        _ = c.vkResetCommandBuffer(command_buffer, 0);
+        try checkVk(c.vkResetCommandBuffer(command_buffer, 0));
         var cmd_begin_info = c.VkCommandBufferBeginInfo{};
-        _ = c.vkBeginCommandBuffer(command_buffer, &cmd_begin_info);
+        try checkVk(c.vkBeginCommandBuffer(command_buffer, &cmd_begin_info));
 
         // --- MODIFIED --- Update uniform buffer with new color
         const current_time = std.time.milliTimestamp();
@@ -596,7 +596,7 @@ pub fn main() !void {
             },
         };
         var ubo_data_ptr: ?*anyopaque = undefined;
-        _ = c.vkMapMemory(device, uniform_buffer_obj.memory, 0, ubo_size, 0, &ubo_data_ptr);
+        try checkVk(c.vkMapMemory(device, uniform_buffer_obj.memory, 0, ubo_size, 0, &ubo_data_ptr));
         const mapped_ubo: *UniformBufferObject = @ptrCast(@alignCast(ubo_data_ptr.?));
         mapped_ubo.* = ubo;
         c.vkUnmapMemory(device, uniform_buffer_obj.memory);
@@ -645,10 +645,10 @@ pub fn main() !void {
             .pSwapchains = &swapchain,
             .pImageIndices = &image_index,
         };
-        _ = c.vkQueuePresentKHR(graphics_queue, &present_info);
+        try checkVk(c.vkQueuePresentKHR(graphics_queue, &present_info));
     }
 
-    _ = c.vkDeviceWaitIdle(device);
+    try checkVk(c.vkDeviceWaitIdle(device));
 }
 
 const Vertex = extern struct {
