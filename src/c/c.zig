@@ -2,9 +2,10 @@
 // Vulkan + GLFW C bindings and Zig-friendly re-exports
 
 const std = @import("std");
+usingnamespace c;
 
 // Import C headers and defines
-const c = @cImport({
+pub const c = @cImport({
     @cDefine("GLFW_INCLUDE_VULKAN", {});
     @cInclude("vulkan/vulkan.h");
     @cInclude("GLFW/glfw3.h");

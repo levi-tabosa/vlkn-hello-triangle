@@ -16,29 +16,41 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/main.zig"),
     });
 
-    // const example = b.addExecutable(.{
-    //     .name = "hello_triangle_example",
-    //     .target = target,
-    //     .optimize = optimize,
-    //     .root_source_file = b.path("example/example.zig"),
-    // });
+    const example = b.addExecutable(.{
+        .name = "hello_triangle_example",
+        .target = target,
+        .optimize = optimize,
+        .root_source_file = b.path("example/example.zig"),
+        .link_libc = true,
+    });
 
-    const c_mod = b.addModule("c", .{
+    const c_mod = b.addModule("c_mod", .{
         .root_source_file = b.path("src/c/c.zig"),
         .target = target,
     });
 
-    c_mod.linkSystemLibrary("vulkan", .{});
-    c_mod.linkSystemLibrary("glfw", .{});
+    const c = b.addLibrary(.{
+        .linkage = .dynamic,
+        .root_module = c_mod,
+        .name = "c",
+    });
 
-    // Link flags for GLFW on Linux
+    example.linkLibrary(c);
+
+    c.linkSystemLibrary("vulkan");
+    c.linkSystemLibrary("glfw");
+
+    // c_mod.linkSystemLibrary("vulkan", .{});
+    // c_mod.linkSystemLibrary("glfw", .{});
+
+    // // Link flags for GLFW on Linux
     if (target.result.os.tag == .linux) {
-        c_mod.linkSystemLibrary("m", .{});
-        c_mod.linkSystemLibrary("pthread", .{});
-        c_mod.linkSystemLibrary("dl", .{});
-        c_mod.linkSystemLibrary("X11", .{});
-        c_mod.linkSystemLibrary("xcb", .{});
-        c_mod.linkSystemLibrary("Xrandr", .{});
+        c.linkSystemLibrary2("m", .{});
+        c.linkSystemLibrary2("pthread", .{});
+        c.linkSystemLibrary2("dl", .{});
+        c.linkSystemLibrary2("X11", .{});
+        c.linkSystemLibrary2("xcb", .{});
+        c.linkSystemLibrary2("Xrandr", .{});
     }
 
     const spirv_mod = b.addModule("spirv", .{
@@ -47,11 +59,19 @@ pub fn build(b: *std.Build) void {
     });
 
     exe.root_module.addImport("c", c_mod);
+    example.root_module.addImport("c", c_mod);
+    example.root_module.addImport("spirv", spirv_mod);
     exe.root_module.addImport("spirv", spirv_mod);
 
     b.installArtifact(exe);
+    const example_install = b.addInstallArtifact(example, .{});
 
     const run_cmd = b.addRunArtifact(exe);
+    // if (b.args) |args| {
+    //     run_cmd.addArgs(args);
+    // }
+
+    const example_cmd = b.addRunArtifact(example);
     // if (b.args) |args| {
     //     run_cmd.addArgs(args);
     // }
@@ -63,6 +83,7 @@ pub fn build(b: *std.Build) void {
     // })
     //     .step.dependOn(b.getInstallStep());
 
-    b.step("run", "run step").dependOn(&run_cmd.step);
+    b.step("go", "example run step").dependOn(&example_cmd.step);
     run_cmd.step.dependOn(b.getInstallStep());
+    example_cmd.step.dependOn(&example_install.step);
 }
