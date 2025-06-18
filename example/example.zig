@@ -78,6 +78,10 @@ const Vertex = extern struct {
     }
 };
 
+const UniformBufferObject = extern struct {
+    color: [4]f32,
+};
+
 // --- Vertex Data ---
 // These are the two 3D vectors that define our line.
 const vertices = [_]Vertex{
@@ -97,25 +101,27 @@ const App = struct {
     window: ?*c.GLFWwindow = null,
 
     // Core Vulkan handles
-    instance: c.VkInstance = undefined,
+    instance: c.VkInstance = null,
     physical_device: c.VkPhysicalDevice = undefined,
-    device: c.VkDevice = undefined,
+    device: c.VkDevice = null,
     graphics_queue: c.VkQueue = undefined,
 
     // Window surface (the bridge between Vulkan and the window system).
-    surface: c.VkSurfaceKHR = undefined,
-    surface_format: c.VkSurfaceFormatKHR = undefined,
-    present_mode: c.VkPresentModeKHR = undefined,
+    surface: c.VkSurfaceKHR = null,
+    surface_format: c.VkSurfaceFormatKHR = .{},
+    present_mode: c.VkPresentModeKHR = 0,
 
     // Swapchain for presenting images to the screen.
-    swapchain: c.VkSwapchainKHR = undefined,
-    swapchain_images: []c.VkImage = undefined,
-    swapchain_image_views: []c.VkImageView = undefined,
+    swapchain: c.VkSwapchainKHR = null,
+    swapchain_images: []c.VkImage = &.{},
+    swapchain_image_views: []c.VkImageView = &.{},
     swapchain_extent: c.VkExtent2D = undefined,
 
     // The Graphics Pipeline
     render_pass: c.VkRenderPass = undefined,
     descriptor_set_layout: c.VkDescriptorSetLayout = undefined,
+    descriptor_pool: c.VkDescriptorPool = undefined,
+    descriptor_set: c.VkDescriptorSet = undefined,
     pipeline_layout: c.VkPipelineLayout = undefined,
     graphics_pipeline: c.VkPipeline = undefined,
 
@@ -141,9 +147,9 @@ const App = struct {
         try checkGlfw(c.glfwInit());
         defer c.glfwTerminate();
 
-        var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-        defer _ = gpa.deinit();
-        const allocator = gpa.allocator();
+        var da = std.heap.DebugAllocator(.{}){};
+        defer _ = da.deinit();
+        const allocator = da.allocator();
 
         var app = App{ .allocator = allocator };
         defer app.cleanup();
@@ -168,6 +174,8 @@ const App = struct {
         try app.createLogicalDevice();
         try app.createSwapchain();
         try app.createImageViews();
+        try app.createDescriptorSetLayout();
+        try app.createDescriptorSet();
         try app.createRenderPass();
         try app.createGraphicsPipeline();
         try app.createFramebuffers();
@@ -179,7 +187,7 @@ const App = struct {
 
     // The main application loop.
     fn run(app: *App) !void {
-        while (c.glfwWindowShouldClose(app.window) != 0) {
+        while (c.glfwWindowShouldClose(app.window) == 0) {
             c.glfwPollEvents();
             try app.drawFrame();
         }
@@ -211,7 +219,8 @@ const App = struct {
         c.vkDestroyPipeline(app.device, app.graphics_pipeline, app.alloc_callbacks);
         c.vkDestroyPipelineLayout(app.device, app.pipeline_layout, app.alloc_callbacks);
         c.vkDestroyRenderPass(app.device, app.render_pass, app.alloc_callbacks);
-        // c.vkDestroyDescriptorSetLayout(app.device, app.descriptor_set_layout, app.alloc_callbacks);
+        c.vkDestroyDescriptorPool(app.device, app.descriptor_pool, app.alloc_callbacks);
+        c.vkDestroyDescriptorSetLayout(app.device, app.descriptor_set_layout, app.alloc_callbacks);
 
         // Destroy image views
         for (app.swapchain_image_views) |iv| {
@@ -283,7 +292,6 @@ const App = struct {
 
         var props: c.VkPhysicalDeviceProperties = undefined;
         c.vkGetPhysicalDeviceProperties(app.physical_device, &props);
-        std.debug.print("Using GPU: {s}\n", .{props.deviceName});
     }
 
     fn findQueueFamilies(allocator: std.mem.Allocator, phys_device: c.VkPhysicalDevice, surface: c.VkSurfaceKHR) !u32 {
@@ -299,7 +307,7 @@ const App = struct {
             if (family_prop.queueFlags & c.VK_QUEUE_GRAPHICS_BIT != 0) {
                 // We also need a queue that can present to our surface.
                 var present_support: c.VkBool32 = c.VK_FALSE;
-                _ = c.vkGetPhysicalDeviceSurfaceSupportKHR(phys_device, @intCast(i), surface, &present_support);
+                try checkVk(c.vkGetPhysicalDeviceSurfaceSupportKHR(phys_device, @intCast(i), surface, &present_support));
 
                 // *** THE FIX IS HERE ***
                 if (present_support == c.VK_TRUE) {
@@ -475,11 +483,34 @@ const App = struct {
         };
 
         var layout_info = c.VkDescriptorSetLayoutCreateInfo{
+            .sType = c.VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
             .bindingCount = 1,
             .pBindings = &ubo_layout_binding,
         };
 
         try checkVk(c.vkCreateDescriptorSetLayout(app.device, &layout_info, app.alloc_callbacks, &app.descriptor_set_layout));
+    }
+
+    fn createDescriptorSet(app: *App) !void {
+        var pool_size = c.VkDescriptorPoolSize{
+            .type = c.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+            .descriptorCount = 1, // We only need one descriptor
+        };
+        var pool_info = c.VkDescriptorPoolCreateInfo{
+            .poolSizeCount = 1,
+            .pPoolSizes = &pool_size,
+            .maxSets = 1, // We only need one set
+        };
+
+        try checkVk(c.vkCreateDescriptorPool(app.device, &pool_info, null, &app.descriptor_pool));
+        // defer c.vkDestroyDescriptorPool(app.device, descriptor_pool, null);
+
+        var set_alloc_info = c.VkDescriptorSetAllocateInfo{
+            .descriptorPool = app.descriptor_pool,
+            .descriptorSetCount = 1,
+            .pSetLayouts = &app.descriptor_set_layout,
+        };
+        try checkVk(c.vkAllocateDescriptorSets(app.device, &set_alloc_info, &app.descriptor_set));
     }
 
     fn createShaderModule(allocator: std.mem.Allocator, device: c.VkDevice, code: []const u8, allocation_callbacks: ?*c.VkAllocationCallbacks) !c.VkShaderModule {
@@ -505,7 +536,9 @@ const App = struct {
 
     fn createGraphicsPipeline(app: *App) !void {
         const vert_shader_module = try createShaderModule(app.allocator, app.device, vert_shader_code, app.alloc_callbacks);
+        defer c.vkDestroyShaderModule(app.device, vert_shader_module, app.alloc_callbacks);
         const frag_shader_module = try createShaderModule(app.allocator, app.device, frag_shader_code, app.alloc_callbacks);
+        defer c.vkDestroyShaderModule(app.device, frag_shader_module, app.alloc_callbacks);
 
         const vert_shader_stage_info = c.VkPipelineShaderStageCreateInfo{
             .stage = c.VK_SHADER_STAGE_VERTEX_BIT,
@@ -552,7 +585,8 @@ const App = struct {
             .extent = app.swapchain_extent,
         };
 
-        const viewport_state = c.VkPipelineViewportStateCreateInfo{
+        var viewport_state = c.VkPipelineViewportStateCreateInfo{
+            .sType = c.VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
             .viewportCount = 1,
             .pViewports = &viewport,
             .scissorCount = 1,
@@ -560,6 +594,7 @@ const App = struct {
         };
 
         var rasterizer = c.VkPipelineRasterizationStateCreateInfo{
+            .sType = c.VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
             .depthClampEnable = c.VK_FALSE,
             .rasterizerDiscardEnable = c.VK_FALSE,
             .polygonMode = c.VK_POLYGON_MODE_FILL,
@@ -569,7 +604,8 @@ const App = struct {
             .depthBiasEnable = c.VK_FALSE,
         };
 
-        const multisampling = c.VkPipelineMultisampleStateCreateInfo{
+        var multisampling = c.VkPipelineMultisampleStateCreateInfo{
+            .sType = c.VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
             .sampleShadingEnable = c.VK_FALSE,
             .rasterizationSamples = c.VK_SAMPLE_COUNT_1_BIT,
         };
@@ -578,41 +614,38 @@ const App = struct {
             .colorWriteMask = c.VK_COLOR_COMPONENT_R_BIT | c.VK_COLOR_COMPONENT_G_BIT | c.VK_COLOR_COMPONENT_B_BIT | c.VK_COLOR_COMPONENT_A_BIT,
             .blendEnable = c.VK_FALSE,
         };
-        var color_blending: c.VkPipelineColorBlendStateCreateInfo = .{};
-        color_blending.sType = c.VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
-        color_blending.logicOpEnable = c.VK_FALSE;
-        // color_blending.logicOp is now VK_LOGIC_OP_COPY (0) by default
-        color_blending.attachmentCount = 1;
-        color_blending.pAttachments = &color_blend_attachment;
+        var color_blending = c.VkPipelineColorBlendStateCreateInfo{
+            .sType = c.VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+            .logicOpEnable = c.VK_FALSE,
+            .attachmentCount = 1,
+            .pAttachments = &color_blend_attachment,
+        };
         // color_blending.blendConstants are now {0,0,0,0} by default
 
         // For this simple example, we don't have any uniforms, so the layout is empty.
-        const pipeline_layout_info = c.VkPipelineLayoutCreateInfo{
-            .setLayoutCount = 0,
-            // .pSetLayouts = &app.descriptor_set_layout,
-            .pSetLayouts = null,
+        var pipeline_layout_info = c.VkPipelineLayoutCreateInfo{
+            .sType = c.VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+            .setLayoutCount = 1,
+            .pSetLayouts = &app.descriptor_set_layout,
         };
         try checkVk(c.vkCreatePipelineLayout(app.device, &pipeline_layout_info, null, &app.pipeline_layout));
 
-        var pipeline_info: c.VkGraphicsPipelineCreateInfo = .{}; // Zero-init this too!
-        pipeline_info.sType = c.VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO; // Don't forget sType
-        pipeline_info.stageCount = shader_stages.len;
-        pipeline_info.pStages = &shader_stages;
-        pipeline_info.pVertexInputState = &vertex_input_info;
-        pipeline_info.pInputAssemblyState = &input_assembly;
-        // .pTessellationState is null
-        pipeline_info.pViewportState = &viewport_state;
-        pipeline_info.pRasterizationState = &rasterizer;
-        pipeline_info.pMultisampleState = &multisampling;
-        // .pDepthStencilState is null
-        pipeline_info.pColorBlendState = &color_blending;
-        // .pDynamicState is null
-        pipeline_info.layout = app.pipeline_layout;
-        pipeline_info.renderPass = app.render_pass;
-        pipeline_info.subpass = 0;
+        var pipeline_info = c.VkGraphicsPipelineCreateInfo{
+            .sType = c.VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+            .stageCount = shader_stages.len,
+            .pStages = &shader_stages,
+            .pVertexInputState = &vertex_input_info,
+            .pInputAssemblyState = &input_assembly,
+            .pViewportState = &viewport_state,
+            .pRasterizationState = &rasterizer,
+            .pMultisampleState = &multisampling,
+            .pColorBlendState = &color_blending,
+            .layout = app.pipeline_layout,
+            .renderPass = app.render_pass,
+            .subpass = 0,
+        };
 
-        std.debug.print("graphics pipeline: {any}\ninfo: {any}\n", .{ app.graphics_pipeline, pipeline_info });
-        try checkVk(c.vkCreateGraphicsPipelines(app.device, null, 1, &pipeline_info, app.alloc_callbacks, &app.graphics_pipeline));
+        try checkVk(c.vkCreateGraphicsPipelines(app.device, null, 1, &pipeline_info, null, &app.graphics_pipeline));
     }
 
     fn createFramebuffers(app: *App) !void {
@@ -642,45 +675,50 @@ const App = struct {
     }
 
     // --- Buffer Creation Helper ---
-    fn findMemoryType(app: *App, type_filter: u32, properties: c.VkMemoryPropertyFlags) !u32 {
+    fn findMemoryType(
+        physical_device: c.VkPhysicalDevice,
+        type_filter: u32,
+        properties: c.VkMemoryPropertyFlags,
+    ) !u32 {
         var mem_properties: c.VkPhysicalDeviceMemoryProperties = undefined;
-        c.vkGetPhysicalDeviceMemoryProperties(app.physical_device, &mem_properties);
-        var i: u32 = 0;
+        c.vkGetPhysicalDeviceMemoryProperties(physical_device, &mem_properties);
+
+        const set: u64 = 1;
+        var i: u5 = 0;
         while (i < mem_properties.memoryTypeCount) : (i += 1) {
-            if ((type_filter & (@as(u32, 1) << @intCast(i))) != 0 and (mem_properties.memoryTypes[i].propertyFlags & properties) == properties) {
+            if ((type_filter & set << i) != 0 and (mem_properties.memoryTypes[i].propertyFlags & properties) == properties) {
                 return i;
             }
         }
-        return error.NoSuitableMemoryType;
+        return error.MissingMemoryType;
     }
 
     fn createBuffer(
-        app: *App,
+        app: App,
         size: c.VkDeviceSize,
         usage: c.VkBufferUsageFlags,
         properties: c.VkMemoryPropertyFlags,
     ) !struct { buffer: c.VkBuffer, memory: c.VkDeviceMemory } {
-        const buffer_info = c.VkBufferCreateInfo{
+        var buffer_info = c.VkBufferCreateInfo{
             .size = size,
             .usage = usage,
             .sharingMode = c.VK_SHARING_MODE_EXCLUSIVE,
         };
         var buffer: c.VkBuffer = undefined;
-        try checkVk(c.vkCreateBuffer(app.device, &buffer_info, app.alloc_callbacks, &buffer));
+        try checkVk(c.vkCreateBuffer(app.device, &buffer_info, null, &buffer));
 
         var mem_requirements: c.VkMemoryRequirements = undefined;
         c.vkGetBufferMemoryRequirements(app.device, buffer, &mem_requirements);
 
-        const alloc_info = c.VkMemoryAllocateInfo{
+        var alloc_info = c.VkMemoryAllocateInfo{
             .allocationSize = mem_requirements.size,
-            .memoryTypeIndex = try app.findMemoryType(mem_requirements.memoryTypeBits, properties),
+            .memoryTypeIndex = try findMemoryType(app.physical_device, mem_requirements.memoryTypeBits, properties),
         };
-
         var memory: c.VkDeviceMemory = undefined;
-        try checkVk(c.vkAllocateMemory(app.device, &alloc_info, app.alloc_callbacks, &memory));
-        errdefer c.vkFreeMemory(app.device, memory, null);
+        try checkVk(c.vkAllocateMemory(app.device, &alloc_info, null, &memory));
 
         try checkVk(c.vkBindBufferMemory(app.device, buffer, memory, 0));
+
         return .{ .buffer = buffer, .memory = memory };
     }
 
@@ -714,13 +752,14 @@ const App = struct {
     }
 
     fn createSyncObjects(app: *App) !void {
-        const semaphore_info = c.VkSemaphoreCreateInfo{};
-        const fence_info = c.VkFenceCreateInfo{
+        const sync_create_info = c.VkSemaphoreCreateInfo{};
+        const fence_create_info = c.VkFenceCreateInfo{
             .flags = c.VK_FENCE_CREATE_SIGNALED_BIT,
         }; // Create signaled so first frame doesn't wait.
 
-        try checkVk(c.vkCreateSemaphore(app.device, &semaphore_info, app.alloc_callbacks, &app.image_available_semaphore));
-        try checkVk(c.vkCreateFence(app.device, &fence_info, app.alloc_callbacks, &app.in_flight_fence));
+        try checkVk(c.vkCreateSemaphore(app.device, &sync_create_info, app.alloc_callbacks, &app.image_available_semaphore));
+        try checkVk(c.vkCreateSemaphore(app.device, &sync_create_info, app.alloc_callbacks, &app.render_finished_semaphore));
+        try checkVk(c.vkCreateFence(app.device, &fence_create_info, app.alloc_callbacks, &app.in_flight_fence));
     }
 
     // --- Per-frame Drawing Logic ---
@@ -763,7 +802,7 @@ const App = struct {
             .pImageIndices = &image_index,
         };
 
-        _ = c.vkQueuePresentKHR(app.graphics_queue, &present_info);
+        try checkVk(c.vkQueuePresentKHR(app.graphics_queue, &present_info));
     }
 
     fn recordCommandBuffer(app: *App, image_index: u32) !void {
@@ -790,16 +829,16 @@ const App = struct {
         const vertex_buffers = [_]c.VkBuffer{app.vertex_buffer};
         const offsets = [_]c.VkDeviceSize{0};
         c.vkCmdBindVertexBuffers(app.command_buffer, 0, 1, &vertex_buffers, &offsets);
-        // c.vkCmdBindDescriptorSets(
-        //     app.command_buffer,
-        //     c.VK_PIPELINE_BIND_POINT_GRAPHICS,
-        //     app.pipeline_layout,
-        //     0,
-        //     1,
-        //     &app.descriptor_set,
-        //     0,
-        //     null,
-        // );
+        c.vkCmdBindDescriptorSets(
+            app.command_buffer,
+            c.VK_PIPELINE_BIND_POINT_GRAPHICS,
+            app.pipeline_layout,
+            0,
+            1,
+            &app.descriptor_set,
+            0,
+            null,
+        );
 
         // !!! DRAW COMMAND !!!
         // We tell Vulkan to draw `vertices.len` (which is 2) vertices.

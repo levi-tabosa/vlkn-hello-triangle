@@ -83,7 +83,7 @@ pub fn build(b: *std.Build) void {
     // })
     //     .step.dependOn(b.getInstallStep());
 
-    b.step("go", "example run step").dependOn(&example_cmd.step);
     run_cmd.step.dependOn(b.getInstallStep());
+    b.step("go", "example run step").dependOn(&example_cmd.step);
     example_cmd.step.dependOn(&example_install.step);
 }

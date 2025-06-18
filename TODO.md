@@ -1,0 +1,1 @@
+liberar recursos apos uso em funçoes `create` decriptor e tal
