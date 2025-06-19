@@ -102,7 +102,7 @@ fn createBuffer(
     var memory: c.VkDeviceMemory = undefined;
     try checkVk(c.vkAllocateMemory(device, &alloc_info, null, &memory));
 
-    _ = c.vkBindBufferMemory(device, buffer, memory, 0);
+    try checkVk(c.vkBindBufferMemory(device, buffer, memory, 0));
 
     return .{ .buffer = buffer, .memory = memory };
 }
@@ -178,12 +178,12 @@ pub fn main() !void {
 
     // 4. Pick Physical Device (GPU)
     var device_count: u32 = 0;
-    _ = c.vkEnumeratePhysicalDevices(instance, &device_count, null);
+    try checkVk(c.vkEnumeratePhysicalDevices(instance, &device_count, null));
     if (device_count == 0) return AppError.NoSuitableGpu;
 
     const devices = try allocator.alloc(c.VkPhysicalDevice, device_count);
     defer allocator.free(devices);
-    _ = c.vkEnumeratePhysicalDevices(instance, &device_count, devices.ptr);
+    try checkVk(c.vkEnumeratePhysicalDevices(instance, &device_count, devices.ptr));
 
     const physical_device = devices[0];
 
@@ -232,7 +232,7 @@ pub fn main() !void {
 
     // 6. Create Swap Chain
     var capabilities: c.VkSurfaceCapabilitiesKHR = undefined;
-    _ = c.vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physical_device, surface, &capabilities);
+    try checkVk(c.vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physical_device, surface, &capabilities));
 
     const surface_format = c.VkSurfaceFormatKHR{
         .format = c.VK_FORMAT_B8G8R8A8_SRGB,
@@ -260,10 +260,10 @@ pub fn main() !void {
     defer c.vkDestroySwapchainKHR(device, swapchain, null);
 
     var image_count: u32 = 0;
-    _ = c.vkGetSwapchainImagesKHR(device, swapchain, &image_count, null);
+    try checkVk(c.vkGetSwapchainImagesKHR(device, swapchain, &image_count, null));
     const swapchain_images = try allocator.alloc(c.VkImage, image_count);
     defer allocator.free(swapchain_images);
-    _ = c.vkGetSwapchainImagesKHR(device, swapchain, &image_count, swapchain_images.ptr);
+    try checkVk(c.vkGetSwapchainImagesKHR(device, swapchain, &image_count, swapchain_images.ptr));
 
     // 7. Create Image Views
     var swapchain_image_views = try allocator.alloc(c.VkImageView, image_count);
@@ -324,7 +324,6 @@ pub fn main() !void {
         .pAttachments = &color_attachment,
         .subpassCount = 1,
         .pSubpasses = &subpass,
-        // --- MODIFIED --- Add dependency for layout transitions
         .dependencyCount = 1,
         .pDependencies = &subpass_dep,
     };
@@ -391,7 +390,12 @@ pub fn main() !void {
         .minDepth = 0.0,
         .maxDepth = 1.0,
     };
-    var scissor = c.VkRect2D{ .offset = .{ .x = 0, .y = 0 }, .extent = capabilities.currentExtent };
+
+    var scissor = c.VkRect2D{
+        .offset = .{ .x = 0, .y = 0 },
+        .extent = capabilities.currentExtent,
+    };
+
     var viewport_state = c.VkPipelineViewportStateCreateInfo{
         .viewportCount = 1,
         .pViewports = &viewport,
@@ -429,7 +433,12 @@ pub fn main() !void {
         .pSetLayouts = &descriptor_set_layout,
     };
     var pipeline_layout: c.VkPipelineLayout = undefined;
-    try checkVk(c.vkCreatePipelineLayout(device, &pipeline_layout_info, null, &pipeline_layout));
+    try checkVk(c.vkCreatePipelineLayout(
+        device,
+        &pipeline_layout_info,
+        null,
+        &pipeline_layout,
+    ));
     defer c.vkDestroyPipelineLayout(device, pipeline_layout, null);
 
     var pipeline_info = c.VkGraphicsPipelineCreateInfo{
@@ -445,9 +454,15 @@ pub fn main() !void {
         .renderPass = render_pass,
         .subpass = 0,
     };
-
     var graphics_pipeline: c.VkPipeline = undefined;
-    try checkVk(c.vkCreateGraphicsPipelines(device, null, 1, &pipeline_info, null, &graphics_pipeline));
+    try checkVk(c.vkCreateGraphicsPipelines(
+        device,
+        null,
+        1,
+        &pipeline_info,
+        null,
+        &graphics_pipeline,
+    ));
     defer c.vkDestroyPipeline(device, graphics_pipeline, null);
 
     // 10. Create Framebuffers
@@ -483,7 +498,7 @@ pub fn main() !void {
 
     // Copy vertex data to the buffer
     var data_ptr: ?*anyopaque = undefined;
-    _ = c.vkMapMemory(device, vertex_buffer_obj.memory, 0, vertex_buffer_size, 0, &data_ptr);
+    try checkVk(c.vkMapMemory(device, vertex_buffer_obj.memory, 0, vertex_buffer_size, 0, &data_ptr));
     const mapped_memory: [*]Vertex = @ptrCast(@alignCast(data_ptr.?));
     @memcpy(mapped_memory[0..vertices.len], &vertices);
     c.vkUnmapMemory(device, vertex_buffer_obj.memory);
@@ -505,13 +520,20 @@ pub fn main() !void {
         .type = c.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
         .descriptorCount = 1, // We only need one descriptor
     };
+
     var pool_info = c.VkDescriptorPoolCreateInfo{
         .poolSizeCount = 1,
         .pPoolSizes = &pool_size,
         .maxSets = 1, // We only need one set
     };
+
     var descriptor_pool: c.VkDescriptorPool = undefined;
-    try checkVk(c.vkCreateDescriptorPool(device, &pool_info, null, &descriptor_pool));
+    try checkVk(c.vkCreateDescriptorPool(
+        device,
+        &pool_info,
+        null,
+        &descriptor_pool,
+    ));
     defer c.vkDestroyDescriptorPool(device, descriptor_pool, null);
 
     var set_alloc_info = c.VkDescriptorSetAllocateInfo{
@@ -519,6 +541,7 @@ pub fn main() !void {
         .descriptorSetCount = 1,
         .pSetLayouts = &descriptor_set_layout,
     };
+
     var descriptor_set: c.VkDescriptorSet = undefined;
     try checkVk(c.vkAllocateDescriptorSets(device, &set_alloc_info, &descriptor_set));
 

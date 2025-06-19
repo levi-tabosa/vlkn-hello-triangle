@@ -142,6 +142,8 @@ const App = struct {
     // GPU buffer for our vertex data.
     vertex_buffer: c.VkBuffer = undefined,
     vertex_buffer_memory: c.VkDeviceMemory = undefined,
+    uniform_buffer: c.VkBuffer = undefined,
+    uniform_buffer_memory: c.VkDeviceMemory = undefined,
 
     // --- Entry Point ---
     pub fn main() !void {
@@ -153,7 +155,7 @@ const App = struct {
         defer _ = da.deinit();
         const allocator = da.allocator();
 
-        var app = App{ .allocator = allocator };
+        var app = Self{ .allocator = allocator };
         defer app.cleanup();
 
         try app.initWindow();
@@ -161,7 +163,7 @@ const App = struct {
         try app.run();
     }
 
-    fn initWindow(self: *App) !void {
+    fn initWindow(self: *Self) !void {
         c.glfwWindowHint(c.GLFW_CLIENT_API, c.GLFW_NO_API);
         c.glfwWindowHint(c.GLFW_RESIZABLE, c.GLFW_NO_API);
 
@@ -169,26 +171,27 @@ const App = struct {
         if (self.window == null) return error.GlfwCreateWindowFailed;
     }
 
-    fn initVulkan(app: *App) !void {
+    fn initVulkan(app: *Self) !void {
         try app.createInstance();
         try app.createSurface();
         try app.pickPhysicalDevice();
-        try app.createLogicalDevice();
+        try app.createLogicalDeviceAndQueues();
         try app.createSwapchain();
         try app.createImageViews();
+        try app.createVertexBuffer(Vertex, &vertex_array);
+        try app.createUniformBuffer(Vertex);
         try app.createDescriptorSetLayout();
-        try app.createDescriptorSet();
+        try app.createDescriptorPoolAndSets();
         try app.createRenderPass();
         try app.createGraphicsPipeline();
         try app.createFramebuffers();
         try app.createCommandPool();
-        try app.createVertexBuffer(&vertex_array);
         try app.createCommandBuffer();
         try app.createSyncObjects();
     }
 
     // The main application loop.
-    fn run(app: *App) !void {
+    fn run(app: *Self) !void {
         while (c.glfwWindowShouldClose(app.window) == 0) {
             c.glfwPollEvents();
             try app.drawFrame();
@@ -198,7 +201,7 @@ const App = struct {
     }
 
     // The cleanup function, destroying Vulkan objects in reverse order of creation.
-    fn cleanup(app: *App) void {
+    fn cleanup(app: *Self) void {
         // Destroy synchronization objects
         c.vkDestroySemaphore(app.device, app.image_available_semaphore, app.alloc_callbacks);
         c.vkDestroySemaphore(app.device, app.render_finished_semaphore, app.alloc_callbacks);
@@ -206,7 +209,10 @@ const App = struct {
 
         // Destroy buffers and memory
         c.vkDestroyBuffer(app.device, app.vertex_buffer, app.alloc_callbacks);
+        c.vkDestroyBuffer(app.device, app.uniform_buffer, app.alloc_callbacks);
+
         c.vkFreeMemory(app.device, app.vertex_buffer_memory, app.alloc_callbacks);
+        c.vkFreeMemory(app.device, app.uniform_buffer_memory, app.alloc_callbacks);
 
         // Destroy command pool (which also frees command buffers)
         c.vkDestroyCommandPool(app.device, app.command_pool, app.alloc_callbacks);
@@ -247,7 +253,7 @@ const App = struct {
 
     // --- Vulkan Setup Functions ---
 
-    fn createInstance(app: *App) !void {
+    fn createInstance(app: *Self) !void {
         const app_info = c.VkApplicationInfo{
             .pApplicationName = "Vulkan Line App",
             .applicationVersion = c.VK_MAKE_API_VERSION(0, 1, 0, 0),
@@ -270,11 +276,11 @@ const App = struct {
         try checkVk(c.vkCreateInstance(&create_info, app.alloc_callbacks, &app.instance));
     }
 
-    fn createSurface(app: *App) !void {
+    fn createSurface(app: *Self) !void {
         try checkVk(c.glfwCreateWindowSurface(app.instance, app.window, app.alloc_callbacks, &app.surface));
     }
 
-    fn pickPhysicalDevice(app: *App) !void {
+    fn pickPhysicalDevice(app: *Self) !void {
         var device_count: u32 = 0;
         // 1. First call to get the count
         try checkVk(c.vkEnumeratePhysicalDevices(app.instance, &device_count, null));
@@ -321,7 +327,7 @@ const App = struct {
         return error.NoSuitableQueueFamily;
     }
 
-    fn createLogicalDevice(app: *App) !void {
+    fn createLogicalDeviceAndQueues(app: *Self) !void {
         const queue_family_index = try findQueueFamilies(app.allocator, app.physical_device, app.surface);
         const queue_priority: f32 = 1.0;
         const queue_create_info = c.VkDeviceQueueCreateInfo{
@@ -349,7 +355,7 @@ const App = struct {
         c.vkGetDeviceQueue(app.device, queue_family_index, 0, &app.graphics_queue);
     }
 
-    fn createSwapchain(app: *App) !void {
+    fn createSwapchain(app: *Self) !void {
         // --- Choose Swapchain Settings ---
         var format_count: u32 = undefined;
         try checkVk(c.vkGetPhysicalDeviceSurfaceFormatsKHR(app.physical_device, app.surface, &format_count, null));
@@ -405,7 +411,7 @@ const App = struct {
         app.swapchain_images = swapchain_images;
     }
 
-    fn createImageViews(app: *App) !void {
+    fn createImageViews(app: *Self) !void {
         app.swapchain_image_views = app.allocator.alloc(c.VkImageView, app.swapchain_images.len) catch @panic("OOM");
         for (app.swapchain_images, 0..) |image, i| {
             const create_info = c.VkImageViewCreateInfo{
@@ -430,7 +436,7 @@ const App = struct {
         }
     }
 
-    fn createRenderPass(app: *App) !void {
+    fn createRenderPass(app: *Self) !void {
         var color_attachment = c.VkAttachmentDescription{
             .format = app.surface_format.format,
             .samples = c.VK_SAMPLE_COUNT_1_BIT,
@@ -474,7 +480,7 @@ const App = struct {
         try checkVk(c.vkCreateRenderPass(app.device, &create_info, app.alloc_callbacks, &app.render_pass));
     }
 
-    fn createDescriptorSetLayout(app: *App) !void {
+    fn createDescriptorSetLayout(app: *Self) !void {
         var ubo_layout_binding = c.VkDescriptorSetLayoutBinding{
             .binding = 0,
             .descriptorType = c.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
@@ -492,9 +498,9 @@ const App = struct {
         try checkVk(c.vkCreateDescriptorSetLayout(app.device, &layout_info, app.alloc_callbacks, &app.descriptor_set_layout));
     }
 
-    fn createDescriptorSet(app: *App) !void {
+    fn createDescriptorPoolAndSets(self: *Self) !void {
         var pool_size = c.VkDescriptorPoolSize{
-            .type = c.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+            .type = c.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, // uniform
             .descriptorCount = 1, // We only need one descriptor
         };
         var pool_info = c.VkDescriptorPoolCreateInfo{
@@ -503,15 +509,39 @@ const App = struct {
             .maxSets = 1, // We only need one set
         };
 
-        try checkVk(c.vkCreateDescriptorPool(app.device, &pool_info, null, &app.descriptor_pool));
-        // defer c.vkDestroyDescriptorPool(app.device, descriptor_pool, null);
+        // get handle to descriptor pool
+        try checkVk(c.vkCreateDescriptorPool(
+            self.device,
+            &pool_info,
+            self.alloc_callbacks,
+            &self.descriptor_pool,
+        ));
 
         var set_alloc_info = c.VkDescriptorSetAllocateInfo{
-            .descriptorPool = app.descriptor_pool,
+            .descriptorPool = self.descriptor_pool,
             .descriptorSetCount = 1,
-            .pSetLayouts = &app.descriptor_set_layout,
+            .pSetLayouts = &self.descriptor_set_layout,
         };
-        try checkVk(c.vkAllocateDescriptorSets(app.device, &set_alloc_info, &app.descriptor_set));
+
+        // get handle to descriptor set
+        try checkVk(c.vkAllocateDescriptorSets(self.device, &set_alloc_info, &self.descriptor_set));
+
+        var desc_buffer_info = c.VkDescriptorBufferInfo{
+            .buffer = self.uniform_buffer,
+            .offset = 0,
+            .range = @sizeOf(UniformBufferObject),
+        };
+
+        var desc_write = c.VkWriteDescriptorSet{
+            .dstSet = self.descriptor_set,
+            .dstBinding = 0,
+            .dstArrayElement = 0,
+            .descriptorType = c.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+            .descriptorCount = 1,
+            .pBufferInfo = &desc_buffer_info,
+        };
+        std.debug.print("{any}\n", .{desc_write});
+        c.vkUpdateDescriptorSets(self.device, 1, &desc_write, 0, null);
     }
 
     fn createShaderModule(allocator: std.mem.Allocator, device: c.VkDevice, code: []const u8, allocation_callbacks: ?*c.VkAllocationCallbacks) !c.VkShaderModule {
@@ -535,7 +565,7 @@ const App = struct {
         return shader_module;
     }
 
-    fn createGraphicsPipeline(app: *App) !void {
+    fn createGraphicsPipeline(app: *Self) !void {
         const vert_shader_module = try createShaderModule(app.allocator, app.device, vert_shader_code, app.alloc_callbacks);
         defer c.vkDestroyShaderModule(app.device, vert_shader_module, app.alloc_callbacks);
         const frag_shader_module = try createShaderModule(app.allocator, app.device, frag_shader_code, app.alloc_callbacks);
@@ -565,9 +595,6 @@ const App = struct {
         };
 
         const input_assembly = c.VkPipelineInputAssemblyStateCreateInfo{
-            // !!! THIS IS THE KEY PART FOR DRAWING A LINE !!!
-            // We tell Vulkan to interpret the vertex data as a list of lines.
-            // Every 2 vertices will form a line.
             .topology = c.VK_PRIMITIVE_TOPOLOGY_LINE_LIST,
             .primitiveRestartEnable = c.VK_FALSE,
         };
@@ -587,7 +614,6 @@ const App = struct {
         };
 
         var viewport_state = c.VkPipelineViewportStateCreateInfo{
-            .sType = c.VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
             .viewportCount = 1,
             .pViewports = &viewport,
             .scissorCount = 1,
@@ -595,7 +621,6 @@ const App = struct {
         };
 
         var rasterizer = c.VkPipelineRasterizationStateCreateInfo{
-            .sType = c.VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
             .depthClampEnable = c.VK_FALSE,
             .rasterizerDiscardEnable = c.VK_FALSE,
             .polygonMode = c.VK_POLYGON_MODE_FILL,
@@ -606,7 +631,6 @@ const App = struct {
         };
 
         var multisampling = c.VkPipelineMultisampleStateCreateInfo{
-            .sType = c.VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
             .sampleShadingEnable = c.VK_FALSE,
             .rasterizationSamples = c.VK_SAMPLE_COUNT_1_BIT,
         };
@@ -616,23 +640,24 @@ const App = struct {
             .blendEnable = c.VK_FALSE,
         };
         var color_blending = c.VkPipelineColorBlendStateCreateInfo{
-            .sType = c.VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
             .logicOpEnable = c.VK_FALSE,
             .attachmentCount = 1,
             .pAttachments = &color_blend_attachment,
         };
-        // color_blending.blendConstants are now {0,0,0,0} by default
 
-        // For this simple example, we don't have any uniforms, so the layout is empty.
         var pipeline_layout_info = c.VkPipelineLayoutCreateInfo{
-            .sType = c.VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
             .setLayoutCount = 1,
             .pSetLayouts = &app.descriptor_set_layout,
         };
-        try checkVk(c.vkCreatePipelineLayout(app.device, &pipeline_layout_info, null, &app.pipeline_layout));
+
+        try checkVk(c.vkCreatePipelineLayout(
+            app.device,
+            &pipeline_layout_info,
+            app.alloc_callbacks,
+            &app.pipeline_layout,
+        ));
 
         var pipeline_info = c.VkGraphicsPipelineCreateInfo{
-            .sType = c.VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
             .stageCount = shader_stages.len,
             .pStages = &shader_stages,
             .pVertexInputState = &vertex_input_info,
@@ -646,10 +671,17 @@ const App = struct {
             .subpass = 0,
         };
 
-        try checkVk(c.vkCreateGraphicsPipelines(app.device, null, 1, &pipeline_info, null, &app.graphics_pipeline));
+        try checkVk(c.vkCreateGraphicsPipelines(
+            app.device,
+            null,
+            1,
+            &pipeline_info,
+            app.alloc_callbacks,
+            &app.graphics_pipeline,
+        ));
     }
 
-    fn createFramebuffers(app: *App) !void {
+    fn createFramebuffers(app: *Self) !void {
         app.framebuffers = try app.allocator.alloc(c.VkFramebuffer, app.swapchain_image_views.len);
         for (app.swapchain_image_views, 0..) |image_view, i| {
             const attachments = [_]c.VkImageView{image_view};
@@ -665,7 +697,7 @@ const App = struct {
         }
     }
 
-    fn createCommandPool(app: *App) !void {
+    fn createCommandPool(app: *Self) !void {
         const queue_family_index = try findQueueFamilies(app.allocator, app.physical_device, app.surface);
         var cmd_pool_info = c.VkCommandPoolCreateInfo{
             .flags = c.VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
@@ -695,7 +727,7 @@ const App = struct {
     }
 
     fn createBuffer(
-        app: App,
+        app: Self,
         size: c.VkDeviceSize,
         usage: c.VkBufferUsageFlags,
         properties: c.VkMemoryPropertyFlags,
@@ -723,8 +755,8 @@ const App = struct {
         return .{ .buffer = buffer, .memory = memory };
     }
 
-    fn createVertexBuffer(app: *App, vertices: []Vertex) !void {
-        const buffer_size = @sizeOf(Vertex) * vertices.len;
+    fn createVertexBuffer(app: *Self, comptime vertex: type, vertices: []vertex) !void {
+        const buffer_size = @sizeOf(vertex) * vertices.len;
 
         const buffer = try app.createBuffer(
             buffer_size,
@@ -743,7 +775,22 @@ const App = struct {
         @memcpy(mapped_vertex_slice, vertices);
     }
 
-    fn createCommandBuffer(app: *App) !void {
+    fn createUniformBuffer(
+        self: *Self,
+        comptime vertex: type,
+    ) !void {
+        const ubo_size = @sizeOf(vertex);
+        const uniform_buffer_obj = try self.createBuffer(
+            ubo_size,
+            c.VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+            c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+        );
+
+        self.uniform_buffer = uniform_buffer_obj.buffer;
+        self.uniform_buffer_memory = uniform_buffer_obj.memory;
+    }
+
+    fn createCommandBuffer(app: *Self) !void {
         const alloc_info = c.VkCommandBufferAllocateInfo{
             .commandPool = app.command_pool,
             .level = c.VK_COMMAND_BUFFER_LEVEL_PRIMARY,
@@ -752,7 +799,7 @@ const App = struct {
         try checkVk(c.vkAllocateCommandBuffers(app.device, &alloc_info, &app.command_buffer));
     }
 
-    fn createSyncObjects(app: *App) !void {
+    fn createSyncObjects(app: *Self) !void {
         const sync_create_info = c.VkSemaphoreCreateInfo{};
         const fence_create_info = c.VkFenceCreateInfo{
             .flags = c.VK_FENCE_CREATE_SIGNALED_BIT,
@@ -764,7 +811,7 @@ const App = struct {
     }
 
     // --- Per-frame Drawing Logic ---
-    fn drawFrame(app: *App) !void {
+    fn drawFrame(app: *Self) !void {
         // Wait for the previous frame's fence to be signaled (meaning it's done rendering).
         try checkVk(c.vkWaitForFences(app.device, 1, &app.in_flight_fence, c.VK_TRUE, std.math.maxInt(u64)));
         try checkVk(c.vkResetFences(app.device, 1, &app.in_flight_fence));
@@ -806,7 +853,7 @@ const App = struct {
         try checkVk(c.vkQueuePresentKHR(app.graphics_queue, &present_info));
     }
 
-    fn recordCommandBuffer(app: *App, image_index: u32) !void {
+    fn recordCommandBuffer(app: *Self, image_index: u32) !void {
         //
         const begin_info = c.VkCommandBufferBeginInfo{};
         try checkVk(c.vkBeginCommandBuffer(app.command_buffer, &begin_info));
