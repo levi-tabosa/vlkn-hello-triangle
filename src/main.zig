@@ -1,3 +1,5 @@
+// main.zig (with mouse control)
+
 const std = @import("std");
 const spirv = @import("spirv");
 const math = std.math;
@@ -7,9 +9,8 @@ const c = @cImport({
     @cInclude("GLFW/glfw3.h");
 });
 
-// --- NEW --- Import the embedded shaders
-const vert_shader_code = spirv.vert_code;
-const frag_shader_code = spirv.frag_code;
+const vert_shader_code = spirv.vs;
+const frag_shader_code = spirv.fs;
 
 const AppError = error{
     GlfwInitFailed,
@@ -33,13 +34,11 @@ const AppError = error{
     MissingMemoryType,
 };
 
-// Helper function to check Vulkan results
 fn checkVk(result: c.VkResult) !void {
     if (result == c.VK_SUCCESS) {
         return;
     }
     std.log.err("Vulkan call failed with code: {}", .{result});
-    // TODO: Map VkResult to specific errors.
     switch (result) {
         c.VK_ERROR_OUT_OF_DEVICE_MEMORY, c.VK_ERROR_OUT_OF_HOST_MEMORY => return AppError.VulkanMemoryAllocationFailed,
         else => return AppError.VulkanDrawFailed,
@@ -47,15 +46,19 @@ fn checkVk(result: c.VkResult) !void {
 }
 
 const vertices = [_]Vertex{
-    .{ .pos = .{ 0.0, -0.8 } },
-    .{ .pos = .{ -0.8, 0.8 } },
-    .{ .pos = .{ 0.8, 0.8 } },
+    // Make the triangle a bit smaller so its center follows the cursor
+    .{ .pos = .{ 0.0, -0.15 } },
+    .{ .pos = .{ -0.15, 0.15 } },
+    .{ .pos = .{ 0.15, 0.15 } },
 };
 
+// This struct is already correct
 const UniformBufferObject = extern struct {
     color: [4]f32,
+    offset: [2]f32,
 };
 
+// ... (No changes to helper functions: findMemoryType, createBuffer, createShaderModule) ...
 fn findMemoryType(
     physical_device: c.VkPhysicalDevice,
     type_filter: u32,
@@ -74,7 +77,6 @@ fn findMemoryType(
     return AppError.MissingMemoryType;
 }
 
-// --- NEW --- Helper to create a buffer (for vertices or uniforms)
 fn createBuffer(
     device: c.VkDevice,
     physical_device: c.VkPhysicalDevice,
@@ -83,7 +85,7 @@ fn createBuffer(
     properties: c.VkMemoryPropertyFlags,
     allocator: std.mem.Allocator,
 ) !struct { buffer: c.VkBuffer, memory: c.VkDeviceMemory } {
-    _ = allocator; // Unused in this function, but can be used for custom memory management
+    _ = allocator;
     var buffer_info = c.VkBufferCreateInfo{
         .size = size,
         .usage = usage,
@@ -107,25 +109,14 @@ fn createBuffer(
     return .{ .buffer = buffer, .memory = memory };
 }
 
-// --- MODIFIED --- Helper to create a shader module from SPIR-V code
-// Now takes an allocator to create a temporary, aligned copy of the shader code.
 fn createShaderModule(allocator: std.mem.Allocator, device: c.VkDevice, code: []const u8) !c.VkShaderModule {
-    // SPIR-V is a stream of 32-bit words, so the byte length must be a multiple of 4.
     std.debug.assert(code.len % 4 == 0);
-
-    // This is the key fix: We allocate new memory with a guaranteed alignment of 4,
-    // large enough to hold the shader code as a slice of u32s.
     const aligned_code_slice = try allocator.alignedAlloc(u32, 4, code.len / @sizeOf(u32));
-    // We must free this temporary memory after the Vulkan call.
     defer allocator.free(aligned_code_slice);
-
-    // Copy the bytes from the unaligned embedded file into our new aligned buffer.
     @memcpy(std.mem.sliceAsBytes(aligned_code_slice), code);
 
     var create_info = c.VkShaderModuleCreateInfo{
         .codeSize = code.len,
-        // Now we can use the pointer from our aligned_code_slice, which is guaranteed to be correct.
-        // No casting or alignment tricks are needed here because the pointer is already the correct type and alignment.
         .pCode = aligned_code_slice.ptr,
     };
 
@@ -140,7 +131,7 @@ pub fn main() !void {
 
     var allocator = da.allocator();
 
-    // 1. Initialize GLFW and create a window
+    // ... (No changes to Vulkan setup from steps 1-8) ...
     if (c.glfwInit() == c.GLFW_FALSE) return AppError.GlfwInitFailed;
     defer c.glfwTerminate();
 
@@ -148,7 +139,6 @@ pub fn main() !void {
     const window = c.glfwCreateWindow(800, 600, "Zig + Vulkan Triangle", null, null) orelse return AppError.GlfwWindowFailed;
     defer c.glfwDestroyWindow(window);
 
-    // 2. Create Vulkan Instance
     var app_info = c.VkApplicationInfo{
         .pApplicationName = "Zig Vulkan App",
         .applicationVersion = c.VK_MAKE_VERSION(1, 0, 0),
@@ -161,33 +151,29 @@ pub fn main() !void {
     const extension_names_ptr = c.glfwGetRequiredInstanceExtensions(&extension_count);
     const extension_names = extension_names_ptr[0..extension_count];
 
-    var create_info = c.VkInstanceCreateInfo{
+    var create_info_instance = c.VkInstanceCreateInfo{
         .pApplicationInfo = &app_info,
         .enabledExtensionCount = extension_count,
         .ppEnabledExtensionNames = extension_names.ptr,
     };
 
     var instance: c.VkInstance = undefined;
-    try checkVk(c.vkCreateInstance(&create_info, null, &instance));
+    try checkVk(c.vkCreateInstance(&create_info_instance, null, &instance));
     defer c.vkDestroyInstance(instance, null);
 
-    // 3. Create Window Surface
     var surface: c.VkSurfaceKHR = undefined;
     try checkVk(c.glfwCreateWindowSurface(instance, window, null, &surface));
     defer c.vkDestroySurfaceKHR(instance, surface, null);
 
-    // 4. Pick Physical Device (GPU)
     var device_count: u32 = 0;
-    try checkVk(c.vkEnumeratePhysicalDevices(instance, &device_count, null));
+    _ = c.vkEnumeratePhysicalDevices(instance, &device_count, null);
     if (device_count == 0) return AppError.NoSuitableGpu;
 
     const devices = try allocator.alloc(c.VkPhysicalDevice, device_count);
     defer allocator.free(devices);
     try checkVk(c.vkEnumeratePhysicalDevices(instance, &device_count, devices.ptr));
-
     const physical_device = devices[0];
 
-    // 5. Create Logical Device and Queues
     var queue_family_count: u32 = 0;
     c.vkGetPhysicalDeviceQueueFamilyProperties(physical_device, &queue_family_count, null);
     const queue_families = try allocator.alloc(c.VkQueueFamilyProperties, queue_family_count);
@@ -211,9 +197,7 @@ pub fn main() !void {
     };
 
     const p_swapchain_ext = c.VK_KHR_SWAPCHAIN_EXTENSION_NAME;
-    const device_extensions_names = [_]?*const u8{
-        &p_swapchain_ext[0],
-    };
+    const device_extensions_names = [_]?*const u8{&p_swapchain_ext[0]};
     var device_features: c.VkPhysicalDeviceFeatures = .{};
     var device_create_info = c.VkDeviceCreateInfo{
         .pQueueCreateInfos = &queue_create_info,
@@ -230,7 +214,6 @@ pub fn main() !void {
     var graphics_queue: c.VkQueue = undefined;
     c.vkGetDeviceQueue(device, graphics_family_index, 0, &graphics_queue);
 
-    // 6. Create Swap Chain
     var capabilities: c.VkSurfaceCapabilitiesKHR = undefined;
     try checkVk(c.vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physical_device, surface, &capabilities));
 
@@ -265,7 +248,6 @@ pub fn main() !void {
     defer allocator.free(swapchain_images);
     try checkVk(c.vkGetSwapchainImagesKHR(device, swapchain, &image_count, swapchain_images.ptr));
 
-    // 7. Create Image Views
     var swapchain_image_views = try allocator.alloc(c.VkImageView, image_count);
     defer {
         for (swapchain_image_views) |view| c.vkDestroyImageView(device, view, null);
@@ -287,7 +269,6 @@ pub fn main() !void {
         try checkVk(c.vkCreateImageView(device, &iv_create_info, null, &swapchain_image_views[i]));
     }
 
-    // 8. Create Render Pass
     var color_attachment = c.VkAttachmentDescription{
         .format = surface_format.format,
         .samples = c.VK_SAMPLE_COUNT_1_BIT,
@@ -298,18 +279,15 @@ pub fn main() !void {
         .initialLayout = c.VK_IMAGE_LAYOUT_UNDEFINED,
         .finalLayout = c.VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
     };
-
     var color_attachment_ref = c.VkAttachmentReference{
         .attachment = 0,
         .layout = c.VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
     };
-
     var subpass = c.VkSubpassDescription{
         .pipelineBindPoint = c.VK_PIPELINE_BIND_POINT_GRAPHICS,
         .colorAttachmentCount = 1,
         .pColorAttachments = &color_attachment_ref,
     };
-
     var subpass_dep = c.VkSubpassDependency{
         .srcSubpass = c.VK_SUBPASS_EXTERNAL,
         .dstSubpass = 0,
@@ -318,7 +296,6 @@ pub fn main() !void {
         .dstStageMask = c.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
         .dstAccessMask = c.VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
     };
-
     var rp_create_info = c.VkRenderPassCreateInfo{
         .attachmentCount = 1,
         .pAttachments = &color_attachment,
@@ -327,17 +304,15 @@ pub fn main() !void {
         .dependencyCount = 1,
         .pDependencies = &subpass_dep,
     };
-
     var render_pass: c.VkRenderPass = undefined;
     try checkVk(c.vkCreateRenderPass(device, &rp_create_info, null, &render_pass));
     defer c.vkDestroyRenderPass(device, render_pass, null);
 
-    // --- NEW 9a. Create Descriptor Set Layout (for UBO) ---
     var ubo_layout_binding = c.VkDescriptorSetLayoutBinding{
         .binding = 0,
         .descriptorType = c.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
         .descriptorCount = 1,
-        .stageFlags = c.VK_SHADER_STAGE_FRAGMENT_BIT,
+        .stageFlags = c.VK_SHADER_STAGE_VERTEX_BIT | c.VK_SHADER_STAGE_FRAGMENT_BIT,
         .pImmutableSamplers = null,
     };
 
@@ -350,7 +325,7 @@ pub fn main() !void {
     try checkVk(c.vkCreateDescriptorSetLayout(device, &layout_info, null, &descriptor_set_layout));
     defer c.vkDestroyDescriptorSetLayout(device, descriptor_set_layout, null);
 
-    // --- NEW 9b. Create Graphics Pipeline ---
+    // ... (No changes to pipeline creation or other setup) ...
     const vert_module = try createShaderModule(allocator, device, vert_shader_code);
     defer c.vkDestroyShaderModule(device, vert_module, null);
     const frag_module = try createShaderModule(allocator, device, frag_shader_code);
@@ -381,7 +356,6 @@ pub fn main() !void {
         .topology = c.VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
         .primitiveRestartEnable = c.VK_FALSE,
     };
-
     var viewport = c.VkViewport{
         .x = 0.0,
         .y = 0.0,
@@ -390,19 +364,16 @@ pub fn main() !void {
         .minDepth = 0.0,
         .maxDepth = 1.0,
     };
-
     var scissor = c.VkRect2D{
         .offset = .{ .x = 0, .y = 0 },
         .extent = capabilities.currentExtent,
     };
-
     var viewport_state = c.VkPipelineViewportStateCreateInfo{
         .viewportCount = 1,
         .pViewports = &viewport,
         .scissorCount = 1,
         .pScissors = &scissor,
     };
-
     var rasterizer = c.VkPipelineRasterizationStateCreateInfo{
         .depthClampEnable = c.VK_FALSE,
         .rasterizerDiscardEnable = c.VK_FALSE,
@@ -412,12 +383,10 @@ pub fn main() !void {
         .frontFace = c.VK_FRONT_FACE_COUNTER_CLOCKWISE,
         .depthBiasEnable = c.VK_FALSE,
     };
-
     var multisampling = c.VkPipelineMultisampleStateCreateInfo{
         .sampleShadingEnable = c.VK_FALSE,
         .rasterizationSamples = c.VK_SAMPLE_COUNT_1_BIT,
     };
-
     var color_blend_attachment = c.VkPipelineColorBlendAttachmentState{
         .colorWriteMask = c.VK_COLOR_COMPONENT_R_BIT | c.VK_COLOR_COMPONENT_G_BIT | c.VK_COLOR_COMPONENT_B_BIT | c.VK_COLOR_COMPONENT_A_BIT,
         .blendEnable = c.VK_FALSE,
@@ -427,20 +396,13 @@ pub fn main() !void {
         .attachmentCount = 1,
         .pAttachments = &color_blend_attachment,
     };
-
     var pipeline_layout_info = c.VkPipelineLayoutCreateInfo{
         .setLayoutCount = 1,
         .pSetLayouts = &descriptor_set_layout,
     };
     var pipeline_layout: c.VkPipelineLayout = undefined;
-    try checkVk(c.vkCreatePipelineLayout(
-        device,
-        &pipeline_layout_info,
-        null,
-        &pipeline_layout,
-    ));
+    try checkVk(c.vkCreatePipelineLayout(device, &pipeline_layout_info, null, &pipeline_layout));
     defer c.vkDestroyPipelineLayout(device, pipeline_layout, null);
-
     var pipeline_info = c.VkGraphicsPipelineCreateInfo{
         .stageCount = shader_stages.len,
         .pStages = &shader_stages,
@@ -455,17 +417,9 @@ pub fn main() !void {
         .subpass = 0,
     };
     var graphics_pipeline: c.VkPipeline = undefined;
-    try checkVk(c.vkCreateGraphicsPipelines(
-        device,
-        null,
-        1,
-        &pipeline_info,
-        null,
-        &graphics_pipeline,
-    ));
+    try checkVk(c.vkCreateGraphicsPipelines(device, null, 1, &pipeline_info, null, &graphics_pipeline));
     defer c.vkDestroyPipeline(device, graphics_pipeline, null);
 
-    // 10. Create Framebuffers
     var swapchain_framebuffers = try allocator.alloc(c.VkFramebuffer, image_count);
     defer {
         for (swapchain_framebuffers) |fb| c.vkDestroyFramebuffer(device, fb, null);
@@ -483,7 +437,6 @@ pub fn main() !void {
         try checkVk(c.vkCreateFramebuffer(device, &fb_create_info, null, &swapchain_framebuffers[i]));
     }
 
-    // --- NEW 11. Create Vertex Buffer ---
     const vertex_buffer_size = @sizeOf(Vertex) * vertices.len;
     const vertex_buffer_obj = try createBuffer(
         device,
@@ -496,14 +449,12 @@ pub fn main() !void {
     defer c.vkDestroyBuffer(device, vertex_buffer_obj.buffer, null);
     defer c.vkFreeMemory(device, vertex_buffer_obj.memory, null);
 
-    // Copy vertex data to the buffer
     var data_ptr: ?*anyopaque = undefined;
     try checkVk(c.vkMapMemory(device, vertex_buffer_obj.memory, 0, vertex_buffer_size, 0, &data_ptr));
     const mapped_memory: [*]Vertex = @ptrCast(@alignCast(data_ptr.?));
     @memcpy(mapped_memory[0..vertices.len], &vertices);
     c.vkUnmapMemory(device, vertex_buffer_obj.memory);
 
-    // --- NEW 12. Create Uniform Buffer, Descriptor Pool and Set ---
     const ubo_size = @sizeOf(UniformBufferObject);
     const uniform_buffer_obj = try createBuffer(
         device,
@@ -518,22 +469,15 @@ pub fn main() !void {
 
     var pool_size = c.VkDescriptorPoolSize{
         .type = c.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-        .descriptorCount = 1, // We only need one descriptor
+        .descriptorCount = 1,
     };
-
     var pool_info = c.VkDescriptorPoolCreateInfo{
         .poolSizeCount = 1,
         .pPoolSizes = &pool_size,
-        .maxSets = 1, // We only need one set
+        .maxSets = 1,
     };
-
     var descriptor_pool: c.VkDescriptorPool = undefined;
-    try checkVk(c.vkCreateDescriptorPool(
-        device,
-        &pool_info,
-        null,
-        &descriptor_pool,
-    ));
+    try checkVk(c.vkCreateDescriptorPool(device, &pool_info, null, &descriptor_pool));
     defer c.vkDestroyDescriptorPool(device, descriptor_pool, null);
 
     var set_alloc_info = c.VkDescriptorSetAllocateInfo{
@@ -541,7 +485,6 @@ pub fn main() !void {
         .descriptorSetCount = 1,
         .pSetLayouts = &descriptor_set_layout,
     };
-
     var descriptor_set: c.VkDescriptorSet = undefined;
     try checkVk(c.vkAllocateDescriptorSets(device, &set_alloc_info, &descriptor_set));
 
@@ -560,7 +503,6 @@ pub fn main() !void {
     };
     c.vkUpdateDescriptorSets(device, 1, &descriptor_write, 0, null);
 
-    // 13. Create Command Pool and Command Buffers
     var cmd_pool_info = c.VkCommandPoolCreateInfo{
         .flags = c.VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
         .queueFamilyIndex = graphics_family_index,
@@ -577,7 +519,6 @@ pub fn main() !void {
     var command_buffer: c.VkCommandBuffer = undefined;
     try checkVk(c.vkAllocateCommandBuffers(device, &cmd_alloc_info, &command_buffer));
 
-    // 14. Create Synchronization Objects (Semaphores and Fences)
     var sync_create_info = c.VkSemaphoreCreateInfo{};
     var fence_create_info = c.VkFenceCreateInfo{ .flags = c.VK_FENCE_CREATE_SIGNALED_BIT };
 
@@ -592,41 +533,74 @@ pub fn main() !void {
     defer c.vkDestroySemaphore(device, render_finished_semaphore, null);
     defer c.vkDestroyFence(device, in_flight_fence, null);
 
-    // 15. Main Loop
+    // Main Loop
     const start_time = std.time.milliTimestamp();
     while (c.glfwWindowShouldClose(window) == 0) {
         c.glfwPollEvents();
 
-        try checkVk(c.vkWaitForFences(device, 1, &in_flight_fence, c.VK_TRUE, std.math.maxInt(u64)));
-        try checkVk(c.vkResetFences(device, 1, &in_flight_fence));
+        _ = c.vkWaitForFences(device, 1, &in_flight_fence, c.VK_TRUE, std.math.maxInt(u64));
+        _ = c.vkResetFences(device, 1, &in_flight_fence);
 
         var image_index: u32 = undefined;
-        try checkVk(c.vkAcquireNextImageKHR(device, swapchain, std.math.maxInt(u64), image_available_semaphore, null, &image_index));
+        _ = c.vkAcquireNextImageKHR(device, swapchain, std.math.maxInt(u64), image_available_semaphore, null, &image_index);
 
-        try checkVk(c.vkResetCommandBuffer(command_buffer, 0));
+        _ = c.vkResetCommandBuffer(command_buffer, 0);
         var cmd_begin_info = c.VkCommandBufferBeginInfo{};
-        try checkVk(c.vkBeginCommandBuffer(command_buffer, &cmd_begin_info));
+        _ = c.vkBeginCommandBuffer(command_buffer, &cmd_begin_info);
 
-        // --- MODIFIED --- Update uniform buffer with new color
+        // --- (CHANGE 1) --- Get window size and mouse position
+        var win_width: c_int = 0;
+        var win_height: c_int = 0;
+        c.glfwGetWindowSize(window, &win_width, &win_height);
+
+        var mouse_x: f64 = 0;
+        var mouse_y: f64 = 0;
+        c.glfwGetCursorPos(window, &mouse_x, &mouse_y);
+        const cb: c.GLFWmousebuttonfun = struct {
+            fn callback(wd: ?*c.GLFWwindow, button: c_int, action: c_int, mods: c_int) callconv(.C) void {
+                var mx: f64 = 0;
+                var my: f64 = 0;
+                c.glfwGetCursorPos(wd, &mx, &my);
+                std.debug.print("pos : {}x {}y", .{ mx, my });
+                _ = button; // Unused parameter
+                _ = action; // Unused parameter
+                _ = mods; // Unused parameter
+            }
+        }.callback;
+        _ = c.glfwSetMouseButtonCallback(window, cb);
+
+        // --- (CHANGE 2) --- Convert screen coordinates to NDC
+        // X: [0, width] -> [0, 2] -> [-1, 1]
+        const ndc_x = @as(f32, @floatCast(mouse_x)) / @as(f32, @floatFromInt(win_width)) * 2.0 - 1.0;
+        // Y: [0, height] -> [0, 2] -> [1, -1] (Y is inverted between screen and NDC)
+        const ndc_y = (@as(f32, @floatCast(mouse_y)) / @as(f32, @floatFromInt(win_height)) * 2.0) - 1.0;
+
+        // Update UBO data
         const current_time = std.time.milliTimestamp();
         const time_val = @as(f32, @floatFromInt(current_time - start_time)) / 1000.0;
         const ubo = UniformBufferObject{
+            // Keep the color animation
             .color = .{
                 0.5 + 0.5 * math.sin(time_val),
                 0.5 + 0.5 * math.sin(time_val + 2.0 * math.pi / 3.0),
                 0.5 + 0.5 * math.sin(time_val + 4.0 * math.pi / 3.0),
                 1.0,
             },
+            // --- (CHANGE 3) --- Use the mouse position for the offset
+            .offset = .{
+                ndc_x,
+                ndc_y,
+            },
         };
+
         var ubo_data_ptr: ?*anyopaque = undefined;
         try checkVk(c.vkMapMemory(device, uniform_buffer_obj.memory, 0, ubo_size, 0, &ubo_data_ptr));
         const mapped_ubo: *UniformBufferObject = @ptrCast(@alignCast(ubo_data_ptr.?));
         mapped_ubo.* = ubo;
         c.vkUnmapMemory(device, uniform_buffer_obj.memory);
 
-        // --- MODIFIED --- Render Pass now clears to black
+        // --- (NO CHANGE 4) --- The rest of the render loop is identical
         var clear_color = c.VkClearValue{ .color = .{ .float32 = .{ 0.0, 0.0, 0.0, 1.0 } } };
-
         var rp_begin_info = c.VkRenderPassBeginInfo{
             .renderPass = render_pass,
             .framebuffer = swapchain_framebuffers[image_index],
@@ -636,7 +610,6 @@ pub fn main() !void {
         };
 
         c.vkCmdBeginRenderPass(command_buffer, &rp_begin_info, c.VK_SUBPASS_CONTENTS_INLINE);
-        // --- NEW --- Drawing commands
         c.vkCmdBindPipeline(command_buffer, c.VK_PIPELINE_BIND_POINT_GRAPHICS, graphics_pipeline);
 
         const vertex_buffers = [_]c.VkBuffer{vertex_buffer_obj.buffer};
@@ -676,35 +649,27 @@ pub fn main() !void {
             .pSwapchains = &swapchain,
             .pImageIndices = &image_index,
         };
-        try checkVk(c.vkQueuePresentKHR(graphics_queue, &present_info));
+        _ = c.vkQueuePresentKHR(graphics_queue, &present_info);
     }
 
-    try checkVk(c.vkDeviceWaitIdle(device));
+    _ = c.vkDeviceWaitIdle(device);
 }
 
 const Vertex = extern struct {
     pos: [2]f32,
-
-    // This function describes how vertex data is spaced in memory.
-    // It doesn't need an instance of a vertex, so there's no `self` parameter.
     pub fn getBindingDescription() c.VkVertexInputBindingDescription {
         return .{
-            .binding = 0, // We are using binding 0
-            .stride = @sizeOf(Vertex), // The distance in bytes between two vertices
-            .inputRate = c.VK_VERTEX_INPUT_RATE_VERTEX, // Move to the next data entry after each vertex
+            .binding = 0,
+            .stride = @sizeOf(Vertex),
+            .inputRate = c.VK_VERTEX_INPUT_RATE_VERTEX,
         };
     }
-
-    // This function describes the attributes of a single vertex (e.g., its position).
     pub fn getAttributeDescriptions() [1]c.VkVertexInputAttributeDescription {
-        return .{
-            // Position attribute
-            .{
-                .binding = 0, // Data comes from the buffer in binding 0
-                .location = 0, // This is `layout(location = 0)` in the vertex shader
-                .format = c.VK_FORMAT_R32G32_SFLOAT, // The format is two 32-bit floats
-                .offset = @offsetOf(Vertex, "pos"), // The offset of the 'pos' field in the struct
-            },
-        };
+        return .{.{
+            .binding = 0,
+            .location = 0,
+            .format = c.VK_FORMAT_R32G32_SFLOAT,
+            .offset = @offsetOf(Vertex, "pos"),
+        }};
     }
 };

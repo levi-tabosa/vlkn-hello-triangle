@@ -1,2 +1,4 @@
-pub const frag_code = @embedFile("bin/frag.spv");
-pub const vert_code = @embedFile("bin/vert.spv");
+// src/shaders/spirv/spirv.zig
+
+pub const vs = @embedFile("./bin/vert.spv");
+pub const fs = @embedFile("./bin/frag.spv");

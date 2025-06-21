@@ -12,15 +12,15 @@ const c = @cImport({
 // --- Shader Bytecode ---
 // We embed the compiled SPIR-V files directly into the executable.
 // This makes distribution easier as we don't need to ship the .spv files.
-const vert_shader_code = spirv.vert_code;
-const frag_shader_code = spirv.frag_code;
+const vert_shader_code = spirv.vs;
+const frag_shader_code = spirv.fs;
 
 fn checkVk(result: c.VkResult) !void {
     if (result == c.VK_SUCCESS) {
         return;
     }
     std.log.err("Vulkan call failed with code: {}", .{result});
-    // TODO: improve error handling
+
     return switch (result) {
         c.VK_INCOMPLETE => error.VulkanIncomplete,
         c.VK_ERROR_DEVICE_LOST => error.VulkanDeviceLost,
@@ -29,7 +29,7 @@ fn checkVk(result: c.VkResult) !void {
         c.VK_ERROR_INITIALIZATION_FAILED => error.VulkanInitFailed,
         c.VK_ERROR_FORMAT_NOT_SUPPORTED => error.VulkanUnsupportedFormat,
         c.VK_ERROR_UNKNOWN => error.VulkanUnknown,
-        else => error.VulkanDefault, // General error
+        else => error.VulkanDefault,
     };
 }
 
@@ -53,26 +53,30 @@ const WINDOW_HEIGHT = 600;
 // This struct defines the layout of our vertex data in memory.
 // It must match the `layout(location = ...)` in the vertex shader.
 const Vertex = extern struct {
-    pos: @Vector(3, f32), // A 3-component vector for position
+    pos: @Vector(3, f32),
+    color: @Vector(3, f32), // Add this line
 
-    // This function tells Vulkan how to interpret the Vertex struct.
     pub fn getBindingDescription() c.VkVertexInputBindingDescription {
         return .{
-            .binding = 0, // The index of the binding
-            .stride = @sizeOf(Vertex), // The size of one vertex struct
-            .inputRate = c.VK_VERTEX_INPUT_RATE_VERTEX, // Move to the next data entry after each vertex
+            .binding = 0,
+            .stride = @sizeOf(Vertex),
+            .inputRate = c.VK_VERTEX_INPUT_RATE_VERTEX,
         };
     }
 
-    // This function describes the attributes within the vertex (just position for us).
-    pub fn getAttributeDescriptions() [1]c.VkVertexInputAttributeDescription {
+    pub fn getAttributeDescriptions() [2]c.VkVertexInputAttributeDescription {
         return .{
-            // Position attribute
             .{
-                .binding = 0, // From which binding the data comes
-                .location = 0, // Corresponds to `layout(location = 0)` in the shader
-                .format = c.VK_FORMAT_R32G32B32_SFLOAT, // Format is a 3-component 32-bit float vector
-                .offset = @offsetOf(Vertex, "pos"), // Offset of the 'pos' field
+                .binding = 0,
+                .location = 0,
+                .format = c.VK_FORMAT_R32G32B32_SFLOAT,
+                .offset = @offsetOf(Vertex, "pos"),
+            },
+            .{
+                .binding = 0,
+                .location = 1, // location 1 for color
+                .format = c.VK_FORMAT_R32G32B32_SFLOAT,
+                .offset = @offsetOf(Vertex, "color"),
             },
         };
     }
@@ -85,10 +89,10 @@ const UniformBufferObject = extern struct {
 // --- Vertex Data ---
 // These are the two 3D vectors that define our line.
 var vertex_array = [_]Vertex{
-    .{ .pos = .{ -0.5, -0.5, 0.0 } },
-    .{ .pos = .{ 0.5, 0.5, 0.0 } },
-    .{ .pos = .{ 0.5, -0.5, 0.0 } },
-    .{ .pos = .{ 0.6, 0.25, 0.0 } },
+    .{ .pos = .{ -0.5, -0.5, 0.0 }, .color = .{ 1.0, 0.0, 0.0 } },
+    .{ .pos = .{ 0.5, 0.5, 0.0 }, .color = .{ 0.0, 1.0, 0.0 } },
+    .{ .pos = .{ 0.5, -0.5, 0.0 }, .color = .{ 0.0, 0.0, 1.0 } },
+    .{ .pos = .{ 0.6, 0.25, 0.0 }, .color = .{ 1.0, 1.0, 0.0 } },
 };
 
 // --- Main Application Struct ---
@@ -858,7 +862,7 @@ const App = struct {
         const begin_info = c.VkCommandBufferBeginInfo{};
         try checkVk(c.vkBeginCommandBuffer(app.command_buffer, &begin_info));
 
-        const clear_color = c.VkClearValue{ .color = .{ .float32 = .{ 0.0, 0.0, 1.0, 1.0 } } };
+        const clear_color = c.VkClearValue{ .color = .{ .float32 = .{ 0.0, 0.0, 0.0, 1.0 } } };
 
         const render_pass_info = c.VkRenderPassBeginInfo{
             .renderPass = app.render_pass,
@@ -890,12 +894,8 @@ const App = struct {
             null,
         );
 
-        // !!! DRAW COMMAND !!!
-        // We tell Vulkan to draw `vertices.len` (which is 2) vertices.
-        // Because the topology is `line_list`, this will draw one line.
         c.vkCmdDraw(app.command_buffer, vertex_array.len, 1, 0, 0);
 
-        // End the render pass and command buffer recording.
         c.vkCmdEndRenderPass(app.command_buffer);
         try checkVk(c.vkEndCommandBuffer(app.command_buffer));
     }
