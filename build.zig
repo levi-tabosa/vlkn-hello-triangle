@@ -27,7 +27,7 @@ pub fn build(b: *std.Build) !void {
     }{
         .{ .step_id = "triangle", .source = "src/main.zig" },
         .{ .step_id = "example", .source = "example/example.zig" },
-        // .{ .step_id = "test", .source = "example/test.zig" },
+        .{ .step_id = "test", .source = "example/test.zig" },
     };
 
     var all_shader_steps = std.ArrayList(*std.Build.Step).init(b.allocator);

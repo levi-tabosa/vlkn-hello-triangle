@@ -1,11 +1,15 @@
+// example.vert
 #version 450
 
-layout(location = 0) in vec3 inPosition;
-layout(location = 1) in vec3 inColor;
+layout(binding = 0) uniform UniformBufferObject {
+    mat4 view;
+    mat4 projection;
+    vec4 color;
+} ubo;
 
-layout(location = 0) out vec3 fragColor;
+layout(location = 0) in vec3 in_pos;
+layout(location = 1) in vec3 in_offset; // <-- Add this
 
 void main() {
-    gl_Position = vec4(inPosition, 1.0);
-    fragColor = inColor;
+    gl_Position =  ubo.projection * ubo.view * vec4(in_pos + in_offset, 1.0);
 }

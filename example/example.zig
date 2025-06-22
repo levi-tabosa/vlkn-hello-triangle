@@ -54,7 +54,7 @@ const WINDOW_HEIGHT = 600;
 // It must match the `layout(location = ...)` in the vertex shader.
 const Vertex = extern struct {
     pos: @Vector(3, f32),
-    color: @Vector(3, f32), // Add this line
+    offset: @Vector(3, f32) = .{ 0, 0, 0 }, // This is an optional offset vector, can be used for transformations.
 
     pub fn getBindingDescription() c.VkVertexInputBindingDescription {
         return .{
@@ -65,34 +65,157 @@ const Vertex = extern struct {
     }
 
     pub fn getAttributeDescriptions() [2]c.VkVertexInputAttributeDescription {
-        return .{
-            .{
-                .binding = 0,
-                .location = 0,
-                .format = c.VK_FORMAT_R32G32B32_SFLOAT,
-                .offset = @offsetOf(Vertex, "pos"),
-            },
-            .{
-                .binding = 0,
-                .location = 1, // location 1 for color
-                .format = c.VK_FORMAT_R32G32B32_SFLOAT,
-                .offset = @offsetOf(Vertex, "color"),
-            },
-        };
+        return .{ .{
+            .binding = 0,
+            .location = 0,
+            .format = c.VK_FORMAT_R32G32B32_SFLOAT,
+            .offset = @offsetOf(Vertex, "pos"),
+        }, .{
+            .binding = 0,
+            .location = 1,
+            .format = c.VK_FORMAT_R32G32B32_SFLOAT,
+            .offset = @offsetOf(Vertex, "offset"),
+        } };
+    }
+
+    pub fn add(a: Vertex, b: Vertex) Vertex {
+        return .{ .pos = .{
+            a.pos[0] + b.pos[0],
+            a.pos[1] + b.pos[1],
+            a.pos[2] + b.pos[2],
+        } };
+    }
+
+    pub fn subtract(a: Vertex, b: Vertex) Vertex {
+        return .{ .pos = .{
+            a.pos[0] - b.pos[0],
+            a.pos[1] - b.pos[1],
+            a.pos[2] - b.pos[2],
+        } };
+    }
+
+    pub fn dot(a: Vertex, b: Vertex) f32 {
+        return a.pos[0] * b.pos[0] + a.pos[1] * b.pos[1] + a.pos[2] * b.pos[2];
+    }
+
+    pub fn cross(a: Vertex, b: Vertex) Vertex {
+        return .{ .pos = .{
+            a.pos[1] * b.pos[2] - a.pos[2] * b.pos[1],
+            a.pos[2] * b.pos[0] - a.pos[0] * b.pos[2],
+            a.pos[0] * b.pos[1] - a.pos[1] * b.pos[0],
+        } };
+    }
+
+    pub fn normalize(v: Vertex) Vertex {
+        const length = std.math.sqrt(
+            v.pos[0] * v.pos[0] + v.pos[1] * v.pos[1] + v.pos[2] * v.pos[2],
+        );
+        return .{ .pos = .{
+            v.pos[0] / length,
+            v.pos[1] / length,
+            v.pos[2] / length,
+        } };
     }
 };
 
 const UniformBufferObject = extern struct {
+    view_matrix: [16]f32, // 4x4 matrix for the view transformation
+    perspective_matrix: [16]f32, // 4x4 matrix for the perspective projection
     color: [4]f32,
 };
 
 // --- Vertex Data ---
 // These are the two 3D vectors that define our line.
-var vertex_array = [_]Vertex{
-    .{ .pos = .{ -0.5, -0.5, 0.0 }, .color = .{ 1.0, 0.0, 0.0 } },
-    .{ .pos = .{ 0.5, 0.5, 0.0 }, .color = .{ 0.0, 1.0, 0.0 } },
-    .{ .pos = .{ 0.5, -0.5, 0.0 }, .color = .{ 0.0, 0.0, 1.0 } },
-    .{ .pos = .{ 0.6, 0.25, 0.0 }, .color = .{ 1.0, 1.0, 0.0 } },
+
+const Callbacks = struct {
+    fn cbCursorPos(wd: ?*c.GLFWwindow, xpos: f64, ypos: f64) callconv(.C) void {
+        const app: *App = @alignCast(@ptrCast(c.glfwGetWindowUserPointer(wd)));
+
+        const ndc_x = @as(f32, @floatCast(xpos)) / @as(f32, @floatFromInt(WINDOW_WIDTH)) * 2.0 - 1.0;
+        // Y conversion from screen space to NDC space.
+        const ndc_y = @as(f32, @floatCast(ypos)) / @as(f32, @floatFromInt(WINDOW_HEIGHT)) * 2.0 - 1.0;
+
+        // Update the position of the second vertex (one end of the first line)
+        // Note: This sets the vertex's MODEL position to an NDC-like coordinate.
+        // It will move on screen, but not directly under the cursor because it will
+        // still be transformed by the view/projection matrices.
+        app.scene.axis[1].pos = .{ ndc_x, ndc_y, 0.0 };
+
+        app.updateVertexBuffer() catch |err| {
+            std.log.err("Failed to update vertex buffer in callback: {any}", .{err});
+            return;
+        };
+    }
+};
+
+const Scene = struct {
+    const Self = @This();
+
+    pitch: f32 = 0.5,
+    yaw: f32 = 0.2,
+    view_matrix: [16]f32,
+    camera: *Camera,
+    axis: [6]Vertex,
+
+    fn init(allocator: std.mem.Allocator) !Self {
+        _ = allocator;
+        var camera = Camera.init(.{ .pos = .{ 2, 2, 2 } }, 13);
+
+        return .{
+            .axis = .{
+                // X-axis (Red)
+                .{ .pos = .{ 0.0, 0.0, 0.0 } }, .{ .pos = .{ 1.0, 0.0, 0.0 } },
+                // Y-axis (Green)
+                .{ .pos = .{ 0.0, 0.0, 0.0 } }, .{ .pos = .{ 0.0, 1.0, 0.0 } },
+                // Z-axis (Blue)
+                .{ .pos = .{ 0.0, 0.0, 0.0 } }, .{ .pos = .{ 0.0, 0.0, 1.0 } },
+            },
+            .camera = &camera,
+            .view_matrix = camera.viewMatrix(),
+        };
+    }
+};
+
+const Camera = struct {
+    const Self = @This();
+
+    pos: Vertex,
+    target: Vertex = .{ .pos = .{ 0, 0, 0 } },
+    up: Vertex = .{ .pos = .{ 0, 0, 1 } }, // Z is up
+    radius: ?f32 = null,
+    shape: [8]Vertex,
+
+    pub fn init(pos: Vertex, radius: ?f32) Self {
+        const half_edge_len = 0.05;
+        const cube: [8]Vertex = .{
+            .{ .pos = .{ pos.pos[0] - half_edge_len, pos.pos[1] - half_edge_len, pos.pos[2] - half_edge_len } },
+            .{ .pos = .{ pos.pos[0] - half_edge_len, pos.pos[1] - half_edge_len, pos.pos[2] + half_edge_len } },
+            .{ .pos = .{ pos.pos[0] + half_edge_len, pos.pos[1] - half_edge_len, pos.pos[2] + half_edge_len } },
+            .{ .pos = .{ pos.pos[0] + half_edge_len, pos.pos[1] - half_edge_len, pos.pos[2] - half_edge_len } },
+            .{ .pos = .{ pos.pos[0] - half_edge_len, pos.pos[1] + half_edge_len, pos.pos[2] - half_edge_len } },
+            .{ .pos = .{ pos.pos[0] - half_edge_len, pos.pos[1] + half_edge_len, pos.pos[2] + half_edge_len } },
+            .{ .pos = .{ pos.pos[0] + half_edge_len, pos.pos[1] + half_edge_len, pos.pos[2] + half_edge_len } },
+            .{ .pos = .{ pos.pos[0] + half_edge_len, pos.pos[1] + half_edge_len, pos.pos[2] - half_edge_len } },
+        };
+        return .{
+            .pos = pos,
+            .radius = radius,
+            .shape = cube,
+        };
+    }
+
+    pub fn viewMatrix(self: Self) [16]f32 {
+        const z_axis = Vertex.normalize(Vertex.subtract(self.pos, self.target));
+        const x_axis = Vertex.normalize(Vertex.cross(self.up, z_axis));
+        const y_axis = Vertex.cross(z_axis, x_axis);
+
+        return .{
+            x_axis.pos[0],                 y_axis.pos[0],                 z_axis.pos[0],                 0.0,
+            x_axis.pos[1],                 y_axis.pos[1],                 z_axis.pos[1],                 0.0,
+            x_axis.pos[2],                 y_axis.pos[2],                 z_axis.pos[2],                 0.0,
+            -Vertex.dot(x_axis, self.pos), -Vertex.dot(y_axis, self.pos), -Vertex.dot(z_axis, self.pos), 1.0,
+        };
+    }
 };
 
 // --- Main Application Struct ---
@@ -149,6 +272,8 @@ const App = struct {
     uniform_buffer: c.VkBuffer = undefined,
     uniform_buffer_memory: c.VkDeviceMemory = undefined,
 
+    // Scene with vertex data
+    scene: *Scene,
     // --- Entry Point ---
     pub fn main() !void {
         // Initialize GLFW
@@ -158,8 +283,8 @@ const App = struct {
         var da = std.heap.DebugAllocator(.{}){};
         defer _ = da.deinit();
         const allocator = da.allocator();
-
-        var app = Self{ .allocator = allocator };
+        var scene = try Scene.init(allocator);
+        var app = Self{ .allocator = allocator, .scene = &scene };
         defer app.cleanup();
 
         try app.initWindow();
@@ -173,6 +298,10 @@ const App = struct {
 
         self.window = c.glfwCreateWindow(WINDOW_WIDTH, WINDOW_HEIGHT, "Vulkan Line", null, null);
         if (self.window == null) return error.GlfwCreateWindowFailed;
+        c.glfwSetWindowUserPointer(self.window, self);
+
+        // Disabling cursor callback for now to simplify debugging
+        // _ = c.glfwSetCursorPosCallback(self.window, Callbacks.cbCursorPos);
     }
 
     fn initVulkan(app: *Self) !void {
@@ -182,8 +311,8 @@ const App = struct {
         try app.createLogicalDeviceAndQueues();
         try app.createSwapchain();
         try app.createImageViews();
-        try app.createVertexBuffer(Vertex, &vertex_array);
-        try app.createUniformBuffer(Vertex);
+        try app.createVertexBuffer();
+        try app.createUniformBuffer();
         try app.createDescriptorSetLayout();
         try app.createDescriptorPoolAndSets();
         try app.createRenderPass();
@@ -269,6 +398,9 @@ const App = struct {
         // Get the extensions required by GLFW to interface with the window system.
         var extension_count: u32 = 0;
         const required_extensions_ptr = c.glfwGetRequiredInstanceExtensions(&extension_count);
+        for (0..extension_count) |i| {
+            std.log.info("Required extension: {s}", .{std.mem.span(required_extensions_ptr[i])});
+        }
         const required_extensions = required_extensions_ptr[0..extension_count];
 
         const create_info = c.VkInstanceCreateInfo{
@@ -298,21 +430,30 @@ const App = struct {
         const devices = try app.allocator.alloc(c.VkPhysicalDevice, device_count);
         defer app.allocator.free(devices);
         try checkVk(c.vkEnumeratePhysicalDevices(app.instance, &device_count, devices.ptr));
+        if (device_count > 1) std.log.info(
+            "More than one GPU physical device found, picking first: {any}",
+            .{devices[0]},
+        );
 
-        // Just pick the first GPU we find.
         app.physical_device = devices[0];
-
-        var props: c.VkPhysicalDeviceProperties = undefined;
-        c.vkGetPhysicalDeviceProperties(app.physical_device, &props);
     }
 
-    fn findQueueFamilies(allocator: std.mem.Allocator, phys_device: c.VkPhysicalDevice, surface: c.VkSurfaceKHR) !u32 {
+    /// Helper function
+    fn findQueueFamilies(
+        allocator: std.mem.Allocator,
+        phys_device: c.VkPhysicalDevice,
+        surface: c.VkSurfaceKHR,
+    ) !u32 {
         var queue_count: u32 = 0;
         c.vkGetPhysicalDeviceQueueFamilyProperties(phys_device, &queue_count, null);
         const queue_family_properties = try allocator.alloc(c.VkQueueFamilyProperties, queue_count);
         defer allocator.free(queue_family_properties);
 
-        c.vkGetPhysicalDeviceQueueFamilyProperties(phys_device, &queue_count, queue_family_properties.ptr);
+        c.vkGetPhysicalDeviceQueueFamilyProperties(
+            phys_device,
+            &queue_count,
+            queue_family_properties.ptr,
+        );
 
         for (queue_family_properties, 0..queue_count) |family_prop, i| {
             // We need a queue that supports graphics operations.
@@ -321,7 +462,6 @@ const App = struct {
                 var present_support: c.VkBool32 = c.VK_FALSE;
                 try checkVk(c.vkGetPhysicalDeviceSurfaceSupportKHR(phys_device, @intCast(i), surface, &present_support));
 
-                // *** THE FIX IS HERE ***
                 if (present_support == c.VK_TRUE) {
                     return @intCast(i);
                 }
@@ -340,8 +480,7 @@ const App = struct {
             .pQueuePriorities = &queue_priority,
         };
 
-        var device_features = c.VkPhysicalDeviceFeatures{}; // We don't need any special features.
-
+        var device_features = c.VkPhysicalDeviceFeatures{};
         // We need to enable the swapchain extension.
         const device_extensions = [_][*:0]const u8{c.VK_KHR_SWAPCHAIN_EXTENSION_NAME};
 
@@ -353,38 +492,64 @@ const App = struct {
             .ppEnabledExtensionNames = &device_extensions,
         };
 
-        try checkVk(c.vkCreateDevice(app.physical_device, &create_info, app.alloc_callbacks, &app.device));
+        try checkVk(c.vkCreateDevice(
+            app.physical_device,
+            &create_info,
+            app.alloc_callbacks,
+            &app.device,
+        ));
 
         // Get a handle to the graphics queue.
         c.vkGetDeviceQueue(app.device, queue_family_index, 0, &app.graphics_queue);
     }
 
-    fn createSwapchain(app: *Self) !void {
+    ///  TODO: refactor
+    fn createSwapchain(self: *Self) !void {
         // --- Choose Swapchain Settings ---
-        var format_count: u32 = undefined;
-        try checkVk(c.vkGetPhysicalDeviceSurfaceFormatsKHR(app.physical_device, app.surface, &format_count, null));
-        const formats = app.allocator.alloc(c.VkSurfaceFormatKHR, format_count) catch @panic("OOM");
-        defer app.allocator.free(formats);
-        try checkVk(c.vkGetPhysicalDeviceSurfaceFormatsKHR(app.physical_device, app.surface, &format_count, formats.ptr));
-        app.surface_format = formats[0]; // Choose a format, B8G8R8A8_SRGB is common.
+        var fmt_count: u32 = undefined;
+        try checkVk(c.vkGetPhysicalDeviceSurfaceFormatsKHR(
+            self.physical_device,
+            self.surface,
+            &fmt_count,
+            null,
+        ));
+        const fmts = self.allocator.alloc(c.VkSurfaceFormatKHR, fmt_count) catch @panic("OOM");
+        defer self.allocator.free(fmts);
+        try checkVk(c.vkGetPhysicalDeviceSurfaceFormatsKHR(
+            self.physical_device,
+            self.surface,
+            &fmt_count,
+            fmts.ptr,
+        ));
+        self.surface_format = fmts[0]; // Choose a format, B8G8R8A8_SRGB is common.
 
         var present_modes_count: u32 = undefined;
-        try checkVk(c.vkGetPhysicalDeviceSurfacePresentModesKHR(app.physical_device, app.surface, &present_modes_count, null));
-        const present_modes = app.allocator.alloc(c.VkPresentModeKHR, present_modes_count) catch @panic("OOM");
-        defer app.allocator.free(present_modes);
-        try checkVk(c.vkGetPhysicalDeviceSurfacePresentModesKHR(app.physical_device, app.surface, &present_modes_count, present_modes.ptr));
+        try checkVk(c.vkGetPhysicalDeviceSurfacePresentModesKHR(
+            self.physical_device,
+            self.surface,
+            &present_modes_count,
+            null,
+        ));
+        const present_modes = self.allocator.alloc(c.VkPresentModeKHR, present_modes_count) catch @panic("OOM");
+        defer self.allocator.free(present_modes);
+        try checkVk(c.vkGetPhysicalDeviceSurfacePresentModesKHR(
+            self.physical_device,
+            self.surface,
+            &present_modes_count,
+            present_modes.ptr,
+        ));
 
-        app.present_mode = c.VK_PRESENT_MODE_FIFO_KHR; // V-Sync, guaranteed to be available.
+        self.present_mode = c.VK_PRESENT_MODE_FIFO_KHR; // V-Sync, guaranteed to be available.
         for (present_modes) |mode| {
             if (mode == c.VK_PRESENT_MODE_MAILBOX_KHR) {
-                app.present_mode = c.VK_PRESENT_MODE_MAILBOX_KHR; // Triple buffering, better for latency.
+                self.present_mode = c.VK_PRESENT_MODE_MAILBOX_KHR; // Triple buffering, better for latency.
                 break;
             }
         }
 
         var capabilities: c.VkSurfaceCapabilitiesKHR = undefined;
-        try checkVk(c.vkGetPhysicalDeviceSurfaceCapabilitiesKHR(app.physical_device, app.surface, &capabilities));
-        app.swapchain_extent = capabilities.currentExtent;
+        try checkVk(c.vkGetPhysicalDeviceSurfaceCapabilitiesKHR(self.physical_device, self.surface, &capabilities));
+        self.swapchain_extent = capabilities.currentExtent;
 
         var image_count = capabilities.minImageCount + 1;
         if (capabilities.maxImageCount > 0 and image_count > capabilities.maxImageCount) {
@@ -392,27 +557,42 @@ const App = struct {
         }
 
         const create_info = c.VkSwapchainCreateInfoKHR{
-            .surface = app.surface,
+            .surface = self.surface,
             .minImageCount = image_count,
-            .imageFormat = app.surface_format.format,
-            .imageColorSpace = app.surface_format.colorSpace,
-            .imageExtent = app.swapchain_extent,
+            .imageFormat = self.surface_format.format,
+            .imageColorSpace = self.surface_format.colorSpace,
+            .imageExtent = self.swapchain_extent,
             .imageArrayLayers = 1,
             .imageUsage = c.VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
             .imageSharingMode = c.VK_SHARING_MODE_EXCLUSIVE,
             .preTransform = capabilities.currentTransform,
             .compositeAlpha = c.VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
-            .presentMode = app.present_mode,
+            .presentMode = self.present_mode,
             .clipped = c.VK_TRUE,
             .oldSwapchain = null,
         };
-        try checkVk(c.vkCreateSwapchainKHR(app.device, &create_info, app.alloc_callbacks, &app.swapchain));
+        try checkVk(c.vkCreateSwapchainKHR(
+            self.device,
+            &create_info,
+            self.alloc_callbacks,
+            &self.swapchain,
+        ));
 
         var img_count: u32 = undefined;
-        try checkVk(c.vkGetSwapchainImagesKHR(app.device, app.swapchain, &img_count, null));
-        const swapchain_images = app.allocator.alloc(c.VkImage, img_count) catch @panic("OOM");
-        try checkVk(c.vkGetSwapchainImagesKHR(app.device, app.swapchain, &img_count, swapchain_images.ptr));
-        app.swapchain_images = swapchain_images;
+        try checkVk(c.vkGetSwapchainImagesKHR(
+            self.device,
+            self.swapchain,
+            &img_count,
+            null,
+        ));
+        const swapchain_images = self.allocator.alloc(c.VkImage, img_count) catch @panic("OOM");
+        try checkVk(c.vkGetSwapchainImagesKHR(
+            self.device,
+            self.swapchain,
+            &img_count,
+            swapchain_images.ptr,
+        ));
+        self.swapchain_images = swapchain_images;
     }
 
     fn createImageViews(app: *Self) !void {
@@ -481,7 +661,12 @@ const App = struct {
             .pDependencies = &subpass_dep,
         };
 
-        try checkVk(c.vkCreateRenderPass(app.device, &create_info, app.alloc_callbacks, &app.render_pass));
+        try checkVk(c.vkCreateRenderPass(
+            app.device,
+            &create_info,
+            app.alloc_callbacks,
+            &app.render_pass,
+        ));
     }
 
     fn createDescriptorSetLayout(app: *Self) !void {
@@ -489,7 +674,9 @@ const App = struct {
             .binding = 0,
             .descriptorType = c.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
             .descriptorCount = 1,
-            .stageFlags = c.VK_SHADER_STAGE_FRAGMENT_BIT,
+            // FIX: The UBO is used by both the vertex shader (for matrices) and potentially
+            // the fragment shader (for color). We must specify all stages that access it.
+            .stageFlags = c.VK_SHADER_STAGE_VERTEX_BIT | c.VK_SHADER_STAGE_FRAGMENT_BIT,
             .pImmutableSamplers = null,
         };
 
@@ -499,21 +686,25 @@ const App = struct {
             .pBindings = &ubo_layout_binding,
         };
 
-        try checkVk(c.vkCreateDescriptorSetLayout(app.device, &layout_info, app.alloc_callbacks, &app.descriptor_set_layout));
+        try checkVk(c.vkCreateDescriptorSetLayout(
+            app.device,
+            &layout_info,
+            app.alloc_callbacks,
+            &app.descriptor_set_layout,
+        ));
     }
 
     fn createDescriptorPoolAndSets(self: *Self) !void {
         var pool_size = c.VkDescriptorPoolSize{
-            .type = c.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, // uniform
-            .descriptorCount = 1, // We only need one descriptor
+            .type = c.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+            .descriptorCount = 1,
         };
         var pool_info = c.VkDescriptorPoolCreateInfo{
             .poolSizeCount = 1,
             .pPoolSizes = &pool_size,
-            .maxSets = 1, // We only need one set
+            .maxSets = 1,
         };
 
-        // get handle to descriptor pool
         try checkVk(c.vkCreateDescriptorPool(
             self.device,
             &pool_info,
@@ -527,7 +718,6 @@ const App = struct {
             .pSetLayouts = &self.descriptor_set_layout,
         };
 
-        // get handle to descriptor set
         try checkVk(c.vkAllocateDescriptorSets(self.device, &set_alloc_info, &self.descriptor_set));
 
         var desc_buffer_info = c.VkDescriptorBufferInfo{
@@ -544,16 +734,41 @@ const App = struct {
             .descriptorCount = 1,
             .pBufferInfo = &desc_buffer_info,
         };
-        std.debug.print("{any}\n", .{desc_write});
         c.vkUpdateDescriptorSets(self.device, 1, &desc_write, 0, null);
+
+        const ubo = UniformBufferObject{
+            .color = .{ 1.0, 1.0, 1.0, 1.0 }, // White color for the lines
+            .view_matrix = self.scene.view_matrix,
+            .perspective_matrix = blk: {
+                // FIX: This is the correct perspective matrix for Vulkan's coordinate system.
+                // The original matrix was for OpenGL, which uses a different depth range [-1, 1]
+                // and has a different Y-axis direction in its normalized device coordinates.
+                // This matrix handles the depth range [0, 1] and flips the Y-axis.
+                const fovy = std.math.degreesToRadians(45.0);
+                const aspect = @as(f32, @floatFromInt(WINDOW_WIDTH)) / @as(f32, @floatFromInt(WINDOW_HEIGHT));
+                const near = 0.1;
+                const far = 100.0;
+                const f = 1.0 / std.math.tan(fovy / 2.0);
+
+                break :blk .{
+                    f / aspect, 0, 0, 0,
+                    0, -f, 0,                           0, // Note the -f to flip Y
+                    0, 0,  far / (near - far),          -1,
+                    0, 0,  (far * near) / (near - far), 0,
+                };
+            },
+        };
+
+        var ubo_data_ptr: ?*anyopaque = undefined;
+        try checkVk(c.vkMapMemory(self.device, self.uniform_buffer_memory, 0, @sizeOf(UniformBufferObject), 0, &ubo_data_ptr));
+        const mapped_ubo: *UniformBufferObject = @ptrCast(@alignCast(ubo_data_ptr.?));
+        mapped_ubo.* = ubo;
+        c.vkUnmapMemory(self.device, self.uniform_buffer_memory);
     }
 
     fn createShaderModule(allocator: std.mem.Allocator, device: c.VkDevice, code: []const u8, allocation_callbacks: ?*c.VkAllocationCallbacks) !c.VkShaderModule {
         std.debug.assert(code.len % 4 == 0);
 
-        // SPIR-V needs to be aligned to a 4-byte boundary.
-        // The safest way is to allocate new memory with the required alignment
-        // and copy the embedded data into it.
         const aligned_code = try allocator.alignedAlloc(u32, @alignOf(u32), code.len / @sizeOf(u32));
         defer allocator.free(aligned_code);
 
@@ -629,7 +844,7 @@ const App = struct {
             .rasterizerDiscardEnable = c.VK_FALSE,
             .polygonMode = c.VK_POLYGON_MODE_FILL,
             .lineWidth = 1.0,
-            .cullMode = c.VK_CULL_MODE_BACK_BIT,
+            .cullMode = c.VK_CULL_MODE_NONE, // Use NONE for 2D or line geometry
             .frontFace = c.VK_FRONT_FACE_COUNTER_CLOCKWISE,
             .depthBiasEnable = c.VK_FALSE,
         };
@@ -701,16 +916,6 @@ const App = struct {
         }
     }
 
-    fn createCommandPool(app: *Self) !void {
-        const queue_family_index = try findQueueFamilies(app.allocator, app.physical_device, app.surface);
-        var cmd_pool_info = c.VkCommandPoolCreateInfo{
-            .flags = c.VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
-            .queueFamilyIndex = queue_family_index,
-        };
-
-        try checkVk(c.vkCreateCommandPool(app.device, &cmd_pool_info, null, &app.command_pool));
-    }
-
     // --- Buffer Creation Helper ---
     fn findMemoryType(
         physical_device: c.VkPhysicalDevice,
@@ -759,31 +964,40 @@ const App = struct {
         return .{ .buffer = buffer, .memory = memory };
     }
 
-    fn createVertexBuffer(app: *Self, comptime vertex: type, vertices: []vertex) !void {
-        const buffer_size = @sizeOf(vertex) * vertices.len;
+    fn createVertexBuffer(self: *Self) !void {
+        const buffer_size = @sizeOf(Vertex) * self.scene.axis.len;
 
-        const buffer = try app.createBuffer(
+        const buffer = try self.createBuffer(
             buffer_size,
             c.VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
             c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
         );
-        app.vertex_buffer = buffer.buffer;
-        app.vertex_buffer_memory = buffer.memory;
+        self.vertex_buffer = buffer.buffer;
+        self.vertex_buffer_memory = buffer.memory;
 
         // Copy vertex data to the buffer
         var data_ptr: ?*anyopaque = undefined;
-        try checkVk(c.vkMapMemory(app.device, buffer.memory, 0, buffer_size, 0, &data_ptr));
-        defer c.vkUnmapMemory(app.device, buffer.memory);
+        try checkVk(c.vkMapMemory(self.device, buffer.memory, 0, buffer_size, 0, &data_ptr));
+        defer c.vkUnmapMemory(self.device, buffer.memory);
 
-        const mapped_vertex_slice = @as([*]Vertex, @ptrCast(@alignCast(data_ptr)));
-        @memcpy(mapped_vertex_slice, vertices);
+        const mapped_vertex_slice: [*]Vertex = @ptrCast(@alignCast(data_ptr));
+        @memcpy(mapped_vertex_slice[0..self.scene.axis.len], &self.scene.axis);
     }
 
-    fn createUniformBuffer(
-        self: *Self,
-        comptime vertex: type,
-    ) !void {
-        const ubo_size = @sizeOf(vertex);
+    fn updateVertexBuffer(self: *Self) !void {
+        const buffer_size = @sizeOf(Vertex) * self.scene.axis.len;
+
+        var data_ptr: ?*anyopaque = undefined;
+        try checkVk(c.vkMapMemory(self.device, self.vertex_buffer_memory, 0, buffer_size, 0, &data_ptr));
+        defer c.vkUnmapMemory(self.device, self.vertex_buffer_memory);
+
+        const mapped_vertex_slice: [*]Vertex = @ptrCast(@alignCast(data_ptr));
+        @memcpy(mapped_vertex_slice[0..self.scene.axis.len], &self.scene.axis);
+    }
+
+    fn createUniformBuffer(self: *Self) !void {
+        // FIX: The buffer size must match the UniformBufferObject struct, not the Vertex struct.
+        const ubo_size = @sizeOf(UniformBufferObject);
         const uniform_buffer_obj = try self.createBuffer(
             ubo_size,
             c.VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
@@ -794,58 +1008,68 @@ const App = struct {
         self.uniform_buffer_memory = uniform_buffer_obj.memory;
     }
 
-    fn createCommandBuffer(app: *Self) !void {
+    fn createCommandPool(self: *Self) !void {
+        const queue_family_index = try findQueueFamilies(self.allocator, self.physical_device, self.surface);
+        var cmd_pool_info = c.VkCommandPoolCreateInfo{
+            .flags = c.VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
+            .queueFamilyIndex = queue_family_index,
+        };
+
+        try checkVk(c.vkCreateCommandPool(self.device, &cmd_pool_info, null, &self.command_pool));
+    }
+
+    fn createCommandBuffer(self: *Self) !void {
         const alloc_info = c.VkCommandBufferAllocateInfo{
-            .commandPool = app.command_pool,
+            .commandPool = self.command_pool,
             .level = c.VK_COMMAND_BUFFER_LEVEL_PRIMARY,
             .commandBufferCount = 1,
         };
-        try checkVk(c.vkAllocateCommandBuffers(app.device, &alloc_info, &app.command_buffer));
+        try checkVk(c.vkAllocateCommandBuffers(self.device, &alloc_info, &self.command_buffer));
     }
 
-    fn createSyncObjects(app: *Self) !void {
+    fn createSyncObjects(self: *Self) !void {
         const sync_create_info = c.VkSemaphoreCreateInfo{};
         const fence_create_info = c.VkFenceCreateInfo{
             .flags = c.VK_FENCE_CREATE_SIGNALED_BIT,
         }; // Create signaled so first frame doesn't wait.
 
-        try checkVk(c.vkCreateSemaphore(app.device, &sync_create_info, app.alloc_callbacks, &app.image_available_semaphore));
-        try checkVk(c.vkCreateSemaphore(app.device, &sync_create_info, app.alloc_callbacks, &app.render_finished_semaphore));
-        try checkVk(c.vkCreateFence(app.device, &fence_create_info, app.alloc_callbacks, &app.in_flight_fence));
+        try checkVk(c.vkCreateSemaphore(self.device, &sync_create_info, self.alloc_callbacks, &self.image_available_semaphore));
+        try checkVk(c.vkCreateSemaphore(self.device, &sync_create_info, self.alloc_callbacks, &self.render_finished_semaphore));
+        try checkVk(c.vkCreateFence(self.device, &fence_create_info, self.alloc_callbacks, &self.in_flight_fence));
     }
 
     // --- Per-frame Drawing Logic ---
-    fn drawFrame(app: *Self) !void {
+    fn drawFrame(self: *Self) !void {
         // Wait for the previous frame's fence to be signaled (meaning it's done rendering).
-        try checkVk(c.vkWaitForFences(app.device, 1, &app.in_flight_fence, c.VK_TRUE, std.math.maxInt(u64)));
-        try checkVk(c.vkResetFences(app.device, 1, &app.in_flight_fence));
+        try checkVk(c.vkWaitForFences(self.device, 1, &self.in_flight_fence, c.VK_TRUE, std.math.maxInt(u64)));
+        try checkVk(c.vkResetFences(self.device, 1, &self.in_flight_fence));
 
         // Acquire an image from the swapchain.
         var image_index: u32 = 0;
-        try checkVk(c.vkAcquireNextImageKHR(app.device, app.swapchain, std.math.maxInt(u64), app.image_available_semaphore, null, &image_index));
+        try checkVk(c.vkAcquireNextImageKHR(self.device, self.swapchain, std.math.maxInt(u64), self.image_available_semaphore, null, &image_index));
 
         // Reset and record the command buffer.
-        try checkVk(c.vkResetCommandBuffer(app.command_buffer, 0));
-        try app.recordCommandBuffer(image_index);
+        try checkVk(c.vkResetCommandBuffer(self.command_buffer, 0));
+        try self.recordCommandBuffer(image_index);
 
         // Submit the command buffer to the graphics queue.
-        const wait_semaphores = [_]c.VkSemaphore{app.image_available_semaphore};
+        const wait_semaphores = [_]c.VkSemaphore{self.image_available_semaphore};
         const wait_stages = [_]c.VkPipelineStageFlags{c.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
-        const signal_semaphores = [_]c.VkSemaphore{app.render_finished_semaphore};
+        const signal_semaphores = [_]c.VkSemaphore{self.render_finished_semaphore};
 
         const submit_info = c.VkSubmitInfo{
             .waitSemaphoreCount = wait_semaphores.len,
             .pWaitSemaphores = &wait_semaphores,
             .pWaitDstStageMask = &wait_stages,
             .commandBufferCount = 1,
-            .pCommandBuffers = &app.command_buffer,
+            .pCommandBuffers = &self.command_buffer,
             .signalSemaphoreCount = signal_semaphores.len,
             .pSignalSemaphores = &signal_semaphores,
         };
-        try checkVk(c.vkQueueSubmit(app.graphics_queue, 1, &submit_info, app.in_flight_fence));
+        try checkVk(c.vkQueueSubmit(self.graphics_queue, 1, &submit_info, self.in_flight_fence));
 
         // Present the image to the screen.
-        const swapchains = [_]c.VkSwapchainKHR{app.swapchain};
+        const swapchains = [_]c.VkSwapchainKHR{self.swapchain};
         const present_info = c.VkPresentInfoKHR{
             .waitSemaphoreCount = signal_semaphores.len,
             .pWaitSemaphores = &signal_semaphores,
@@ -854,50 +1078,49 @@ const App = struct {
             .pImageIndices = &image_index,
         };
 
-        try checkVk(c.vkQueuePresentKHR(app.graphics_queue, &present_info));
+        try checkVk(c.vkQueuePresentKHR(self.graphics_queue, &present_info));
     }
 
-    fn recordCommandBuffer(app: *Self, image_index: u32) !void {
-        //
+    fn recordCommandBuffer(self: *Self, image_index: u32) !void {
         const begin_info = c.VkCommandBufferBeginInfo{};
-        try checkVk(c.vkBeginCommandBuffer(app.command_buffer, &begin_info));
+        try checkVk(c.vkBeginCommandBuffer(self.command_buffer, &begin_info));
 
-        const clear_color = c.VkClearValue{ .color = .{ .float32 = .{ 0.0, 0.0, 0.0, 1.0 } } };
+        const _clear_color = c.VkClearValue{ .color = .{ .float32 = .{ 0.1, 0.1, 0.1, 1.0 } } };
 
         const render_pass_info = c.VkRenderPassBeginInfo{
-            .renderPass = app.render_pass,
-            .framebuffer = app.framebuffers[@intCast(image_index)],
+            .renderPass = self.render_pass,
+            .framebuffer = self.framebuffers[@intCast(image_index)],
             .renderArea = .{
                 .offset = .{ .x = 0, .y = 0 },
-                .extent = app.swapchain_extent,
+                .extent = self.swapchain_extent,
             },
             .clearValueCount = 1,
-            .pClearValues = &clear_color,
+            .pClearValues = &_clear_color,
         };
-        c.vkCmdBeginRenderPass(app.command_buffer, &render_pass_info, c.VK_SUBPASS_CONTENTS_INLINE);
+        c.vkCmdBeginRenderPass(self.command_buffer, &render_pass_info, c.VK_SUBPASS_CONTENTS_INLINE);
 
         // Bind the graphics pipeline.
-        c.vkCmdBindPipeline(app.command_buffer, c.VK_PIPELINE_BIND_POINT_GRAPHICS, app.graphics_pipeline);
+        c.vkCmdBindPipeline(self.command_buffer, c.VK_PIPELINE_BIND_POINT_GRAPHICS, self.graphics_pipeline);
 
         // Bind the vertex buffer.
-        const vertex_buffers = [_]c.VkBuffer{app.vertex_buffer};
+        const vertex_buffers = [_]c.VkBuffer{self.vertex_buffer};
         const offsets = [_]c.VkDeviceSize{0};
-        c.vkCmdBindVertexBuffers(app.command_buffer, 0, 1, &vertex_buffers, &offsets);
+        c.vkCmdBindVertexBuffers(self.command_buffer, 0, 1, &vertex_buffers, &offsets);
         c.vkCmdBindDescriptorSets(
-            app.command_buffer,
+            self.command_buffer,
             c.VK_PIPELINE_BIND_POINT_GRAPHICS,
-            app.pipeline_layout,
+            self.pipeline_layout,
             0,
             1,
-            &app.descriptor_set,
+            &self.descriptor_set,
             0,
             null,
         );
 
-        c.vkCmdDraw(app.command_buffer, vertex_array.len, 1, 0, 0);
+        c.vkCmdDraw(self.command_buffer, @intCast(self.scene.axis.len), 1, 0, 0);
 
-        c.vkCmdEndRenderPass(app.command_buffer);
-        try checkVk(c.vkEndCommandBuffer(app.command_buffer));
+        c.vkCmdEndRenderPass(self.command_buffer);
+        try checkVk(c.vkEndCommandBuffer(self.command_buffer));
     }
 };
 
