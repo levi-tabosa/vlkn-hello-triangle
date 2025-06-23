@@ -162,17 +162,16 @@ const Scene = struct {
     grid: []Vertex,
 
     pub fn init(allocator: std.mem.Allocator) !Self {
-        // const self = try allocator.create(Self);
         var camera = Camera.init(.{ .pos = .{ 2, 2, 2 } }, 13);
 
         return .{
             .axis = .{
                 // X-axis (Red)
-                .{ .pos = .{ -1.0, 0.0, 0.0 }, .color = .{ 1.0, 0.0, 0.0, 1.0 } }, .{ .pos = .{ 1.0, 0.0, 0.0 }, .color = .{ 1.0, 0.0, 0.0, 1.0 } },
+                .{ .pos = .{ -5.0, 0.0, 0.0 }, .color = .{ 1.0, 0.0, 0.0, 1.0 } }, .{ .pos = .{ 5.0, 0.0, 0.0 }, .color = .{ 1.0, 0.0, 0.0, 1.0 } },
                 // Y-axis (Green)
-                .{ .pos = .{ 0.0, -1.0, 0.0 }, .color = .{ 0.0, 1.0, 0.0, 1.0 } }, .{ .pos = .{ 0.0, 1.0, 0.0 }, .color = .{ 0.0, 1.0, 0.0, 1.0 } },
+                .{ .pos = .{ 0.0, -5.0, 0.0 }, .color = .{ 0.0, 1.0, 0.0, 1.0 } }, .{ .pos = .{ 0.0, 5.0, 0.0 }, .color = .{ 0.0, 1.0, 0.0, 1.0 } },
                 // Z-axis (Blue)
-                .{ .pos = .{ 0.0, 0.0, -1.0 }, .color = .{ 0.0, 0.0, 1.0, 1.0 } }, .{ .pos = .{ 0.0, 0.0, 1.0 }, .color = .{ 0.0, 0.0, 1.0, 1.0 } },
+                .{ .pos = .{ 0.0, 0.0, -5.0 }, .color = .{ 0.0, 0.0, 1.0, 1.0 } }, .{ .pos = .{ 0.0, 0.0, 5.0 }, .color = .{ 0.0, 0.0, 1.0, 1.0 } },
             },
             .grid = try createGrid(allocator, 20),
             .camera = camera,
@@ -328,7 +327,7 @@ const App = struct {
     uniform_buffer_memory: c.VkDeviceMemory = undefined,
 
     // Scene with vertex data
-    scene: *Scene,
+    scene: Scene,
 
     fn initWindow(self: *Self) !void {
         c.glfwWindowHint(c.GLFW_CLIENT_API, c.GLFW_NO_API);
@@ -1002,8 +1001,11 @@ const App = struct {
     }
 
     fn createVertexBuffer(self: *Self) !void {
-        // const buffer_size = @sizeOf(Vertex) * (self.scene.axis.len + self.scene.grid.len);
-        const buffer_size = @sizeOf(Vertex) * self.scene.axis.len; // Only grid vertices for now
+        // Calculate the total size needed for both axis and grid vertices.
+        const total_vertex_count = self.scene.axis.len + self.scene.grid.len;
+        const buffer_size = @sizeOf(Vertex) * total_vertex_count;
+
+        if (buffer_size == 0) return; // Avoid creating a zero-size buffer
 
         const buffer = try self.createBuffer(
             buffer_size,
@@ -1013,18 +1015,24 @@ const App = struct {
         self.vertex_buffer = buffer.buffer;
         self.vertex_buffer_memory = buffer.memory;
 
-        // Copy vertex data to the buffer
+        // --- Copy vertex data to the buffer ---
         var data_ptr: ?*anyopaque = undefined;
         try checkVk(c.vkMapMemory(self.device, buffer.memory, 0, buffer_size, 0, &data_ptr));
         defer c.vkUnmapMemory(self.device, buffer.memory);
 
-        const mapped_vertex_slice: [*]Vertex = @ptrCast(@alignCast(data_ptr));
+        const many_item_ptr: [*]Vertex = @ptrCast(@alignCast(data_ptr.?));
+        const mapped_vertex_slice = many_item_ptr[0..total_vertex_count];
+
+        // Copy the axis vertices to the beginning of the buffer.
         @memcpy(mapped_vertex_slice[0..self.scene.axis.len], &self.scene.axis);
-        // @memcpy(mapped_vertex_slice[self.scene.grid.len..], &self.scene.axis);
+
+        // Copy the grid vertices immediately after the axis vertices.
+        const grid_offset = self.scene.axis.len;
+        @memcpy(mapped_vertex_slice[grid_offset .. grid_offset + self.scene.grid.len], self.scene.grid);
     }
 
-    fn updateVertexBuffer(self: *Self) !void {
-        const buffer_size = @sizeOf(Vertex) * self.scene.axis.len;
+    fn updateVertexBuffers(self: *Self) !void {
+        const buffer_size = @sizeOf(Vertex) * (self.scene.axis.len + self.scene.grid.len);
 
         var data_ptr: ?*anyopaque = undefined;
         try checkVk(c.vkMapMemory(self.device, self.vertex_buffer_memory, 0, buffer_size, 0, &data_ptr));
@@ -1032,6 +1040,8 @@ const App = struct {
 
         const mapped_vertex_slice: [*]Vertex = @ptrCast(@alignCast(data_ptr));
         @memcpy(mapped_vertex_slice[0..self.scene.axis.len], &self.scene.axis);
+        const grid_offset = self.scene.axis.len;
+        @memcpy(mapped_vertex_slice[grid_offset .. grid_offset + self.scene.grid.len], self.scene.grid);
     }
 
     fn createUniformBuffer(self: *Self) !void {
@@ -1185,7 +1195,7 @@ const App = struct {
             null,
         );
 
-        c.vkCmdDraw(self.command_buffer, @intCast(self.scene.axis.len), 1, 0, 0);
+        c.vkCmdDraw(self.command_buffer, @intCast(self.scene.axis.len + self.scene.grid.len), 1, 0, 0);
 
         c.vkCmdEndRenderPass(self.command_buffer);
         try checkVk(c.vkEndCommandBuffer(self.command_buffer));
@@ -1195,27 +1205,25 @@ const App = struct {
 // --- Zig Entry Point ---
 // --- Entry Point ---
 pub fn main() !void {
-    // Initialize GLFW
     try checkGlfw(c.glfwInit());
     defer c.glfwTerminate();
 
-    var da = std.heap.DebugAllocator(.{}){};
-    defer _ = da.deinit();
+    var da: std.heap.DebugAllocator(.{}) = .init;
+    defer std.log.info("memory leak: {}{any}\n", .{
+        da.detectLeaks(),
+        da.deinit(),
+    });
+
     const allocator = da.allocator();
 
-    // FIX: Allocate the App and Scene structs on the heap.
-    // This gives them stable memory addresses that are safe to pass to
-    // GLFW's user pointer and retrieve from a callback.
     const app = try allocator.create(App);
     defer allocator.destroy(app);
 
-    // Initialize the app instance *after* allocation.
-    // The scene is also allocated on the heap.
     app.* = .{
         .allocator = allocator,
-        .scene = @constCast(&try Scene.init(allocator)),
+        .scene = try Scene.init(allocator),
     };
-    // The scene will be deinitialized by app.cleanup
+
     defer app.cleanup();
 
     try app.initWindow();
