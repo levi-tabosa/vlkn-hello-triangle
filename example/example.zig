@@ -55,6 +55,7 @@ const WINDOW_HEIGHT = 600;
 const Vertex = extern struct {
     pos: @Vector(3, f32),
     offset: @Vector(3, f32) = .{ 0, 0, 0 }, // This is an optional offset vector, can be used for transformations.
+    color: @Vector(4, f32) = .{ 1, 1, 1, 1 }, // Default color is white.
 
     pub fn getBindingDescription() c.VkVertexInputBindingDescription {
         return .{
@@ -64,7 +65,7 @@ const Vertex = extern struct {
         };
     }
 
-    pub fn getAttributeDescriptions() [2]c.VkVertexInputAttributeDescription {
+    pub fn getAttributeDescriptions() [3]c.VkVertexInputAttributeDescription {
         return .{ .{
             .binding = 0,
             .location = 0,
@@ -75,6 +76,11 @@ const Vertex = extern struct {
             .location = 1,
             .format = c.VK_FORMAT_R32G32B32_SFLOAT,
             .offset = @offsetOf(Vertex, "offset"),
+        }, .{
+            .binding = 0,
+            .location = 2,
+            .format = c.VK_FORMAT_R32G32B32A32_SFLOAT,
+            .offset = @offsetOf(Vertex, "color"),
         } };
     }
 
@@ -121,7 +127,6 @@ const Vertex = extern struct {
 const UniformBufferObject = extern struct {
     view_matrix: [16]f32, // 4x4 matrix for the view transformation
     perspective_matrix: [16]f32, // 4x4 matrix for the perspective projection
-    color: [4]f32,
 };
 
 // --- Vertex Data ---
@@ -129,22 +134,20 @@ const UniformBufferObject = extern struct {
 
 const Callbacks = struct {
     fn cbCursorPos(wd: ?*c.GLFWwindow, xpos: f64, ypos: f64) callconv(.C) void {
-        const app: *App = @alignCast(@ptrCast(c.glfwGetWindowUserPointer(wd)));
+        // const app: *App = @alignCast(@ptrCast(c.glfwGetWindowUserPointer(wd)));
+        const user_ptr = c.glfwGetWindowUserPointer(wd orelse return) orelse return;
+        const app: *App = @alignCast(@ptrCast(user_ptr));
 
         const ndc_x = @as(f32, @floatCast(xpos)) / @as(f32, @floatFromInt(WINDOW_WIDTH)) * 2.0 - 1.0;
         // Y conversion from screen space to NDC space.
         const ndc_y = @as(f32, @floatCast(ypos)) / @as(f32, @floatFromInt(WINDOW_HEIGHT)) * 2.0 - 1.0;
 
-        // Update the position of the second vertex (one end of the first line)
-        // Note: This sets the vertex's MODEL position to an NDC-like coordinate.
-        // It will move on screen, but not directly under the cursor because it will
-        // still be transformed by the view/projection matrices.
-        app.scene.axis[1].pos = .{ ndc_x, ndc_y, 0.0 };
-
-        app.updateVertexBuffer() catch |err| {
-            std.log.err("Failed to update vertex buffer in callback: {any}", .{err});
-            return;
-        };
+        // Convert NDC coordinates to radians for pitch and yaw.
+        const pitch = -ndc_y * std.math.pi / 2.0; // Invert Y-axis for camera
+        const yaw = ndc_x * std.math.pi; // X-axis maps to yaw
+        // _ = pitch;
+        // _ = yaw;
+        app.scene.setPitchYaw(pitch, yaw);
     }
 };
 
@@ -154,25 +157,77 @@ const Scene = struct {
     pitch: f32 = 0.5,
     yaw: f32 = 0.2,
     view_matrix: [16]f32,
-    camera: *Camera,
+    camera: Camera,
     axis: [6]Vertex,
+    grid: []Vertex,
 
-    fn init(allocator: std.mem.Allocator) !Self {
-        _ = allocator;
+    pub fn init(allocator: std.mem.Allocator) !Self {
+        // const self = try allocator.create(Self);
         var camera = Camera.init(.{ .pos = .{ 2, 2, 2 } }, 13);
 
         return .{
             .axis = .{
                 // X-axis (Red)
-                .{ .pos = .{ 0.0, 0.0, 0.0 } }, .{ .pos = .{ 1.0, 0.0, 0.0 } },
+                .{ .pos = .{ -1.0, 0.0, 0.0 }, .color = .{ 1.0, 0.0, 0.0, 1.0 } }, .{ .pos = .{ 1.0, 0.0, 0.0 }, .color = .{ 1.0, 0.0, 0.0, 1.0 } },
                 // Y-axis (Green)
-                .{ .pos = .{ 0.0, 0.0, 0.0 } }, .{ .pos = .{ 0.0, 1.0, 0.0 } },
+                .{ .pos = .{ 0.0, -1.0, 0.0 }, .color = .{ 0.0, 1.0, 0.0, 1.0 } }, .{ .pos = .{ 0.0, 1.0, 0.0 }, .color = .{ 0.0, 1.0, 0.0, 1.0 } },
                 // Z-axis (Blue)
-                .{ .pos = .{ 0.0, 0.0, 0.0 } }, .{ .pos = .{ 0.0, 0.0, 1.0 } },
+                .{ .pos = .{ 0.0, 0.0, -1.0 }, .color = .{ 0.0, 0.0, 1.0, 1.0 } }, .{ .pos = .{ 0.0, 0.0, 1.0 }, .color = .{ 0.0, 0.0, 1.0, 1.0 } },
             },
-            .camera = &camera,
+            .grid = try createGrid(allocator, 20),
+            .camera = camera,
             .view_matrix = camera.viewMatrix(),
         };
+        // return self;
+    }
+
+    pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
+        allocator.free(self.grid);
+    }
+
+    pub fn setPitchYaw(self: *Self, pitch: f32, yaw: f32) void {
+        self.pitch = pitch;
+        self.yaw = yaw;
+        self.updateViewMatrix();
+    }
+
+    pub fn updateViewMatrix(self: *Self) void {
+        if (self.camera.radius) |r| {
+            self.camera.pos = .{
+                .pos = .{
+                    r * @cos(self.yaw) * @cos(self.pitch),
+                    r * @sin(self.yaw) * @cos(self.pitch),
+                    r * @sin(self.pitch),
+                },
+            };
+        } else {
+            self.camera.target = Vertex.add(self.camera.pos, Vertex{ .pos = .{
+                @cos(-self.yaw) * @cos(self.pitch),
+                @sin(-self.yaw) * @cos(self.pitch),
+                @sin(self.pitch),
+            } });
+        }
+
+        self.view_matrix = self.camera.viewMatrix();
+    }
+
+    fn createGrid(allocator: std.mem.Allocator, resolution: u32) ![]Vertex {
+        const j: i32 = @intCast(resolution / 2);
+        const upperLimit = j;
+        var i: i32 = -j;
+        var grid = allocator.alloc(Vertex, resolution * 4) catch unreachable;
+        const fixed: f32 = @floatFromInt(j);
+
+        while (i < upperLimit) : (i += 1) {
+            const idx: f32 = @as(f32, @floatFromInt(i));
+            const index = @as(usize, @intCast((i + j) * 4));
+            grid[index] = Vertex{ .pos = .{ idx, fixed, 0.0 }, .color = .{ idx, fixed, 0.0, 1.0 } };
+            grid[index + 1] = Vertex{ .pos = .{ idx, -fixed, 0.0 }, .color = .{ idx, -fixed, 0.0, 1.0 } };
+            grid[index + 2] = Vertex{ .pos = .{ fixed, idx, 0.0 }, .color = .{ fixed, idx, 0.0, 1.0 } };
+            grid[index + 3] = Vertex{ .pos = .{ -fixed, idx, 0.0 }, .color = .{ -fixed, idx, 0.0, 1.0 } };
+        }
+
+        return grid;
     }
 };
 
@@ -274,23 +329,6 @@ const App = struct {
 
     // Scene with vertex data
     scene: *Scene,
-    // --- Entry Point ---
-    pub fn main() !void {
-        // Initialize GLFW
-        try checkGlfw(c.glfwInit());
-        defer c.glfwTerminate();
-
-        var da = std.heap.DebugAllocator(.{}){};
-        defer _ = da.deinit();
-        const allocator = da.allocator();
-        var scene = try Scene.init(allocator);
-        var app = Self{ .allocator = allocator, .scene = &scene };
-        defer app.cleanup();
-
-        try app.initWindow();
-        try app.initVulkan();
-        try app.run();
-    }
 
     fn initWindow(self: *Self) !void {
         c.glfwWindowHint(c.GLFW_CLIENT_API, c.GLFW_NO_API);
@@ -300,8 +338,7 @@ const App = struct {
         if (self.window == null) return error.GlfwCreateWindowFailed;
         c.glfwSetWindowUserPointer(self.window, self);
 
-        // Disabling cursor callback for now to simplify debugging
-        // _ = c.glfwSetCursorPosCallback(self.window, Callbacks.cbCursorPos);
+        _ = c.glfwSetCursorPosCallback(self.window, Callbacks.cbCursorPos);
     }
 
     fn initVulkan(app: *Self) !void {
@@ -335,6 +372,7 @@ const App = struct {
 
     // The cleanup function, destroying Vulkan objects in reverse order of creation.
     fn cleanup(app: *Self) void {
+        app.scene.deinit(app.allocator);
         // Destroy synchronization objects
         c.vkDestroySemaphore(app.device, app.image_available_semaphore, app.alloc_callbacks);
         c.vkDestroySemaphore(app.device, app.render_finished_semaphore, app.alloc_callbacks);
@@ -737,7 +775,6 @@ const App = struct {
         c.vkUpdateDescriptorSets(self.device, 1, &desc_write, 0, null);
 
         const ubo = UniformBufferObject{
-            .color = .{ 1.0, 1.0, 1.0, 1.0 }, // White color for the lines
             .view_matrix = self.scene.view_matrix,
             .perspective_matrix = blk: {
                 // FIX: This is the correct perspective matrix for Vulkan's coordinate system.
@@ -965,7 +1002,8 @@ const App = struct {
     }
 
     fn createVertexBuffer(self: *Self) !void {
-        const buffer_size = @sizeOf(Vertex) * self.scene.axis.len;
+        // const buffer_size = @sizeOf(Vertex) * (self.scene.axis.len + self.scene.grid.len);
+        const buffer_size = @sizeOf(Vertex) * self.scene.axis.len; // Only grid vertices for now
 
         const buffer = try self.createBuffer(
             buffer_size,
@@ -982,6 +1020,7 @@ const App = struct {
 
         const mapped_vertex_slice: [*]Vertex = @ptrCast(@alignCast(data_ptr));
         @memcpy(mapped_vertex_slice[0..self.scene.axis.len], &self.scene.axis);
+        // @memcpy(mapped_vertex_slice[self.scene.grid.len..], &self.scene.axis);
     }
 
     fn updateVertexBuffer(self: *Self) !void {
@@ -1006,6 +1045,34 @@ const App = struct {
 
         self.uniform_buffer = uniform_buffer_obj.buffer;
         self.uniform_buffer_memory = uniform_buffer_obj.memory;
+    }
+
+    fn updateUniformBuffer(self: *Self) !void {
+        const ubo = UniformBufferObject{
+            .view_matrix = self.scene.view_matrix,
+            .perspective_matrix = blk: {
+                // FIX: This is the correct perspective matrix for Vulkan's coordinate system.
+                //TODO: Internalize this better, maybe use a function to generate it.
+                const fovy = std.math.degreesToRadians(45.0);
+                const aspect = @as(f32, @floatFromInt(WINDOW_WIDTH)) / @as(f32, @floatFromInt(WINDOW_HEIGHT));
+                const near = 0.1;
+                const far = 100.0;
+                const f = 1.0 / std.math.tan(fovy / 2.0);
+
+                break :blk .{
+                    f / aspect, 0, 0, 0,
+                    0, -f, 0,                           0, // Note the -f to flip Y
+                    0, 0,  far / (near - far),          -1,
+                    0, 0,  (far * near) / (near - far), 0,
+                };
+            },
+        };
+
+        var ubo_data_ptr: ?*anyopaque = undefined;
+        try checkVk(c.vkMapMemory(self.device, self.uniform_buffer_memory, 0, @sizeOf(UniformBufferObject), 0, &ubo_data_ptr));
+        const mapped_ubo: *UniformBufferObject = @ptrCast(@alignCast(ubo_data_ptr.?));
+        mapped_ubo.* = ubo;
+        c.vkUnmapMemory(self.device, self.uniform_buffer_memory);
     }
 
     fn createCommandPool(self: *Self) !void {
@@ -1042,6 +1109,7 @@ const App = struct {
     fn drawFrame(self: *Self) !void {
         // Wait for the previous frame's fence to be signaled (meaning it's done rendering).
         try checkVk(c.vkWaitForFences(self.device, 1, &self.in_flight_fence, c.VK_TRUE, std.math.maxInt(u64)));
+        try self.updateUniformBuffer();
         try checkVk(c.vkResetFences(self.device, 1, &self.in_flight_fence));
 
         // Acquire an image from the swapchain.
@@ -1125,6 +1193,32 @@ const App = struct {
 };
 
 // --- Zig Entry Point ---
+// --- Entry Point ---
 pub fn main() !void {
-    try App.main();
+    // Initialize GLFW
+    try checkGlfw(c.glfwInit());
+    defer c.glfwTerminate();
+
+    var da = std.heap.DebugAllocator(.{}){};
+    defer _ = da.deinit();
+    const allocator = da.allocator();
+
+    // FIX: Allocate the App and Scene structs on the heap.
+    // This gives them stable memory addresses that are safe to pass to
+    // GLFW's user pointer and retrieve from a callback.
+    const app = try allocator.create(App);
+    defer allocator.destroy(app);
+
+    // Initialize the app instance *after* allocation.
+    // The scene is also allocated on the heap.
+    app.* = .{
+        .allocator = allocator,
+        .scene = @constCast(&try Scene.init(allocator)),
+    };
+    // The scene will be deinitialized by app.cleanup
+    defer app.cleanup();
+
+    try app.initWindow();
+    try app.initVulkan();
+    try app.run();
 }
