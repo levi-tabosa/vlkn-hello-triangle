@@ -49,6 +49,36 @@ fn checkGlfw(result: c_int) !void {
 const WINDOW_WIDTH = 800;
 const WINDOW_HEIGHT = 600;
 
+const Instance = struct {
+    handle: c.VkInstance,
+    alloc_callbacks: ?*c.VkAllocationCallbacks,
+    destroy_instance: c.vkDestroyInstance,
+
+    pub fn init(allocations: ?*c.VkAllocationCallbacks, app_info: c.VkApplicationInfo) !Instance {
+        // Get the extensions required by GLFW to interface with the window system.
+        var extension_count: u32 = 0;
+        const required_extensions_ptr = c.glfwGetRequiredInstanceExtensions(&extension_count);
+        for (0..extension_count) |i| {
+            std.log.info("Required extension: {s}", .{std.mem.span(required_extensions_ptr[i])});
+        }
+        const required_extensions = required_extensions_ptr[0..extension_count];
+
+        const info = c.VkInstanceCreateInfo{
+            .sType = c.VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
+            .pApplicationInfo = &app_info,
+            .enabledExtensionCount = required_extensions.len,
+            .ppEnabledExtensionNames = &required_extensions,
+        };
+        var handle: c.VkInstance = undefined;
+        try checkVk(c.vkCreateInstance(&info, allocations, &handle));
+        return .{
+            .handle = handle,
+            .alloc_callbacks = allocations,
+            .destroy_instance = c.vkDestroyInstance,
+        };
+    }
+};
+
 // --- Vertex Definition ---
 // This struct defines the layout of our vertex data in memory.
 // It must match the `layout(location = ...)` in the vertex shader.
@@ -340,90 +370,90 @@ const App = struct {
         _ = c.glfwSetCursorPosCallback(self.window, Callbacks.cbCursorPos);
     }
 
-    fn initVulkan(app: *Self) !void {
-        try app.createInstance();
-        try app.createSurface();
-        try app.pickPhysicalDevice();
-        try app.createLogicalDeviceAndQueues();
-        try app.createSwapchain();
-        try app.createImageViews();
-        try app.createVertexBuffer();
-        try app.createUniformBuffer();
-        try app.createDescriptorSetLayout();
-        try app.createDescriptorPoolAndSets();
-        try app.createRenderPass();
-        try app.createGraphicsPipeline();
-        try app.createFramebuffers();
-        try app.createCommandPool();
-        try app.createCommandBuffer();
-        try app.createSyncObjects();
+    fn initVulkan(self: *Self) !void {
+        try self.createInstance();
+        try self.createSurface();
+        try self.pickPhysicalDevice();
+        try self.createLogicalDeviceAndQueues();
+        try self.createSwapchain();
+        try self.createImageViews();
+        try self.createVertexBuffer();
+        try self.createUniformBuffer();
+        try self.createDescriptorSetLayout();
+        try self.createDescriptorPoolAndSets();
+        try self.createRenderPass();
+        try self.createGraphicsPipeline();
+        try self.createFramebuffers();
+        try self.createCommandPool();
+        try self.createCommandBuffer();
+        try self.createSyncObjects();
     }
 
     // The main application loop.
-    fn run(app: *Self) !void {
-        while (c.glfwWindowShouldClose(app.window) == 0) {
+    fn run(self: *Self) !void {
+        while (c.glfwWindowShouldClose(self.window) == 0) {
             c.glfwPollEvents();
-            try app.drawFrame();
+            try self.drawFrame();
         }
         // Wait for the GPU to finish all operations before we start cleaning up.
-        try checkVk(c.vkDeviceWaitIdle(app.device));
+        try checkVk(c.vkDeviceWaitIdle(self.device));
     }
 
     // The cleanup function, destroying Vulkan objects in reverse order of creation.
-    fn cleanup(app: *Self) void {
-        app.scene.deinit(app.allocator);
+    fn cleanup(self: *Self) void {
+        self.scene.deinit(self.allocator);
         // Destroy synchronization objects
-        c.vkDestroySemaphore(app.device, app.image_available_semaphore, app.alloc_callbacks);
-        c.vkDestroySemaphore(app.device, app.render_finished_semaphore, app.alloc_callbacks);
-        c.vkDestroyFence(app.device, app.in_flight_fence, app.alloc_callbacks);
+        c.vkDestroySemaphore(self.device, self.image_available_semaphore, self.alloc_callbacks);
+        c.vkDestroySemaphore(self.device, self.render_finished_semaphore, self.alloc_callbacks);
+        c.vkDestroyFence(self.device, self.in_flight_fence, self.alloc_callbacks);
 
         // Destroy buffers and memory
-        c.vkDestroyBuffer(app.device, app.vertex_buffer, app.alloc_callbacks);
-        c.vkDestroyBuffer(app.device, app.uniform_buffer, app.alloc_callbacks);
+        c.vkDestroyBuffer(self.device, self.vertex_buffer, self.alloc_callbacks);
+        c.vkDestroyBuffer(self.device, self.uniform_buffer, self.alloc_callbacks);
 
-        c.vkFreeMemory(app.device, app.vertex_buffer_memory, app.alloc_callbacks);
-        c.vkFreeMemory(app.device, app.uniform_buffer_memory, app.alloc_callbacks);
+        c.vkFreeMemory(self.device, self.vertex_buffer_memory, self.alloc_callbacks);
+        c.vkFreeMemory(self.device, self.uniform_buffer_memory, self.alloc_callbacks);
 
         // Destroy command pool (which also frees command buffers)
-        c.vkDestroyCommandPool(app.device, app.command_pool, app.alloc_callbacks);
+        c.vkDestroyCommandPool(self.device, self.command_pool, self.alloc_callbacks);
 
         // Destroy framebuffers
-        for (app.framebuffers) |fb| {
-            c.vkDestroyFramebuffer(app.device, fb, app.alloc_callbacks);
+        for (self.framebuffers) |fb| {
+            c.vkDestroyFramebuffer(self.device, fb, self.alloc_callbacks);
         }
-        app.allocator.free(app.framebuffers);
+        self.allocator.free(self.framebuffers);
 
         // Destroy pipeline and related objects
-        c.vkDestroyPipeline(app.device, app.graphics_pipeline, app.alloc_callbacks);
-        c.vkDestroyPipelineLayout(app.device, app.pipeline_layout, app.alloc_callbacks);
-        c.vkDestroyRenderPass(app.device, app.render_pass, app.alloc_callbacks);
-        c.vkDestroyDescriptorPool(app.device, app.descriptor_pool, app.alloc_callbacks);
-        c.vkDestroyDescriptorSetLayout(app.device, app.descriptor_set_layout, app.alloc_callbacks);
+        c.vkDestroyPipeline(self.device, self.graphics_pipeline, self.alloc_callbacks);
+        c.vkDestroyPipelineLayout(self.device, self.pipeline_layout, self.alloc_callbacks);
+        c.vkDestroyRenderPass(self.device, self.render_pass, self.alloc_callbacks);
+        c.vkDestroyDescriptorPool(self.device, self.descriptor_pool, self.alloc_callbacks);
+        c.vkDestroyDescriptorSetLayout(self.device, self.descriptor_set_layout, self.alloc_callbacks);
 
         // Destroy image views
-        for (app.swapchain_image_views) |iv| {
-            c.vkDestroyImageView(app.device, iv, app.alloc_callbacks);
+        for (self.swapchain_image_views) |iv| {
+            c.vkDestroyImageView(self.device, iv, self.alloc_callbacks);
         }
-        app.allocator.free(app.swapchain_image_views);
-        app.allocator.free(app.swapchain_images);
+        self.allocator.free(self.swapchain_image_views);
+        self.allocator.free(self.swapchain_images);
 
         // Destroy swapchain and surface
-        c.vkDestroySwapchainKHR(app.device, app.swapchain, app.alloc_callbacks);
-        c.vkDestroySurfaceKHR(app.instance, app.surface, app.alloc_callbacks);
+        c.vkDestroySwapchainKHR(self.device, self.swapchain, self.alloc_callbacks);
+        c.vkDestroySurfaceKHR(self.instance, self.surface, self.alloc_callbacks);
 
         // Destroy logical and physical devices
-        c.vkDestroyDevice(app.device, app.alloc_callbacks);
+        c.vkDestroyDevice(self.device, self.alloc_callbacks);
 
         // Destroy Vulkan instance
-        c.vkDestroyInstance(app.instance, app.alloc_callbacks);
+        c.vkDestroyInstance(self.instance, self.alloc_callbacks);
 
         // Destroy window
-        c.glfwDestroyWindow(app.window);
+        c.glfwDestroyWindow(self.window);
     }
 
     // --- Vulkan Setup Functions ---
 
-    fn createInstance(app: *Self) !void {
+    fn createInstance(self: *Self) !void {
         const app_info = c.VkApplicationInfo{
             .pApplicationName = "Vulkan Line App",
             .applicationVersion = c.VK_MAKE_API_VERSION(0, 1, 0, 0),
@@ -446,17 +476,17 @@ const App = struct {
             .ppEnabledExtensionNames = required_extensions.ptr,
         };
 
-        try checkVk(c.vkCreateInstance(&create_info, app.alloc_callbacks, &app.instance));
+        try checkVk(c.vkCreateInstance(&create_info, self.alloc_callbacks, &self.instance));
     }
 
-    fn createSurface(app: *Self) !void {
-        try checkVk(c.glfwCreateWindowSurface(app.instance, app.window, app.alloc_callbacks, &app.surface));
+    fn createSurface(self: *Self) !void {
+        try checkVk(c.glfwCreateWindowSurface(self.instance, self.window, self.alloc_callbacks, &self.surface));
     }
 
-    fn pickPhysicalDevice(app: *Self) !void {
+    fn pickPhysicalDevice(self: *Self) !void {
         var device_count: u32 = 0;
         // 1. First call to get the count
-        try checkVk(c.vkEnumeratePhysicalDevices(app.instance, &device_count, null));
+        try checkVk(c.vkEnumeratePhysicalDevices(self.instance, &device_count, null));
 
         if (device_count == 0) {
             std.log.err("Failed to find GPUs with Vulkan support!", .{});
@@ -464,15 +494,11 @@ const App = struct {
         }
 
         // 2. Allocate space and make the second call to get the handles
-        const devices = try app.allocator.alloc(c.VkPhysicalDevice, device_count);
-        defer app.allocator.free(devices);
-        try checkVk(c.vkEnumeratePhysicalDevices(app.instance, &device_count, devices.ptr));
-        if (device_count > 1) std.log.info(
-            "More than one GPU physical device found, picking first: {any}",
-            .{devices[0]},
-        );
+        const devices = try self.allocator.alloc(c.VkPhysicalDevice, device_count);
+        defer self.allocator.free(devices);
+        try checkVk(c.vkEnumeratePhysicalDevices(self.instance, &device_count, devices.ptr));
 
-        app.physical_device = devices[0];
+        self.physical_device = devices[0];
     }
 
     /// Helper function
@@ -508,8 +534,8 @@ const App = struct {
         return error.NoSuitableQueueFamily;
     }
 
-    fn createLogicalDeviceAndQueues(app: *Self) !void {
-        const queue_family_index = try findQueueFamilies(app.allocator, app.physical_device, app.surface);
+    fn createLogicalDeviceAndQueues(self: *Self) !void {
+        const queue_family_index = try findQueueFamilies(self.allocator, self.physical_device, self.surface);
         const queue_priority: f32 = 1.0;
         const queue_create_info = c.VkDeviceQueueCreateInfo{
             .queueFamilyIndex = queue_family_index,
@@ -530,14 +556,14 @@ const App = struct {
         };
 
         try checkVk(c.vkCreateDevice(
-            app.physical_device,
+            self.physical_device,
             &create_info,
-            app.alloc_callbacks,
-            &app.device,
+            self.alloc_callbacks,
+            &self.device,
         ));
 
         // Get a handle to the graphics queue.
-        c.vkGetDeviceQueue(app.device, queue_family_index, 0, &app.graphics_queue);
+        c.vkGetDeviceQueue(self.device, queue_family_index, 0, &self.graphics_queue);
     }
 
     ///  TODO: refactor
