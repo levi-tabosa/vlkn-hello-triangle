@@ -110,6 +110,10 @@ const Callbacks = struct {
         const pitch = -ndc_y * std.math.pi / 2.0; // Invert Y-axis for camera
         const yaw = ndc_x * std.math.pi; // X-axis maps to yaw
 
+        app.updateUniformBuffer() catch |err| {
+            std.log.err("error : {any}", .{err});
+            unreachable;
+        };
         app.scene.setPitchYaw(pitch, yaw);
     }
 
@@ -1318,7 +1322,7 @@ const App = struct {
             std.math.maxInt(u64),
         ));
 
-        try self.updateUniformBuffer();
+        // try self.updateUniformBuffer();
 
         // Acquire an image from the swapchain.
         var image_index: u32 = 0;
@@ -1439,6 +1443,7 @@ const App = struct {
             .Uniform,
             c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
         );
+        try self.updateUniformBuffer();
     }
 
     fn updateUniformBuffer(self: *Self) !void {
@@ -1447,7 +1452,7 @@ const App = struct {
             .perspective_matrix = blk: {
                 // FIX: This is the correct perspective matrix for Vulkan's coordinate system.
                 //TODO: Internalize this better, maybe use a function to generate it.
-                const fovy = std.math.degreesToRadians(45.0);
+                const fovy = std.math.degreesToRadians(90.0);
                 // TODO: Get these values from input and served window dimentions
                 const aspect: f32 = @as(f32, @floatFromInt(self.window.size.x)) / @as(f32, @floatFromInt(self.window.size.y));
                 const near = 0.1;
