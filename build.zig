@@ -25,7 +25,7 @@ pub fn build(b: *std.Build) !void {
         description: ?[]const u8 = null,
         install_dir: ?[]const u8 = null,
     }{
-        .{ .step_id = "triangle", .source = "src/main.zig" },
+        .{ .step_id = "triangle", .source = "example/main.zig" },
         .{ .step_id = "example", .source = "example/example.zig" },
         .{ .step_id = "test", .source = "example/test.zig" },
     };
@@ -72,6 +72,12 @@ pub fn build(b: *std.Build) !void {
         // The spirv module gets the shaders for the executable.
         exe.root_module.addAnonymousImport("spirv", .{
             .root_source_file = b.path("src/shaders/spirv/spirv.zig"),
+            .target = target,
+        });
+
+        // Scene modules
+        exe.root_module.addAnonymousImport("geometry", .{
+            .root_source_file = b.path("src/scenes/geometry.zig"),
             .target = target,
         });
 

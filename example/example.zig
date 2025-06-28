@@ -5,6 +5,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const spirv = @import("spirv");
+const scene = @import("geometry");
 const c = @cImport({
     @cDefine("GLFW_INCLUDE_VULKAN", {});
     @cInclude("vulkan/vulkan.h");
@@ -16,6 +17,9 @@ const c = @cImport({
 // This makes distribution easier as we don't need to ship the .spv files.
 const vert_shader_code = spirv.vs;
 const frag_shader_code = spirv.fs;
+
+const Vertex = scene.V3;
+const Scene = scene.Scene;
 
 fn checkVk(result: c.VkResult) !void {
     if (result == c.VK_SUCCESS) {
@@ -56,77 +60,32 @@ const WINDOW_HEIGHT = 600;
 // --- Vertex Definition ---
 // This struct defines the layout of our vertex data in memory.
 // It must match the `layout(location = ...)` in the vertex shader.
-const Vertex = extern struct {
-    pos: @Vector(3, f32),
-    offset: @Vector(3, f32) = .{ 0, 0, 0 }, // This is an optional offset vector, can be used for transformations.
-    color: @Vector(4, f32) = .{ 1, 1, 1, 1 }, // Default color is white.
+pub fn getVertexBindingDescription() c.VkVertexInputBindingDescription {
+    return .{
+        .binding = 0,
+        .stride = @sizeOf(Vertex),
+        .inputRate = c.VK_VERTEX_INPUT_RATE_VERTEX,
+    };
+}
 
-    pub fn getBindingDescription() c.VkVertexInputBindingDescription {
-        return .{
-            .binding = 0,
-            .stride = @sizeOf(Vertex),
-            .inputRate = c.VK_VERTEX_INPUT_RATE_VERTEX,
-        };
-    }
-
-    pub fn getAttributeDescriptions() [3]c.VkVertexInputAttributeDescription {
-        return .{ .{
-            .binding = 0,
-            .location = 0,
-            .format = c.VK_FORMAT_R32G32B32_SFLOAT,
-            .offset = @offsetOf(Vertex, "pos"),
-        }, .{
-            .binding = 0,
-            .location = 1,
-            .format = c.VK_FORMAT_R32G32B32_SFLOAT,
-            .offset = @offsetOf(Vertex, "offset"),
-        }, .{
-            .binding = 0,
-            .location = 2,
-            .format = c.VK_FORMAT_R32G32B32A32_SFLOAT,
-            .offset = @offsetOf(Vertex, "color"),
-        } };
-    }
-
-    pub fn add(a: Vertex, b: Vertex) Vertex {
-        return .{ .pos = .{
-            a.pos[0] + b.pos[0],
-            a.pos[1] + b.pos[1],
-            a.pos[2] + b.pos[2],
-        } };
-    }
-
-    pub fn subtract(a: Vertex, b: Vertex) Vertex {
-        return .{ .pos = .{
-            a.pos[0] - b.pos[0],
-            a.pos[1] - b.pos[1],
-            a.pos[2] - b.pos[2],
-        } };
-    }
-
-    pub fn dot(a: Vertex, b: Vertex) f32 {
-        return a.pos[0] * b.pos[0] + a.pos[1] * b.pos[1] + a.pos[2] * b.pos[2];
-    }
-
-    pub fn cross(a: Vertex, b: Vertex) Vertex {
-        return .{ .pos = .{
-            a.pos[1] * b.pos[2] - a.pos[2] * b.pos[1],
-            a.pos[2] * b.pos[0] - a.pos[0] * b.pos[2],
-            a.pos[0] * b.pos[1] - a.pos[1] * b.pos[0],
-        } };
-    }
-
-    pub fn normalize(v: Vertex) Vertex {
-        const length = std.math.sqrt(
-            v.pos[0] * v.pos[0] + v.pos[1] * v.pos[1] + v.pos[2] * v.pos[2],
-        );
-        return .{ .pos = .{
-            v.pos[0] / length,
-            v.pos[1] / length,
-            v.pos[2] / length,
-        } };
-    }
-};
+pub fn getVertexAttributeDescriptions() [3]c.VkVertexInputAttributeDescription {
+    return .{ .{
+        .binding = 0,
+        .location = 0,
+        .format = c.VK_FORMAT_R32G32B32_SFLOAT,
+        .offset = @offsetOf(Vertex, "pos"),
+    }, .{
+        .binding = 0,
+        .location = 1,
+        .format = c.VK_FORMAT_R32G32B32_SFLOAT,
+        .offset = @offsetOf(Vertex, "offset"),
+    }, .{
+        .binding = 0,
+        .location = 2,
+        .format = c.VK_FORMAT_R32G32B32A32_SFLOAT,
+        .offset = @offsetOf(Vertex, "color"),
+    } };
+}
 
 const UniformBufferObject = extern struct {
     view_matrix: [16]f32, // 4x4 matrix for the view transformation
@@ -137,9 +96,9 @@ const UniformBufferObject = extern struct {
 // These are the two 3D vectors that define our line.
 
 const Callbacks = struct {
+    // https://www.glfw.org/docs/3.0/group__input
     fn cbCursorPos(wd: ?*c.GLFWwindow, xpos: f64, ypos: f64) callconv(.C) void {
-        // const app: *App = @alignCast(@ptrCast(c.glfwGetWindowUserPointer(wd)));
-        const user_ptr = c.glfwGetWindowUserPointer(wd orelse return) orelse return;
+        const user_ptr = c.glfwGetWindowUserPointer(wd orelse return) orelse @panic("No window user ptr");
         const app: *App = @alignCast(@ptrCast(user_ptr));
 
         const ndc_x = @as(f32, @floatCast(xpos)) / @as(f32, @floatFromInt(WINDOW_WIDTH)) * 2.0 - 1.0;
@@ -151,130 +110,45 @@ const Callbacks = struct {
         const yaw = ndc_x * std.math.pi; // X-axis maps to yaw
 
         app.scene.setPitchYaw(pitch, yaw);
-        std.debug.print("a", .{});
+    }
+
+    fn cbKey(wd: ?*c.GLFWwindow, char: c_int, code: c_int, btn: c_int, mods: c_int) callconv(.C) void {
+        _ = wd;
+        // const user_ptr = c.glfwGetWindowUserPointer(wd orelse return) orelse @panic("No window user ptr");
+        // const app: *App = @alignCast(@ptrCast(user_ptr));
+
+        std.debug.print("{c}; code : {} action : {} mods : {} \n", .{ @as(u8, @intCast(char)), code, btn, mods });
+
+        // app.scene.;
     }
 };
 
-const Scene = struct {
+const Window = struct {
     const Self = @This();
 
-    pitch: f32 = 0.5,
-    yaw: f32 = 0.2,
-    view_matrix: [16]f32,
-    camera: Camera,
-    axis: [6]Vertex,
-    grid: []Vertex,
+    handle: ?*c.GLFWwindow = undefined,
+    size: struct { x: c_int, y: c_int },
 
-    pub fn init(allocator: std.mem.Allocator, resolution: u32) !Self {
-        const res_float: f32 = @floatFromInt(resolution / 2);
-        var camera = Camera.init(
-            .{ .pos = .{ res_float, res_float, res_float } },
-            res_float,
-        );
-        return .{
-            .axis = .{
-                // X-axis (Red)
-                .{ .pos = .{ -res_float, 0.0, 0.0 }, .color = .{ 1.0, 0.0, 0.0, 1.0 } }, .{ .pos = .{ res_float, 0.0, 0.0 }, .color = .{ 1.0, 0.0, 0.0, 1.0 } },
-                // Y-axis (Green)
-                .{ .pos = .{ 0.0, -res_float, 0.0 }, .color = .{ 0.0, 1.0, 0.0, 1.0 } }, .{ .pos = .{ 0.0, res_float, 0.0 }, .color = .{ 0.0, 1.0, 0.0, 1.0 } },
-                // Z-axis (Blue)
-                .{ .pos = .{ 0.0, 0.0, -res_float }, .color = .{ 0.0, 0.0, 1.0, 1.0 } }, .{ .pos = .{ 0.0, 0.0, res_float }, .color = .{ 0.0, 0.0, 1.0, 1.0 } },
-            },
-            .grid = try createGrid(allocator, resolution),
-            .camera = camera,
-            .view_matrix = camera.viewMatrix(),
-        };
-    }
+    pub fn init(user_ptr: ?*anyopaque, width: c_int, height: c_int, title: [*c]const u8, monitor: ?*c.GLFWmonitor, share: ?*c.GLFWwindow) !Self {
+        c.glfwWindowHint(c.GLFW_CLIENT_API, c.GLFW_NO_API);
+        c.glfwWindowHint(c.GLFW_RESIZABLE, c.GLFW_TRUE);
 
-    pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
-        allocator.free(self.grid);
-    }
+        const handle = c.glfwCreateWindow(width, height, title, monitor, share);
 
-    pub fn setPitchYaw(self: *Self, pitch: f32, yaw: f32) void {
-        self.pitch = pitch;
-        self.yaw = yaw;
-        self.updateViewMatrix();
-    }
-
-    pub fn updateViewMatrix(self: *Self) void {
-        if (self.camera.radius) |r| {
-            self.camera.pos = .{
-                .pos = .{
-                    r * @cos(self.yaw) * @cos(self.pitch),
-                    r * @sin(self.yaw) * @cos(self.pitch),
-                    r * @sin(self.pitch),
-                },
-            };
-        } else {
-            self.camera.target = Vertex.add(self.camera.pos, Vertex{ .pos = .{
-                @cos(-self.yaw) * @cos(self.pitch),
-                @sin(-self.yaw) * @cos(self.pitch),
-                @sin(self.pitch),
-            } });
-        }
-
-        self.view_matrix = self.camera.viewMatrix();
-    }
-
-    fn createGrid(allocator: std.mem.Allocator, resolution: u32) ![]Vertex {
-        const j: i32 = @intCast(resolution / 2);
-        const upperLimit = j;
-        var i: i32 = -j;
-        var grid = allocator.alloc(Vertex, resolution * 4) catch unreachable;
-        const fixed: f32 = @floatFromInt(j);
-
-        while (i < upperLimit) : (i += 1) {
-            const idx: f32 = @as(f32, @floatFromInt(i));
-            const index = @as(usize, @intCast((i + j) * 4));
-            grid[index] = Vertex{ .pos = .{ idx, fixed, 0.0 }, .color = .{ idx, fixed, 0.0, 1.0 } };
-            grid[index + 1] = Vertex{ .pos = .{ idx, -fixed, 0.0 }, .color = .{ idx, -fixed, 0.0, 1.0 } };
-            grid[index + 2] = Vertex{ .pos = .{ fixed, idx, 0.0 }, .color = .{ fixed, idx, 0.0, 1.0 } };
-            grid[index + 3] = Vertex{ .pos = .{ -fixed, idx, 0.0 }, .color = .{ -fixed, idx, 0.0, 1.0 } };
-        }
-
-        return grid;
-    }
-};
-
-const Camera = struct {
-    const Self = @This();
-
-    pos: Vertex,
-    target: Vertex = .{ .pos = .{ 0, 0, 0 } },
-    up: Vertex = .{ .pos = .{ 0, 0, 1 } }, // Z is up
-    radius: ?f32 = null,
-    shape: [8]Vertex,
-
-    pub fn init(pos: Vertex, radius: ?f32) Self {
-        const half_edge_len = 0.05;
-        const cube: [8]Vertex = .{
-            .{ .pos = .{ pos.pos[0] - half_edge_len, pos.pos[1] - half_edge_len, pos.pos[2] - half_edge_len } },
-            .{ .pos = .{ pos.pos[0] - half_edge_len, pos.pos[1] - half_edge_len, pos.pos[2] + half_edge_len } },
-            .{ .pos = .{ pos.pos[0] + half_edge_len, pos.pos[1] - half_edge_len, pos.pos[2] + half_edge_len } },
-            .{ .pos = .{ pos.pos[0] + half_edge_len, pos.pos[1] - half_edge_len, pos.pos[2] - half_edge_len } },
-            .{ .pos = .{ pos.pos[0] - half_edge_len, pos.pos[1] + half_edge_len, pos.pos[2] - half_edge_len } },
-            .{ .pos = .{ pos.pos[0] - half_edge_len, pos.pos[1] + half_edge_len, pos.pos[2] + half_edge_len } },
-            .{ .pos = .{ pos.pos[0] + half_edge_len, pos.pos[1] + half_edge_len, pos.pos[2] + half_edge_len } },
-            .{ .pos = .{ pos.pos[0] + half_edge_len, pos.pos[1] + half_edge_len, pos.pos[2] - half_edge_len } },
-        };
-        return .{
-            .pos = pos,
-            .radius = radius,
-            .shape = cube,
-        };
-    }
-
-    pub fn viewMatrix(self: Self) [16]f32 {
-        const z_axis = Vertex.normalize(Vertex.subtract(self.pos, self.target));
-        const x_axis = Vertex.normalize(Vertex.cross(self.up, z_axis));
-        const y_axis = Vertex.cross(z_axis, x_axis);
+        if (handle == null) return error.GlfwCreateWindowFailed;
+        c.glfwSetWindowUserPointer(handle, user_ptr);
+        _ = c.glfwSetCursorPosCallback(handle, Callbacks.cbCursorPos);
+        _ = c.glfwSetKeyCallback(handle, Callbacks.cbKey);
 
         return .{
-            x_axis.pos[0],                 y_axis.pos[0],                 z_axis.pos[0],                 0.0,
-            x_axis.pos[1],                 y_axis.pos[1],                 z_axis.pos[1],                 0.0,
-            x_axis.pos[2],                 y_axis.pos[2],                 z_axis.pos[2],                 0.0,
-            -Vertex.dot(x_axis, self.pos), -Vertex.dot(y_axis, self.pos), -Vertex.dot(z_axis, self.pos), 1.0,
+            .handle = handle,
+            .size = .{ .x = width, .y = height },
         };
+    }
+
+    pub fn deinit(self: *Self) void {
+        c.glfwDestroyWindow(self.handle);
+        self.handle = undefined;
     }
 };
 
@@ -1153,8 +1027,8 @@ const Pipeline = struct {
 
         const shader_stages = [_]c.VkPipelineShaderStageCreateInfo{ vert_shader.info(), frag_shader.info() };
 
-        const binding_description = Vertex.getBindingDescription();
-        const attribute_descriptions = Vertex.getAttributeDescriptions();
+        const binding_description = getVertexBindingDescription();
+        const attribute_descriptions = getVertexAttributeDescriptions();
 
         const vertex_input_info = c.VkPipelineVertexInputStateCreateInfo{
             .vertexBindingDescriptionCount = 1,
@@ -1294,32 +1168,6 @@ const Device = struct {
     }
 };
 
-const Window = struct {
-    const Self = @This();
-
-    handle: ?*c.GLFWwindow = undefined,
-
-    pub fn init(user_ptr: ?*anyopaque, width: c_int, height: c_int, title: [*c]const u8, monitor: ?*c.GLFWmonitor, share: ?*c.GLFWwindow) !Self {
-        c.glfwWindowHint(c.GLFW_CLIENT_API, c.GLFW_NO_API);
-        c.glfwWindowHint(c.GLFW_RESIZABLE, c.GLFW_NO_API);
-
-        const handle = c.glfwCreateWindow(width, height, title, monitor, share);
-
-        if (handle == null) return error.GlfwCreateWindowFailed;
-        c.glfwSetWindowUserPointer(handle, user_ptr);
-        _ = c.glfwSetCursorPosCallback(handle, Callbacks.cbCursorPos);
-
-        return .{
-            .handle = handle,
-        };
-    }
-
-    pub fn deinit(self: *Self) void {
-        c.glfwDestroyWindow(self.handle);
-        self.handle = undefined;
-    }
-};
-
 const App = struct {
     const Self = @This();
 
@@ -1342,68 +1190,6 @@ const App = struct {
     command_pool: CommandPool = undefined,
     command_buffer: CommandBuffer = undefined,
     sync: SyncObjects = undefined,
-
-    pub fn init(allocator: Allocator, scene: Scene) !Self {
-        var self = Self{
-            .allocator = allocator,
-            .scene = scene,
-        };
-
-        // Initialize window
-        self.window = try Window.init(&self, 800, 600, "legal", null, null);
-
-        // Initialize instance
-        self.instance = try Instance.init();
-
-        // Initialize surface
-        self.surface = try Surface.init(self.instance, self.window);
-
-        // Initialize physical and logical devices
-        self.physical_device = try PhysicalDevice.init(allocator, self.instance, self.surface);
-        self.device = try Device.init(&self.physical_device);
-
-        // Initialize swapchain
-        self.swapchain = try Swapchain.init(allocator, self.physical_device, &self.device, self.surface);
-
-        // Initialize descriptor set layout and pool
-        self.descriptor_layout = try DescriptorSetLayout.init(self.device, .Uniform);
-        self.descriptor_pool = try DescriptorPool.init(self.device, self.descriptor_layout);
-
-        // Initialize descriptor sets
-        self.descriptor_set = try self.descriptor_pool.allocateDescriptorSet(self.descriptor_layout);
-
-        // Initialize buffers for the updateDescriptorSets call
-        try self.initVertexBuffer();
-        try self.initUniformBuffer();
-
-        self.descriptor_pool.updateDescritorSets(
-            self.uniform_buffer,
-            0,
-            self.descriptor_set,
-            UniformBufferObject,
-        );
-
-        // Initialize render pass
-        self.render_pass = try RenderPass.init(allocator, self.device, self.swapchain);
-
-        // Initialize pipeline
-        self.pipeline_layout = try PipelineLayout.init(self.device, self.descriptor_layout);
-        self.pipeline = try Pipeline.init(
-            allocator,
-            self.device,
-            self.render_pass,
-            self.pipeline_layout,
-            self.swapchain.capabilities,
-        );
-
-        // Initialize command pool and buffer
-        self.command_pool = try CommandPool.init(self.device);
-        self.command_buffer = try self.command_pool.allocateCommandBuffer();
-
-        self.sync = try SyncObjects.init(self.device);
-
-        return self;
-    }
 
     pub fn initWindow(self: *Self) !void {
         self.window = try Window.init(self, 800, 600, "legal", null, null);
@@ -1621,7 +1407,9 @@ const App = struct {
                 // FIX: This is the correct perspective matrix for Vulkan's coordinate system.
                 //TODO: Internalize this better, maybe use a function to generate it.
                 const fovy = std.math.degreesToRadians(45.0);
-                const aspect = @as(f32, @floatFromInt(WINDOW_WIDTH)) / @as(f32, @floatFromInt(WINDOW_HEIGHT));
+                // self.window.size.y
+                // TODO: Get these values from input and served window dimentions
+                const aspect: f32 = @as(f32, @floatFromInt(WINDOW_WIDTH)) / @as(f32, @floatFromInt(WINDOW_HEIGHT));
                 const near = 0.1;
                 const far = 100.0;
                 const f = 1.0 / std.math.tan(fovy / 2.0);
