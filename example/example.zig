@@ -1,7 +1,9 @@
-// src/main.zig
+// test.zig
 
 const std = @import("std");
 
+const assert = std.debug.assert;
+const Allocator = std.mem.Allocator;
 const spirv = @import("spirv");
 const c = @cImport({
     @cDefine("GLFW_INCLUDE_VULKAN", {});
@@ -29,6 +31,8 @@ fn checkVk(result: c.VkResult) !void {
         c.VK_ERROR_INITIALIZATION_FAILED => error.VulkanInitFailed,
         c.VK_ERROR_FORMAT_NOT_SUPPORTED => error.VulkanUnsupportedFormat,
         c.VK_ERROR_UNKNOWN => error.VulkanUnknown,
+        c.VK_ERROR_SURFACE_LOST_KHR => error.VulkanSurfaceLost,
+        c.VK_ERROR_NATIVE_WINDOW_IN_USE_KHR => error.NativeWindowInUse,
         else => error.VulkanDefault,
     };
 }
@@ -48,36 +52,6 @@ fn checkGlfw(result: c_int) !void {
 // --- Application Constants ---
 const WINDOW_WIDTH = 800;
 const WINDOW_HEIGHT = 600;
-
-const Instance = struct {
-    handle: c.VkInstance,
-    alloc_callbacks: ?*c.VkAllocationCallbacks,
-    destroy_instance: c.vkDestroyInstance,
-
-    pub fn init(allocations: ?*c.VkAllocationCallbacks, app_info: c.VkApplicationInfo) !Instance {
-        // Get the extensions required by GLFW to interface with the window system.
-        var extension_count: u32 = 0;
-        const required_extensions_ptr = c.glfwGetRequiredInstanceExtensions(&extension_count);
-        for (0..extension_count) |i| {
-            std.log.info("Required extension: {s}", .{std.mem.span(required_extensions_ptr[i])});
-        }
-        const required_extensions = required_extensions_ptr[0..extension_count];
-
-        const info = c.VkInstanceCreateInfo{
-            .sType = c.VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
-            .pApplicationInfo = &app_info,
-            .enabledExtensionCount = required_extensions.len,
-            .ppEnabledExtensionNames = &required_extensions,
-        };
-        var handle: c.VkInstance = undefined;
-        try checkVk(c.vkCreateInstance(&info, allocations, &handle));
-        return .{
-            .handle = handle,
-            .alloc_callbacks = allocations,
-            .destroy_instance = c.vkDestroyInstance,
-        };
-    }
-};
 
 // --- Vertex Definition ---
 // This struct defines the layout of our vertex data in memory.
@@ -175,9 +149,9 @@ const Callbacks = struct {
         // Convert NDC coordinates to radians for pitch and yaw.
         const pitch = -ndc_y * std.math.pi / 2.0; // Invert Y-axis for camera
         const yaw = ndc_x * std.math.pi; // X-axis maps to yaw
-        // _ = pitch;
-        // _ = yaw;
+
         app.scene.setPitchYaw(pitch, yaw);
+        std.debug.print("a", .{});
     }
 };
 
@@ -191,23 +165,25 @@ const Scene = struct {
     axis: [6]Vertex,
     grid: []Vertex,
 
-    pub fn init(allocator: std.mem.Allocator) !Self {
-        var camera = Camera.init(.{ .pos = .{ 2, 2, 2 } }, 13);
-
+    pub fn init(allocator: std.mem.Allocator, resolution: u32) !Self {
+        const res_float: f32 = @floatFromInt(resolution / 2);
+        var camera = Camera.init(
+            .{ .pos = .{ res_float, res_float, res_float } },
+            res_float,
+        );
         return .{
             .axis = .{
                 // X-axis (Red)
-                .{ .pos = .{ -5.0, 0.0, 0.0 }, .color = .{ 1.0, 0.0, 0.0, 1.0 } }, .{ .pos = .{ 5.0, 0.0, 0.0 }, .color = .{ 1.0, 0.0, 0.0, 1.0 } },
+                .{ .pos = .{ -res_float, 0.0, 0.0 }, .color = .{ 1.0, 0.0, 0.0, 1.0 } }, .{ .pos = .{ res_float, 0.0, 0.0 }, .color = .{ 1.0, 0.0, 0.0, 1.0 } },
                 // Y-axis (Green)
-                .{ .pos = .{ 0.0, -5.0, 0.0 }, .color = .{ 0.0, 1.0, 0.0, 1.0 } }, .{ .pos = .{ 0.0, 5.0, 0.0 }, .color = .{ 0.0, 1.0, 0.0, 1.0 } },
+                .{ .pos = .{ 0.0, -res_float, 0.0 }, .color = .{ 0.0, 1.0, 0.0, 1.0 } }, .{ .pos = .{ 0.0, res_float, 0.0 }, .color = .{ 0.0, 1.0, 0.0, 1.0 } },
                 // Z-axis (Blue)
-                .{ .pos = .{ 0.0, 0.0, -5.0 }, .color = .{ 0.0, 0.0, 1.0, 1.0 } }, .{ .pos = .{ 0.0, 0.0, 5.0 }, .color = .{ 0.0, 0.0, 1.0, 1.0 } },
+                .{ .pos = .{ 0.0, 0.0, -res_float }, .color = .{ 0.0, 0.0, 1.0, 1.0 } }, .{ .pos = .{ 0.0, 0.0, res_float }, .color = .{ 0.0, 0.0, 1.0, 1.0 } },
             },
-            .grid = try createGrid(allocator, 20),
+            .grid = try createGrid(allocator, resolution),
             .camera = camera,
             .view_matrix = camera.viewMatrix(),
         };
-        // return self;
     }
 
     pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
@@ -302,158 +278,14 @@ const Camera = struct {
     }
 };
 
-// --- Main Application Struct ---
-// It's good practice to hold all our Vulkan handles and state in a single struct.
-const App = struct {
+const Instance = struct {
     const Self = @This();
 
-    alloc_callbacks: ?*c.VkAllocationCallbacks = null,
-    allocator: std.mem.Allocator,
+    handle: c.VkInstance = undefined,
 
-    // GLFW handle for the window.
-    window: ?*c.GLFWwindow = null,
+    pub fn init() !Self {
+        var self = Instance{};
 
-    // Core Vulkan handles
-    instance: c.VkInstance = null,
-    physical_device: c.VkPhysicalDevice = undefined,
-    device: c.VkDevice = null,
-    graphics_queue: c.VkQueue = undefined,
-
-    // Window surface (the bridge between Vulkan and the window system).
-    surface: c.VkSurfaceKHR = null,
-    surface_format: c.VkSurfaceFormatKHR = .{},
-    present_mode: c.VkPresentModeKHR = 0,
-
-    // Swapchain for presenting images to the screen.
-    swapchain: c.VkSwapchainKHR = null,
-    swapchain_images: []c.VkImage = &.{},
-    swapchain_image_views: []c.VkImageView = &.{},
-    swapchain_extent: c.VkExtent2D = undefined,
-
-    // The Graphics Pipeline
-    render_pass: c.VkRenderPass = undefined,
-    descriptor_set_layout: c.VkDescriptorSetLayout = undefined,
-    descriptor_pool: c.VkDescriptorPool = undefined,
-    descriptor_set: c.VkDescriptorSet = undefined,
-    pipeline_layout: c.VkPipelineLayout = undefined,
-    graphics_pipeline: c.VkPipeline = undefined,
-
-    // Framebuffers (one for each swapchain image).
-    framebuffers: []c.VkFramebuffer = undefined,
-
-    // Command submission
-    command_pool: c.VkCommandPool = undefined,
-    command_buffer: c.VkCommandBuffer = undefined, // We'll use one command buffer for simplicity.
-
-    // Synchronization objects to coordinate CPU and GPU.
-    image_available_semaphore: c.VkSemaphore = undefined,
-    render_finished_semaphore: c.VkSemaphore = undefined,
-    in_flight_fence: c.VkFence = undefined,
-
-    // GPU buffer for our vertex data.
-    vertex_buffer: c.VkBuffer = undefined,
-    vertex_buffer_memory: c.VkDeviceMemory = undefined,
-    uniform_buffer: c.VkBuffer = undefined,
-    uniform_buffer_memory: c.VkDeviceMemory = undefined,
-
-    // Scene with vertex data
-    scene: Scene,
-
-    fn initWindow(self: *Self) !void {
-        c.glfwWindowHint(c.GLFW_CLIENT_API, c.GLFW_NO_API);
-        c.glfwWindowHint(c.GLFW_RESIZABLE, c.GLFW_NO_API);
-
-        self.window = c.glfwCreateWindow(WINDOW_WIDTH, WINDOW_HEIGHT, "Vulkan Line", null, null);
-        if (self.window == null) return error.GlfwCreateWindowFailed;
-        c.glfwSetWindowUserPointer(self.window, self);
-
-        _ = c.glfwSetCursorPosCallback(self.window, Callbacks.cbCursorPos);
-    }
-
-    fn initVulkan(self: *Self) !void {
-        try self.createInstance();
-        try self.createSurface();
-        try self.pickPhysicalDevice();
-        try self.createLogicalDeviceAndQueues();
-        try self.createSwapchain();
-        try self.createImageViews();
-        try self.createVertexBuffer();
-        try self.createUniformBuffer();
-        try self.createDescriptorSetLayout();
-        try self.createDescriptorPoolAndSets();
-        try self.createRenderPass();
-        try self.createGraphicsPipeline();
-        try self.createFramebuffers();
-        try self.createCommandPool();
-        try self.createCommandBuffer();
-        try self.createSyncObjects();
-    }
-
-    // The main application loop.
-    fn run(self: *Self) !void {
-        while (c.glfwWindowShouldClose(self.window) == 0) {
-            c.glfwPollEvents();
-            try self.drawFrame();
-        }
-        // Wait for the GPU to finish all operations before we start cleaning up.
-        try checkVk(c.vkDeviceWaitIdle(self.device));
-    }
-
-    // The cleanup function, destroying Vulkan objects in reverse order of creation.
-    fn cleanup(self: *Self) void {
-        self.scene.deinit(self.allocator);
-        // Destroy synchronization objects
-        c.vkDestroySemaphore(self.device, self.image_available_semaphore, self.alloc_callbacks);
-        c.vkDestroySemaphore(self.device, self.render_finished_semaphore, self.alloc_callbacks);
-        c.vkDestroyFence(self.device, self.in_flight_fence, self.alloc_callbacks);
-
-        // Destroy buffers and memory
-        c.vkDestroyBuffer(self.device, self.vertex_buffer, self.alloc_callbacks);
-        c.vkDestroyBuffer(self.device, self.uniform_buffer, self.alloc_callbacks);
-
-        c.vkFreeMemory(self.device, self.vertex_buffer_memory, self.alloc_callbacks);
-        c.vkFreeMemory(self.device, self.uniform_buffer_memory, self.alloc_callbacks);
-
-        // Destroy command pool (which also frees command buffers)
-        c.vkDestroyCommandPool(self.device, self.command_pool, self.alloc_callbacks);
-
-        // Destroy framebuffers
-        for (self.framebuffers) |fb| {
-            c.vkDestroyFramebuffer(self.device, fb, self.alloc_callbacks);
-        }
-        self.allocator.free(self.framebuffers);
-
-        // Destroy pipeline and related objects
-        c.vkDestroyPipeline(self.device, self.graphics_pipeline, self.alloc_callbacks);
-        c.vkDestroyPipelineLayout(self.device, self.pipeline_layout, self.alloc_callbacks);
-        c.vkDestroyRenderPass(self.device, self.render_pass, self.alloc_callbacks);
-        c.vkDestroyDescriptorPool(self.device, self.descriptor_pool, self.alloc_callbacks);
-        c.vkDestroyDescriptorSetLayout(self.device, self.descriptor_set_layout, self.alloc_callbacks);
-
-        // Destroy image views
-        for (self.swapchain_image_views) |iv| {
-            c.vkDestroyImageView(self.device, iv, self.alloc_callbacks);
-        }
-        self.allocator.free(self.swapchain_image_views);
-        self.allocator.free(self.swapchain_images);
-
-        // Destroy swapchain and surface
-        c.vkDestroySwapchainKHR(self.device, self.swapchain, self.alloc_callbacks);
-        c.vkDestroySurfaceKHR(self.instance, self.surface, self.alloc_callbacks);
-
-        // Destroy logical and physical devices
-        c.vkDestroyDevice(self.device, self.alloc_callbacks);
-
-        // Destroy Vulkan instance
-        c.vkDestroyInstance(self.instance, self.alloc_callbacks);
-
-        // Destroy window
-        c.glfwDestroyWindow(self.window);
-    }
-
-    // --- Vulkan Setup Functions ---
-
-    fn createInstance(self: *Self) !void {
         const app_info = c.VkApplicationInfo{
             .pApplicationName = "Vulkan Line App",
             .applicationVersion = c.VK_MAKE_API_VERSION(0, 1, 0, 0),
@@ -476,44 +308,132 @@ const App = struct {
             .ppEnabledExtensionNames = required_extensions.ptr,
         };
 
-        try checkVk(c.vkCreateInstance(&create_info, self.alloc_callbacks, &self.instance));
+        try checkVk(
+            c.vkCreateInstance(&create_info, null, &self.handle),
+        );
+
+        return self;
     }
 
-    fn createSurface(self: *Self) !void {
-        try checkVk(c.glfwCreateWindowSurface(self.instance, self.window, self.alloc_callbacks, &self.surface));
+    pub fn deinit(self: *Self) void {
+        c.vkDestroyInstance(self.handle, null);
+    }
+};
+
+const Surface = struct {
+    const Self = @This();
+
+    handle: c.VkSurfaceKHR = undefined,
+    owner: c.VkInstance,
+
+    pub fn init(instance: Instance, window: Window) !Self {
+        assert(instance.handle != null and window.handle != null);
+        var self = Self{
+            .owner = instance.handle,
+        };
+
+        try checkVk(
+            c.glfwCreateWindowSurface(instance.handle, window.handle, null, &self.handle),
+        );
+
+        return self;
     }
 
-    fn pickPhysicalDevice(self: *Self) !void {
-        var device_count: u32 = 0;
-        // 1. First call to get the count
-        try checkVk(c.vkEnumeratePhysicalDevices(self.instance, &device_count, null));
+    pub fn deinit(self: *Self) void {
+        c.vkDestroySurfaceKHR(self.owner, self.handle, null);
+    }
+};
 
-        if (device_count == 0) {
-            std.log.err("Failed to find GPUs with Vulkan support!", .{});
-            return error.NoGpuFound;
+const PhysicalDevice = struct {
+    const Self = @This();
+
+    handle: c.VkPhysicalDevice = undefined,
+    q_family_idx: u32 = undefined,
+
+    pub fn init(allocator: Allocator, instance: Instance, surface: Surface) !Self {
+        assert(instance.handle != null and surface.handle != null);
+        var self = Self{};
+        // Pick physical device
+        var physical_device_count: u32 = 0;
+        try checkVk(
+            c.vkEnumeratePhysicalDevices(instance.handle, &physical_device_count, null),
+        );
+
+        const physical_devices = try allocator.alloc(c.VkPhysicalDevice, physical_device_count);
+        defer allocator.free(physical_devices);
+        try checkVk(
+            c.vkEnumeratePhysicalDevices(instance.handle, &physical_device_count, physical_devices.ptr),
+        );
+
+        self.handle = physical_devices[0];
+
+        // Get queue family that supports graphics
+        var q_count: u32 = 0;
+        c.vkGetPhysicalDeviceQueueFamilyProperties(self.handle, &q_count, null);
+
+        const q_family_props = try allocator.alloc(c.VkQueueFamilyProperties, q_count);
+        defer allocator.free(q_family_props);
+        c.vkGetPhysicalDeviceQueueFamilyProperties(self.handle, &q_count, q_family_props.ptr);
+
+        for (q_family_props, 0..) |prop, i| {
+            // We need a queue that supports graphics operations.
+            if (prop.queueFlags & c.VK_QUEUE_GRAPHICS_BIT != 0) {
+                var support: c.VkBool32 = c.VK_FALSE;
+                try checkVk(
+                    c.vkGetPhysicalDeviceSurfaceSupportKHR(
+                        self.handle,
+                        @intCast(i),
+                        surface.handle,
+                        &support,
+                    ),
+                );
+
+                if (support == c.VK_TRUE) {
+                    self.q_family_idx = @intCast(i);
+                    return self;
+                }
+            }
         }
 
-        // 2. Allocate space and make the second call to get the handles
-        const devices = try self.allocator.alloc(c.VkPhysicalDevice, device_count);
-        defer self.allocator.free(devices);
-        try checkVk(c.vkEnumeratePhysicalDevices(self.instance, &device_count, devices.ptr));
-
-        self.physical_device = devices[0];
+        return error.NoSuitableQueueFamily;
     }
 
-    /// Helper function
-    fn findQueueFamilies(
-        allocator: std.mem.Allocator,
-        phys_device: c.VkPhysicalDevice,
-        surface: c.VkSurfaceKHR,
+    pub fn deinit(self: *Self) void {
+        _ = self;
+    }
+
+    pub fn findMemoryType(
+        self: Self,
+        type_filter: u32,
+        properties: c.VkMemoryPropertyFlags,
     ) !u32 {
+        var mem_props: c.VkPhysicalDeviceMemoryProperties = undefined;
+        c.vkGetPhysicalDeviceMemoryProperties(self.handle, &mem_props);
+
+        const set: u64 = 1;
+        var i: u5 = 0;
+
+        while (i < mem_props.memoryTypeCount) : (i += 1) {
+            if ((type_filter & set << i) != 0 and (mem_props.memoryTypes[i].propertyFlags & properties) == properties) {
+                return i;
+            }
+        }
+        return error.MissingMemoryType;
+    }
+
+    pub fn findQueueFamilies(
+        self: Self,
+        allocator: std.mem.Allocator,
+        surface: Surface,
+    ) !u32 {
+        assert(surface.handle != null);
         var queue_count: u32 = 0;
-        c.vkGetPhysicalDeviceQueueFamilyProperties(phys_device, &queue_count, null);
+        c.vkGetPhysicalDeviceQueueFamilyProperties(self, &queue_count, null);
         const queue_family_properties = try allocator.alloc(c.VkQueueFamilyProperties, queue_count);
         defer allocator.free(queue_family_properties);
 
         c.vkGetPhysicalDeviceQueueFamilyProperties(
-            phys_device,
+            self,
             &queue_count,
             queue_family_properties.ptr,
         );
@@ -523,7 +443,9 @@ const App = struct {
             if (family_prop.queueFlags & c.VK_QUEUE_GRAPHICS_BIT != 0) {
                 // We also need a queue that can present to our surface.
                 var present_support: c.VkBool32 = c.VK_FALSE;
-                try checkVk(c.vkGetPhysicalDeviceSurfaceSupportKHR(phys_device, @intCast(i), surface, &present_support));
+                try checkVk(
+                    c.vkGetPhysicalDeviceSurfaceSupportKHR(self, @intCast(i), surface.handle, &present_support),
+                );
 
                 if (present_support == c.VK_TRUE) {
                     return @intCast(i);
@@ -533,71 +455,75 @@ const App = struct {
 
         return error.NoSuitableQueueFamily;
     }
+};
 
-    fn createLogicalDeviceAndQueues(self: *Self) !void {
-        const queue_family_index = try findQueueFamilies(self.allocator, self.physical_device, self.surface);
-        const queue_priority: f32 = 1.0;
-        const queue_create_info = c.VkDeviceQueueCreateInfo{
-            .queueFamilyIndex = queue_family_index,
-            .queueCount = 1,
-            .pQueuePriorities = &queue_priority,
+const Queue = struct {
+    const Self = @This();
+
+    handle: c.VkQueue = undefined,
+
+    pub fn init(device: Device, physical_device: PhysicalDevice) !Self {
+        assert(device.handle != null and physical_device.handle != null);
+        var self = Self{
+            .owner = device,
         };
 
-        var device_features = c.VkPhysicalDeviceFeatures{};
-        // We need to enable the swapchain extension.
-        const device_extensions = [_][*:0]const u8{c.VK_KHR_SWAPCHAIN_EXTENSION_NAME};
-
-        const create_info = c.VkDeviceCreateInfo{
-            .pQueueCreateInfos = &queue_create_info,
-            .queueCreateInfoCount = 1,
-            .pEnabledFeatures = &device_features,
-            .enabledExtensionCount = device_extensions.len,
-            .ppEnabledExtensionNames = &device_extensions,
-        };
-
-        try checkVk(c.vkCreateDevice(
-            self.physical_device,
-            &create_info,
-            self.alloc_callbacks,
-            &self.device,
-        ));
-
-        // Get a handle to the graphics queue.
-        c.vkGetDeviceQueue(self.device, queue_family_index, 0, &self.graphics_queue);
+        c.vkGetDeviceQueue(device.handle, physical_device.q_family_idx, 0, &self.handle);
     }
 
-    ///  TODO: refactor
-    fn createSwapchain(self: *Self) !void {
-        // --- Choose Swapchain Settings ---
-        var fmt_count: u32 = undefined;
+    pub fn deinit(self: *Self) void {
+        _ = self;
+    }
+};
+
+const Swapchain = struct {
+    const Self = @This();
+
+    handle: c.VkSwapchainKHR = undefined,
+    surface_format: c.VkSurfaceFormatKHR = undefined,
+    capabilities: c.VkSurfaceCapabilitiesKHR = undefined,
+    images: []c.VkImage = undefined,
+    image_views: []c.VkImageView = undefined,
+    present_mode: c_uint = undefined,
+    owner: c.VkDevice,
+
+    pub fn init(allocator: Allocator, physical_device: PhysicalDevice, device: *Device, surface: Surface) !Self {
+        assert(physical_device.handle != null and surface.handle != null);
+        var self = Self{
+            .owner = device.handle,
+        };
+
+        var fmt_count: u32 = 0;
         try checkVk(c.vkGetPhysicalDeviceSurfaceFormatsKHR(
-            self.physical_device,
-            self.surface,
+            physical_device.handle,
+            surface.handle,
             &fmt_count,
             null,
         ));
-        const fmts = self.allocator.alloc(c.VkSurfaceFormatKHR, fmt_count) catch @panic("OOM");
-        defer self.allocator.free(fmts);
+
+        const fmts = try allocator.alloc(c.VkSurfaceFormatKHR, fmt_count);
+        defer allocator.free(fmts);
         try checkVk(c.vkGetPhysicalDeviceSurfaceFormatsKHR(
-            self.physical_device,
-            self.surface,
+            physical_device.handle,
+            surface.handle,
             &fmt_count,
             fmts.ptr,
         ));
-        self.surface_format = fmts[0]; // Choose a format, B8G8R8A8_SRGB is common.
+
+        self.surface_format = fmts[0];
 
         var present_modes_count: u32 = undefined;
         try checkVk(c.vkGetPhysicalDeviceSurfacePresentModesKHR(
-            self.physical_device,
-            self.surface,
+            physical_device.handle,
+            surface.handle,
             &present_modes_count,
             null,
         ));
-        const present_modes = self.allocator.alloc(c.VkPresentModeKHR, present_modes_count) catch @panic("OOM");
-        defer self.allocator.free(present_modes);
+        const present_modes = allocator.alloc(c.VkPresentModeKHR, present_modes_count) catch @panic("OOM");
+        defer allocator.free(present_modes);
         try checkVk(c.vkGetPhysicalDeviceSurfacePresentModesKHR(
-            self.physical_device,
-            self.surface,
+            physical_device.handle,
+            surface.handle,
             &present_modes_count,
             present_modes.ptr,
         ));
@@ -610,61 +536,51 @@ const App = struct {
             }
         }
 
-        var capabilities: c.VkSurfaceCapabilitiesKHR = undefined;
-        try checkVk(c.vkGetPhysicalDeviceSurfaceCapabilitiesKHR(self.physical_device, self.surface, &capabilities));
-        self.swapchain_extent = capabilities.currentExtent;
+        try checkVk(
+            c.vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physical_device.handle, surface.handle, &self.capabilities),
+        );
 
-        var image_count = capabilities.minImageCount + 1;
-        if (capabilities.maxImageCount > 0 and image_count > capabilities.maxImageCount) {
-            image_count = capabilities.maxImageCount;
+        var image_count = self.capabilities.minImageCount + 1;
+        if (self.capabilities.maxImageCount > 0 and image_count > self.capabilities.maxImageCount) {
+            image_count = self.capabilities.maxImageCount;
         }
 
         const create_info = c.VkSwapchainCreateInfoKHR{
-            .surface = self.surface,
+            .surface = surface.handle,
             .minImageCount = image_count,
             .imageFormat = self.surface_format.format,
             .imageColorSpace = self.surface_format.colorSpace,
-            .imageExtent = self.swapchain_extent,
+            .imageExtent = self.capabilities.currentExtent,
             .imageArrayLayers = 1,
             .imageUsage = c.VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
             .imageSharingMode = c.VK_SHARING_MODE_EXCLUSIVE,
-            .preTransform = capabilities.currentTransform,
+            .preTransform = self.capabilities.currentTransform,
             .compositeAlpha = c.VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
             .presentMode = self.present_mode,
             .clipped = c.VK_TRUE,
             .oldSwapchain = null,
         };
-        try checkVk(c.vkCreateSwapchainKHR(
-            self.device,
-            &create_info,
-            self.alloc_callbacks,
-            &self.swapchain,
-        ));
+        // Get swapchain handle
+        try checkVk(
+            c.vkCreateSwapchainKHR(device.handle, &create_info, null, &self.handle),
+        );
 
         var img_count: u32 = undefined;
-        try checkVk(c.vkGetSwapchainImagesKHR(
-            self.device,
-            self.swapchain,
-            &img_count,
-            null,
-        ));
-        const swapchain_images = self.allocator.alloc(c.VkImage, img_count) catch @panic("OOM");
-        try checkVk(c.vkGetSwapchainImagesKHR(
-            self.device,
-            self.swapchain,
-            &img_count,
-            swapchain_images.ptr,
-        ));
-        self.swapchain_images = swapchain_images;
-    }
+        try checkVk(
+            c.vkGetSwapchainImagesKHR(device.handle, self.handle, &img_count, null),
+        );
 
-    fn createImageViews(app: *Self) !void {
-        app.swapchain_image_views = app.allocator.alloc(c.VkImageView, app.swapchain_images.len) catch @panic("OOM");
-        for (app.swapchain_images, 0..) |image, i| {
-            const create_info = c.VkImageViewCreateInfo{
+        self.images = try allocator.alloc(c.VkImage, img_count);
+        try checkVk(
+            c.vkGetSwapchainImagesKHR(device.handle, self.handle, &img_count, self.images.ptr),
+        );
+
+        self.image_views = allocator.alloc(c.VkImageView, image_count) catch @panic("OOM");
+        for (self.images, 0..) |image, i| {
+            const info = c.VkImageViewCreateInfo{
                 .image = image,
                 .viewType = c.VK_IMAGE_VIEW_TYPE_2D,
-                .format = app.surface_format.format,
+                .format = self.surface_format.format,
                 .components = .{}, // Use default .r, .g, .b, .a mapping
                 .subresourceRange = .{
                     .aspectMask = c.VK_IMAGE_ASPECT_COLOR_BIT,
@@ -675,17 +591,38 @@ const App = struct {
                 },
             };
             try checkVk(c.vkCreateImageView(
-                app.device,
-                &create_info,
-                app.alloc_callbacks,
-                &app.swapchain_image_views[i],
+                device.handle,
+                &info,
+                null,
+                &self.image_views[i],
             ));
         }
+
+        return self;
     }
 
-    fn createRenderPass(app: *Self) !void {
+    pub fn deinit(self: *Self, allocator: Allocator) void {
+        allocator.free(self.images);
+        allocator.free(self.image_views);
+        c.vkDestroySwapchainKHR(self.owner, self.handle, null);
+    }
+};
+
+const RenderPass = struct {
+    const Self = @This();
+
+    handle: c.VkRenderPass = undefined,
+    framebuffers: []c.VkFramebuffer = undefined,
+    owner: c.VkDevice,
+
+    pub fn init(allocator: Allocator, device: Device, swapchain: Swapchain) !Self {
+        assert(device.handle != null and swapchain.handle != null);
+        var self = Self{
+            .owner = device.handle,
+        };
+
         var color_attachment = c.VkAttachmentDescription{
-            .format = app.surface_format.format,
+            .format = swapchain.surface_format.format,
             .samples = c.VK_SAMPLE_COUNT_1_BIT,
             .loadOp = c.VK_ATTACHMENT_LOAD_OP_CLEAR,
             .storeOp = c.VK_ATTACHMENT_STORE_OP_STORE,
@@ -724,18 +661,257 @@ const App = struct {
             .pDependencies = &subpass_dep,
         };
 
-        try checkVk(c.vkCreateRenderPass(
-            app.device,
-            &create_info,
-            app.alloc_callbacks,
-            &app.render_pass,
-        ));
+        try checkVk(
+            c.vkCreateRenderPass(device.handle, &create_info, null, &self.handle),
+        );
+
+        try self.initFrameBuffers(allocator, swapchain);
+
+        return self;
     }
 
-    fn createDescriptorSetLayout(app: *Self) !void {
+    pub fn deinit(self: *Self, allocator: Allocator) void {
+        allocator.free(self.framebuffers);
+        c.vkDestroyRenderPass(self.owner, self.handle, null);
+    }
+
+    pub fn initFrameBuffers(self: *Self, allocator: Allocator, swapchain: Swapchain) !void {
+        self.framebuffers = try allocator.alloc(c.VkFramebuffer, swapchain.image_views.len);
+        for (swapchain.image_views, 0..) |iv, i| {
+            const attachments = [_]c.VkImageView{iv};
+            const f_buffer_create_info = c.VkFramebufferCreateInfo{
+                .renderPass = self.handle,
+                .attachmentCount = attachments.len,
+                .pAttachments = &attachments,
+                .width = swapchain.capabilities.currentExtent.width,
+                .height = swapchain.capabilities.currentExtent.height,
+                .layers = 1,
+            };
+            try checkVk(
+                c.vkCreateFramebuffer(self.owner, &f_buffer_create_info, null, &self.framebuffers[i]),
+            );
+        }
+    }
+};
+
+const CommandPool = struct {
+    const Self = @This();
+
+    handle: c.VkCommandPool = undefined,
+    owner: c.VkDevice,
+
+    pub fn init(device: Device) !Self {
+        var self = Self{
+            .owner = device.handle,
+        };
+
+        var cmd_pool_info = c.VkCommandPoolCreateInfo{
+            .flags = c.VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
+            .queueFamilyIndex = device.physical.q_family_idx,
+        };
+
+        try checkVk(
+            c.vkCreateCommandPool(device.handle, &cmd_pool_info, null, &self.handle),
+        );
+
+        return self;
+    }
+
+    pub fn deinit(self: *Self) void {
+        c.vkDestroyCommandPool(self.owner, self.handle, null);
+    }
+
+    pub fn allocateCommandBuffer(self: *Self) !CommandBuffer {
+        assert(self.handle != null);
+        const alloc_info = c.VkCommandBufferAllocateInfo{
+            .commandPool = self.handle,
+            .level = c.VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+            .commandBufferCount = 1,
+        };
+        var handle: c.VkCommandBuffer = undefined;
+        try checkVk(
+            c.vkAllocateCommandBuffers(self.owner, &alloc_info, &handle),
+        );
+
+        return .{
+            .handle = handle,
+        };
+    }
+};
+
+const CommandBuffer = struct {
+    handle: c.VkCommandBuffer = undefined,
+};
+
+const BufferUsage = enum(u8) {
+    Vertex,
+    Uniform,
+
+    pub fn getVkFlag(self: BufferUsage) c.VkBufferUsageFlags {
+        return switch (self) {
+            .Vertex => c.VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+            .Uniform => c.VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+        };
+    }
+};
+
+const SyncObjects = struct {
+    const Self = @This();
+
+    img_available_semaphore: Semaphore,
+    render_ended_semaphore: Semaphore,
+    in_flight_fence: Fence,
+
+    pub fn init(device: Device) !Self {
+        return .{
+            .img_available_semaphore = try Semaphore.init(device),
+            .render_ended_semaphore = try Semaphore.init(device),
+            .in_flight_fence = try Fence.init(device),
+        };
+    }
+
+    pub fn deinit(self: *Self) void {
+        self.img_available_semaphore.deinit();
+        self.render_ended_semaphore.deinit();
+        self.in_flight_fence.deinit();
+    }
+};
+
+const Semaphore = struct {
+    const Self = @This();
+
+    handle: c.VkSemaphore = undefined,
+    owner: c.VkDevice,
+
+    pub fn init(device: Device) !Self {
+        var self = Self{
+            .owner = device.handle,
+        };
+
+        try checkVk(
+            c.vkCreateSemaphore(device.handle, &.{}, null, &self.handle),
+        );
+
+        return self;
+    }
+
+    pub fn deinit(self: *Self) void {
+        c.vkDestroySemaphore(self.owner, self.handle, null);
+    }
+};
+
+const Fence = struct {
+    const Self = @This();
+
+    handle: c.VkFence = undefined,
+    owner: c.VkDevice,
+
+    pub fn init(device: Device) !Self {
+        var self = Self{
+            .owner = device.handle,
+        };
+
+        // Create signaled so first frame doesn't wait.
+        // TODO: maybe accept bit as argument
+        const fence_create_info = c.VkFenceCreateInfo{
+            .flags = c.VK_FENCE_CREATE_SIGNALED_BIT,
+        };
+        try checkVk(
+            c.vkCreateFence(device.handle, &fence_create_info, null, &self.handle),
+        );
+
+        return self;
+    }
+
+    pub fn deinit(self: *Self) void {
+        c.vkDestroyFence(self.owner, self.handle, null);
+    }
+};
+
+const Buffer = struct {
+    const Self = @This();
+
+    handle: c.VkBuffer = undefined,
+    memory: c.VkDeviceMemory = undefined,
+    usage: BufferUsage,
+    owner: c.VkDevice,
+
+    pub fn init(
+        device: Device,
+        size: c.VkDeviceSize,
+        usage: BufferUsage,
+        properties: c.VkMemoryPropertyFlags,
+    ) !Self {
+        var self = Self{
+            .usage = usage,
+            .owner = device.handle,
+        };
+
+        var buffer_info = c.VkBufferCreateInfo{
+            .size = size,
+            .usage = usage.getVkFlag(),
+            .sharingMode = c.VK_SHARING_MODE_EXCLUSIVE,
+        };
+        try checkVk(
+            c.vkCreateBuffer(device.handle, &buffer_info, null, &self.handle),
+        );
+
+        var mem_reqs: c.VkMemoryRequirements = undefined;
+        c.vkGetBufferMemoryRequirements(device.handle, self.handle, &mem_reqs);
+
+        const memory_type_index = try device.physical.findMemoryType(mem_reqs.memoryTypeBits, properties);
+        var alloc_info = c.VkMemoryAllocateInfo{
+            .allocationSize = mem_reqs.size,
+            .memoryTypeIndex = memory_type_index,
+        };
+
+        try checkVk(
+            c.vkAllocateMemory(device.handle, &alloc_info, null, &self.memory),
+        );
+
+        try checkVk(
+            c.vkBindBufferMemory(device.handle, self.handle, self.memory, 0),
+        );
+
+        return self;
+    }
+
+    pub fn deinit(self: *Self) void {
+        c.vkFreeMemory(self.owner, self.memory, null);
+        c.vkDestroyBuffer(self.owner, self.handle, null);
+    }
+
+    // pub fn getMappedSlice(self: Self) []Vertex {}
+};
+
+const DescriptorType = enum(u8) {
+    Uniform,
+    UniformDynamic,
+
+    pub fn getVkType(@"type": DescriptorType) c_uint {
+        return switch (@"type") {
+            .Uniform => c.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+            .UniformDynamic => c.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,
+        };
+    }
+};
+
+const DescriptorSetLayout = struct {
+    const Self = @This();
+
+    handle: c.VkDescriptorSetLayout = undefined,
+    type: DescriptorType,
+    owner: c.VkDevice,
+
+    pub fn init(device: Device, @"type": DescriptorType) !Self {
+        assert(device.handle != null);
+        var self = Self{
+            .owner = device.handle,
+            .type = @"type",
+        };
         var ubo_layout_binding = c.VkDescriptorSetLayoutBinding{
             .binding = 0,
-            .descriptorType = c.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+            .descriptorType = @"type".getVkType(),
             .descriptorCount = 1,
             // FIX: The UBO is used by both the vertex shader (for matrices) and potentially
             // the fragment shader (for color). We must specify all stages that access it.
@@ -744,22 +920,44 @@ const App = struct {
         };
 
         var layout_info = c.VkDescriptorSetLayoutCreateInfo{
-            .sType = c.VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
             .bindingCount = 1,
             .pBindings = &ubo_layout_binding,
         };
 
-        try checkVk(c.vkCreateDescriptorSetLayout(
-            app.device,
-            &layout_info,
-            app.alloc_callbacks,
-            &app.descriptor_set_layout,
-        ));
+        try checkVk(
+            c.vkCreateDescriptorSetLayout(device.handle, &layout_info, null, &self.handle),
+        );
+
+        return self;
     }
 
-    fn createDescriptorPoolAndSets(self: *Self) !void {
+    pub fn deinit(self: *Self) void {
+        c.vkDestroyDescriptorSetLayout(self.owner, self.handle, null);
+    }
+};
+
+// TODO: maybe remove on refactor if vocabulary type is unnecessary
+const DescriptorSet = struct {
+    handle: c.VkDescriptorSet = undefined,
+    type: DescriptorType,
+};
+
+const DescriptorPool = struct {
+    const Self = @This();
+
+    handle: c.VkDescriptorPool = undefined,
+    type: DescriptorType,
+    owner: c.VkDevice,
+
+    fn init(device: Device, layout: DescriptorSetLayout) !Self {
+        assert(device.handle != null and layout.handle != null);
+        var self = Self{
+            .owner = device.handle,
+            .type = layout.type,
+        };
+
         var pool_size = c.VkDescriptorPoolSize{
-            .type = c.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+            .type = layout.type.getVkType(),
             .descriptorCount = 1,
         };
         var pool_info = c.VkDescriptorPoolCreateInfo{
@@ -768,67 +966,77 @@ const App = struct {
             .maxSets = 1,
         };
 
-        try checkVk(c.vkCreateDescriptorPool(
-            self.device,
-            &pool_info,
-            self.alloc_callbacks,
-            &self.descriptor_pool,
-        ));
+        try checkVk(
+            c.vkCreateDescriptorPool(device.handle, &pool_info, null, &self.handle),
+        );
 
+        return self;
+    }
+
+    pub fn deinit(self: *Self) void {
+        c.vkDestroyDescriptorPool(self.owner, self.handle, null);
+    }
+
+    pub fn allocateDescriptorSet(self: Self, layout: DescriptorSetLayout) !DescriptorSet {
+        assert(layout.handle != null);
         var set_alloc_info = c.VkDescriptorSetAllocateInfo{
-            .descriptorPool = self.descriptor_pool,
+            .descriptorPool = self.handle,
             .descriptorSetCount = 1,
-            .pSetLayouts = &self.descriptor_set_layout,
+            .pSetLayouts = &layout.handle,
         };
+        var descriptor_set: c.VkDescriptorSet = undefined;
+        try checkVk(
+            c.vkAllocateDescriptorSets(self.owner, &set_alloc_info, &descriptor_set),
+        );
 
-        try checkVk(c.vkAllocateDescriptorSets(self.device, &set_alloc_info, &self.descriptor_set));
+        return .{
+            .handle = descriptor_set,
+            .type = layout.type,
+        };
+    }
+
+    /// Asserts that buffer is uniform type
+    pub fn updateDescritorSets(
+        self: *Self,
+        buffer: Buffer,
+        buffer_offset: u64,
+        dst_set: DescriptorSet,
+        ubo: type,
+    ) void {
+        //TODO: remove on ubo/ descriptor refactor
+        assert(buffer.usage == .Uniform);
 
         var desc_buffer_info = c.VkDescriptorBufferInfo{
-            .buffer = self.uniform_buffer,
-            .offset = 0,
-            .range = @sizeOf(UniformBufferObject),
+            .buffer = buffer.handle,
+            .offset = buffer_offset,
+            .range = @sizeOf(ubo),
         };
 
         var desc_write = c.VkWriteDescriptorSet{
-            .dstSet = self.descriptor_set,
+            .dstSet = dst_set.handle,
             .dstBinding = 0,
             .dstArrayElement = 0,
-            .descriptorType = c.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+            .descriptorType = dst_set.type.getVkType(),
             .descriptorCount = 1,
             .pBufferInfo = &desc_buffer_info,
         };
-        c.vkUpdateDescriptorSets(self.device, 1, &desc_write, 0, null);
-
-        const ubo = UniformBufferObject{
-            .view_matrix = self.scene.view_matrix,
-            .perspective_matrix = blk: {
-                // FIX: This is the correct perspective matrix for Vulkan's coordinate system.
-                // The original matrix was for OpenGL, which uses a different depth range [-1, 1]
-                // and has a different Y-axis direction in its normalized device coordinates.
-                // This matrix handles the depth range [0, 1] and flips the Y-axis.
-                const fovy = std.math.degreesToRadians(45.0);
-                const aspect = @as(f32, @floatFromInt(WINDOW_WIDTH)) / @as(f32, @floatFromInt(WINDOW_HEIGHT));
-                const near = 0.1;
-                const far = 100.0;
-                const f = 1.0 / std.math.tan(fovy / 2.0);
-
-                break :blk .{
-                    f / aspect, 0, 0, 0,
-                    0, -f, 0,                           0, // Note the -f to flip Y
-                    0, 0,  far / (near - far),          -1,
-                    0, 0,  (far * near) / (near - far), 0,
-                };
-            },
-        };
-
-        var ubo_data_ptr: ?*anyopaque = undefined;
-        try checkVk(c.vkMapMemory(self.device, self.uniform_buffer_memory, 0, @sizeOf(UniformBufferObject), 0, &ubo_data_ptr));
-        const mapped_ubo: *UniformBufferObject = @ptrCast(@alignCast(ubo_data_ptr.?));
-        mapped_ubo.* = ubo;
-        c.vkUnmapMemory(self.device, self.uniform_buffer_memory);
+        c.vkUpdateDescriptorSets(self.owner, 1, &desc_write, 0, null);
     }
+};
 
-    fn createShaderModule(allocator: std.mem.Allocator, device: c.VkDevice, code: []const u8, allocation_callbacks: ?*c.VkAllocationCallbacks) !c.VkShaderModule {
+const ShaderType = enum(u8) {
+    Vertex,
+    Fragment,
+};
+
+const ShaderModule = struct {
+    const Self = @This();
+
+    handle: c.VkShaderModule = undefined,
+    owner: c.VkDevice,
+
+    pub fn init(allocator: Allocator, device_handle: c.VkDevice, code: []const u8) !Self {
+        var self = Self{ .owner = device_handle };
         std.debug.assert(code.len % 4 == 0);
 
         const aligned_code = try allocator.alignedAlloc(u32, @alignOf(u32), code.len / @sizeOf(u32));
@@ -841,29 +1049,109 @@ const App = struct {
             .pCode = aligned_code.ptr,
         };
 
-        var shader_module: c.VkShaderModule = undefined;
-        try checkVk(c.vkCreateShaderModule(device, &create_info, allocation_callbacks, &shader_module));
-        return shader_module;
+        try checkVk(
+            c.vkCreateShaderModule(device_handle, &create_info, null, &self.handle),
+        );
+        return self;
     }
 
-    fn createGraphicsPipeline(app: *Self) !void {
-        const vert_shader_module = try createShaderModule(app.allocator, app.device, vert_shader_code, app.alloc_callbacks);
-        defer c.vkDestroyShaderModule(app.device, vert_shader_module, app.alloc_callbacks);
-        const frag_shader_module = try createShaderModule(app.allocator, app.device, frag_shader_code, app.alloc_callbacks);
-        defer c.vkDestroyShaderModule(app.device, frag_shader_module, app.alloc_callbacks);
+    pub fn deinit(self: *Self) void {
+        c.vkDestroyShaderModule(self.owner, self.handle, null);
+    }
+};
 
-        const vert_shader_stage_info = c.VkPipelineShaderStageCreateInfo{
-            .stage = c.VK_SHADER_STAGE_VERTEX_BIT,
-            .module = vert_shader_module,
+const Shader = struct {
+    const Self = @This();
+
+    module: ShaderModule,
+    type: ShaderType,
+
+    pub fn init(module: ShaderModule, @"type": ShaderType) Self {
+        return .{
+            .module = module,
+            .type = @"type",
+        };
+    }
+
+    pub fn deinit(self: *Self) void {
+        self.module.deinit();
+    }
+
+    pub fn info(self: Self) c.VkPipelineShaderStageCreateInfo {
+        const stage = switch (self.type) {
+            .Vertex => c.VK_SHADER_STAGE_VERTEX_BIT,
+            .Fragment => c.VK_SHADER_STAGE_FRAGMENT_BIT,
+        };
+        return .{
+            .stage = @intCast(stage),
+            .module = self.module.handle,
             .pName = "main",
         };
-        const frag_shader_stage_info = c.VkPipelineShaderStageCreateInfo{
-            .stage = c.VK_SHADER_STAGE_FRAGMENT_BIT,
-            .module = frag_shader_module,
-            .pName = "main",
+    }
+};
+
+const PipelineLayout = struct {
+    const Self = @This();
+
+    handle: c.VkPipelineLayout = undefined,
+    owner: c.VkDevice,
+    desc_set_layout: DescriptorSetLayout,
+
+    pub fn init(device: Device, desc_set_layouts: DescriptorSetLayout) !Self {
+        assert(device.handle != null and desc_set_layouts.handle != null);
+        var self = Self{
+            .owner = device.handle,
+            .desc_set_layout = desc_set_layouts,
         };
 
-        const shader_stages = [_]c.VkPipelineShaderStageCreateInfo{ vert_shader_stage_info, frag_shader_stage_info };
+        var pipeline_layout_info = c.VkPipelineLayoutCreateInfo{
+            .setLayoutCount = 1,
+            .pSetLayouts = &desc_set_layouts.handle,
+        };
+
+        try checkVk(
+            c.vkCreatePipelineLayout(device.handle, &pipeline_layout_info, null, &self.handle),
+        );
+
+        return self;
+    }
+
+    pub fn deinit(self: *Self) void {
+        c.vkDestroyPipelineLayout(self.owner, self.handle, null);
+    }
+};
+
+const Pipeline = struct {
+    const Self = @This();
+
+    handle: c.VkPipeline = undefined,
+    owner: c.VkDevice,
+
+    pub fn init(
+        allocator: Allocator,
+        device: Device,
+        render_pass: RenderPass,
+        layout: PipelineLayout,
+        swapchain_capabilities: c.VkSurfaceCapabilitiesKHR,
+    ) !Self {
+        assert(device.handle != null and render_pass.handle != null and layout.handle != null);
+        var self = Self{
+            .owner = device.handle,
+        };
+
+        var vert_shader = Shader.init(
+            try ShaderModule.init(allocator, device.handle, vert_shader_code),
+            .Vertex,
+        );
+        defer vert_shader.deinit();
+
+        var frag_shader = Shader.init(
+            try ShaderModule.init(allocator, device.handle, frag_shader_code),
+            .Fragment,
+        );
+        defer frag_shader.deinit();
+
+        const shader_stages = [_]c.VkPipelineShaderStageCreateInfo{ vert_shader.info(), frag_shader.info() };
 
         const binding_description = Vertex.getBindingDescription();
         const attribute_descriptions = Vertex.getAttributeDescriptions();
@@ -883,15 +1171,15 @@ const App = struct {
         const viewport = c.VkViewport{
             .x = 0.0,
             .y = 0.0,
-            .width = @floatFromInt(app.swapchain_extent.width),
-            .height = @floatFromInt(app.swapchain_extent.height),
+            .width = @floatFromInt(swapchain_capabilities.currentExtent.width),
+            .height = @floatFromInt(swapchain_capabilities.currentExtent.height),
             .minDepth = 0.0,
             .maxDepth = 1.0,
         };
 
         const scissor = c.VkRect2D{
             .offset = .{ .x = 0, .y = 0 },
-            .extent = app.swapchain_extent,
+            .extent = swapchain_capabilities.currentExtent,
         };
 
         var viewport_state = c.VkPipelineViewportStateCreateInfo{
@@ -926,18 +1214,6 @@ const App = struct {
             .pAttachments = &color_blend_attachment,
         };
 
-        var pipeline_layout_info = c.VkPipelineLayoutCreateInfo{
-            .setLayoutCount = 1,
-            .pSetLayouts = &app.descriptor_set_layout,
-        };
-
-        try checkVk(c.vkCreatePipelineLayout(
-            app.device,
-            &pipeline_layout_info,
-            app.alloc_callbacks,
-            &app.pipeline_layout,
-        ));
-
         var pipeline_info = c.VkGraphicsPipelineCreateInfo{
             .stageCount = shader_stages.len,
             .pStages = &shader_stages,
@@ -947,104 +1223,373 @@ const App = struct {
             .pRasterizationState = &rasterizer,
             .pMultisampleState = &multisampling,
             .pColorBlendState = &color_blending,
-            .layout = app.pipeline_layout,
-            .renderPass = app.render_pass,
+            .layout = layout.handle,
+            .renderPass = render_pass.handle,
             .subpass = 0,
         };
 
         try checkVk(c.vkCreateGraphicsPipelines(
-            app.device,
+            layout.owner,
             null,
             1,
             &pipeline_info,
-            app.alloc_callbacks,
-            &app.graphics_pipeline,
+            null,
+            &self.handle,
         ));
+        return self;
     }
 
-    fn createFramebuffers(app: *Self) !void {
-        app.framebuffers = try app.allocator.alloc(c.VkFramebuffer, app.swapchain_image_views.len);
-        for (app.swapchain_image_views, 0..) |image_view, i| {
-            const attachments = [_]c.VkImageView{image_view};
-            const create_info = c.VkFramebufferCreateInfo{
-                .renderPass = app.render_pass,
-                .attachmentCount = attachments.len,
-                .pAttachments = &attachments,
-                .width = app.swapchain_extent.width,
-                .height = app.swapchain_extent.height,
-                .layers = 1,
-            };
-            try checkVk(c.vkCreateFramebuffer(app.device, &create_info, null, &app.framebuffers[i]));
-        }
+    pub fn deinit(self: *Self) void {
+        c.vkDestroyPipeline(self.owner, self.handle, null);
     }
+};
 
-    // --- Buffer Creation Helper ---
-    fn findMemoryType(
-        physical_device: c.VkPhysicalDevice,
-        type_filter: u32,
-        properties: c.VkMemoryPropertyFlags,
-    ) !u32 {
-        var mem_properties: c.VkPhysicalDeviceMemoryProperties = undefined;
-        c.vkGetPhysicalDeviceMemoryProperties(physical_device, &mem_properties);
+const Device = struct {
+    const Self = @This();
 
-        const set: u64 = 1;
-        var i: u5 = 0;
-        while (i < mem_properties.memoryTypeCount) : (i += 1) {
-            if ((type_filter & set << i) != 0 and (mem_properties.memoryTypes[i].propertyFlags & properties) == properties) {
-                return i;
-            }
-        }
-        return error.MissingMemoryType;
-    }
+    handle: c.VkDevice = undefined,
+    graphics_queue: Queue = undefined,
+    physical: *PhysicalDevice,
 
-    fn createBuffer(
-        app: Self,
-        size: c.VkDeviceSize,
-        usage: c.VkBufferUsageFlags,
-        properties: c.VkMemoryPropertyFlags,
-    ) !struct { buffer: c.VkBuffer, memory: c.VkDeviceMemory } {
-        var buffer_info = c.VkBufferCreateInfo{
-            .size = size,
-            .usage = usage,
-            .sharingMode = c.VK_SHARING_MODE_EXCLUSIVE,
+    pub fn init(physical_device: *PhysicalDevice) !Self {
+        var self = Self{
+            .graphics_queue = .{},
+            .physical = physical_device,
         };
-        var buffer: c.VkBuffer = undefined;
-        try checkVk(c.vkCreateBuffer(app.device, &buffer_info, null, &buffer));
 
-        var mem_requirements: c.VkMemoryRequirements = undefined;
-        c.vkGetBufferMemoryRequirements(app.device, buffer, &mem_requirements);
-
-        var alloc_info = c.VkMemoryAllocateInfo{
-            .allocationSize = mem_requirements.size,
-            .memoryTypeIndex = try findMemoryType(app.physical_device, mem_requirements.memoryTypeBits, properties),
+        const queue_priority: f32 = 1.0;
+        const queue_create_info = c.VkDeviceQueueCreateInfo{
+            .queueFamilyIndex = physical_device.q_family_idx,
+            .queueCount = 1,
+            .pQueuePriorities = &queue_priority,
         };
-        var memory: c.VkDeviceMemory = undefined;
-        try checkVk(c.vkAllocateMemory(app.device, &alloc_info, null, &memory));
 
-        try checkVk(c.vkBindBufferMemory(app.device, buffer, memory, 0));
+        var device_features = c.VkPhysicalDeviceFeatures{};
+        // We need to enable the swapchain extension.
+        const device_extensions = [_][*:0]const u8{c.VK_KHR_SWAPCHAIN_EXTENSION_NAME};
 
-        return .{ .buffer = buffer, .memory = memory };
+        const create_info = c.VkDeviceCreateInfo{
+            .pEnabledFeatures = &device_features,
+            .pQueueCreateInfos = &queue_create_info,
+            .queueCreateInfoCount = 1,
+            .ppEnabledExtensionNames = &device_extensions,
+            .enabledExtensionCount = device_extensions.len,
+        };
+
+        try checkVk(c.vkCreateDevice(
+            physical_device.handle,
+            &create_info,
+            null,
+            &self.handle,
+        ));
+
+        // Get a handle to the graphics queue.
+        c.vkGetDeviceQueue(self.handle, physical_device.q_family_idx, 0, &self.graphics_queue.handle);
+
+        return self;
     }
 
-    fn createVertexBuffer(self: *Self) !void {
+    pub fn deinit(self: *Self) void {
+        c.vkDestroyDevice(self.handle, null);
+    }
+};
+
+const Window = struct {
+    const Self = @This();
+
+    handle: ?*c.GLFWwindow = undefined,
+
+    pub fn init(user_ptr: ?*anyopaque, width: c_int, height: c_int, title: [*c]const u8, monitor: ?*c.GLFWmonitor, share: ?*c.GLFWwindow) !Self {
+        c.glfwWindowHint(c.GLFW_CLIENT_API, c.GLFW_NO_API);
+        c.glfwWindowHint(c.GLFW_RESIZABLE, c.GLFW_NO_API);
+
+        const handle = c.glfwCreateWindow(width, height, title, monitor, share);
+
+        if (handle == null) return error.GlfwCreateWindowFailed;
+        c.glfwSetWindowUserPointer(handle, user_ptr);
+        _ = c.glfwSetCursorPosCallback(handle, Callbacks.cbCursorPos);
+
+        return .{
+            .handle = handle,
+        };
+    }
+
+    pub fn deinit(self: *Self) void {
+        c.glfwDestroyWindow(self.handle);
+        self.handle = undefined;
+    }
+};
+
+const App = struct {
+    const Self = @This();
+
+    allocator: Allocator,
+    scene: Scene,
+    window: Window = undefined,
+    instance: Instance = undefined,
+    surface: Surface = undefined,
+    physical_device: PhysicalDevice = undefined,
+    device: Device = undefined,
+    swapchain: Swapchain = undefined,
+    vertex_buffer: Buffer = undefined,
+    uniform_buffer: Buffer = undefined,
+    descriptor_pool: DescriptorPool = undefined,
+    render_pass: RenderPass = undefined,
+    pipeline_layout: PipelineLayout = undefined,
+    pipeline: Pipeline = undefined,
+    descriptor_layout: DescriptorSetLayout = undefined,
+    descriptor_set: DescriptorSet = undefined,
+    command_pool: CommandPool = undefined,
+    command_buffer: CommandBuffer = undefined,
+    sync: SyncObjects = undefined,
+
+    pub fn init(allocator: Allocator, scene: Scene) !Self {
+        var self = Self{
+            .allocator = allocator,
+            .scene = scene,
+        };
+
+        // Initialize window
+        self.window = try Window.init(&self, 800, 600, "legal", null, null);
+
+        // Initialize instance
+        self.instance = try Instance.init();
+
+        // Initialize surface
+        self.surface = try Surface.init(self.instance, self.window);
+
+        // Initialize physical and logical devices
+        self.physical_device = try PhysicalDevice.init(allocator, self.instance, self.surface);
+        self.device = try Device.init(&self.physical_device);
+
+        // Initialize swapchain
+        self.swapchain = try Swapchain.init(allocator, self.physical_device, &self.device, self.surface);
+
+        // Initialize descriptor set layout and pool
+        self.descriptor_layout = try DescriptorSetLayout.init(self.device, .Uniform);
+        self.descriptor_pool = try DescriptorPool.init(self.device, self.descriptor_layout);
+
+        // Initialize descriptor sets
+        self.descriptor_set = try self.descriptor_pool.allocateDescriptorSet(self.descriptor_layout);
+
+        // Initialize buffers for the updateDescriptorSets call
+        try self.initVertexBuffer();
+        try self.initUniformBuffer();
+
+        self.descriptor_pool.updateDescritorSets(
+            self.uniform_buffer,
+            0,
+            self.descriptor_set,
+            UniformBufferObject,
+        );
+
+        // Initialize render pass
+        self.render_pass = try RenderPass.init(allocator, self.device, self.swapchain);
+
+        // Initialize pipeline
+        self.pipeline_layout = try PipelineLayout.init(self.device, self.descriptor_layout);
+        self.pipeline = try Pipeline.init(
+            allocator,
+            self.device,
+            self.render_pass,
+            self.pipeline_layout,
+            self.swapchain.capabilities,
+        );
+
+        // Initialize command pool and buffer
+        self.command_pool = try CommandPool.init(self.device);
+        self.command_buffer = try self.command_pool.allocateCommandBuffer();
+
+        self.sync = try SyncObjects.init(self.device);
+
+        return self;
+    }
+
+    pub fn initWindow(self: *Self) !void {
+        self.window = try Window.init(self, 800, 600, "legal", null, null);
+    }
+
+    pub fn initVulkan(self: *Self) !void {
+        // Initialize instance
+        self.instance = try Instance.init();
+
+        // Initialize surface
+        self.surface = try Surface.init(self.instance, self.window);
+
+        // Initialize physical and logical devices
+        self.physical_device = try PhysicalDevice.init(self.allocator, self.instance, self.surface);
+        self.device = try Device.init(&self.physical_device);
+
+        // Initialize swapchain
+        self.swapchain = try Swapchain.init(self.allocator, self.physical_device, &self.device, self.surface);
+
+        // Initialize descriptor set layout and pool
+        self.descriptor_layout = try DescriptorSetLayout.init(self.device, .Uniform);
+        self.descriptor_pool = try DescriptorPool.init(self.device, self.descriptor_layout);
+
+        // Initialize descriptor sets
+        self.descriptor_set = try self.descriptor_pool.allocateDescriptorSet(self.descriptor_layout);
+
+        // Initialize buffers for the updateDescriptorSets call
+        try self.initVertexBuffer();
+        try self.initUniformBuffer();
+
+        self.descriptor_pool.updateDescritorSets(
+            self.uniform_buffer,
+            0,
+            self.descriptor_set,
+            UniformBufferObject,
+        );
+
+        // Initialize render pass
+        self.render_pass = try RenderPass.init(self.allocator, self.device, self.swapchain);
+
+        // Initialize pipeline
+        self.pipeline_layout = try PipelineLayout.init(self.device, self.descriptor_layout);
+        self.pipeline = try Pipeline.init(
+            self.allocator,
+            self.device,
+            self.render_pass,
+            self.pipeline_layout,
+            self.swapchain.capabilities,
+        );
+
+        // Initialize command pool and buffer
+        self.command_pool = try CommandPool.init(self.device);
+        self.command_buffer = try self.command_pool.allocateCommandBuffer();
+
+        self.sync = try SyncObjects.init(self.device);
+    }
+
+    pub fn deinit(self: *Self) void {
+        self.scene.deinit(self.allocator);
+        self.sync.deinit();
+        self.command_pool.deinit();
+        self.pipeline_layout.deinit();
+        self.pipeline.deinit();
+        self.render_pass.deinit(self.allocator);
+        self.vertex_buffer.deinit();
+        self.uniform_buffer.deinit();
+        self.descriptor_layout.deinit();
+        self.descriptor_pool.deinit(); // Needs to be the last descriptor resource destroyed
+        self.swapchain.deinit(self.allocator);
+        self.device.deinit();
+        self.physical_device.deinit();
+        self.surface.deinit();
+        self.instance.deinit();
+        self.window.deinit();
+    }
+
+    pub fn run(self: *Self) !void {
+        while (c.glfwWindowShouldClose(self.window.handle) == 0) {
+            c.glfwPollEvents();
+            try self.draw();
+        }
+        // Wait for the GPU to finish all operations before we start cleaning up.
+        try checkVk(
+            c.vkDeviceWaitIdle(self.device.handle),
+        );
+    }
+
+    fn draw(self: *Self) !void {
+        // Wait for the previous frame's fence to be signaled (meaning it's done rendering).
+        // TODO: Change timeout
+        try checkVk(c.vkWaitForFences(
+            self.device.handle,
+            1,
+            &self.sync.in_flight_fence.handle,
+            c.VK_TRUE,
+            std.math.maxInt(u64),
+        ));
+
+        try self.updateUniformBuffer();
+
+        try checkVk(c.vkResetFences(
+            self.device.handle,
+            1,
+            &self.sync.in_flight_fence.handle,
+        ));
+
+        // Acquire an image from the swapchain.
+        var image_index: u32 = 0;
+        try checkVk(
+            c.vkAcquireNextImageKHR(
+                self.device.handle,
+                self.swapchain.handle,
+                std.math.maxInt(u64),
+                self.sync.img_available_semaphore.handle,
+                null,
+                &image_index,
+            ),
+        );
+
+        // Reset and record the command buffer.
+        try checkVk(
+            c.vkResetCommandBuffer(self.command_buffer.handle, 0),
+        );
+        try self.recordCommandBuffer(image_index);
+
+        // Submit the command buffer to the graphics queue.
+        const wait_semaphores = [_]c.VkSemaphore{
+            self.sync.img_available_semaphore.handle,
+        };
+        const wait_stages = [_]c.VkPipelineStageFlags{c.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
+        const signal_semaphores = [_]c.VkSemaphore{
+            self.sync.render_ended_semaphore.handle,
+        };
+
+        const submit_info = c.VkSubmitInfo{
+            .waitSemaphoreCount = wait_semaphores.len,
+            .pWaitSemaphores = &wait_semaphores,
+            .pWaitDstStageMask = &wait_stages,
+            .commandBufferCount = 1,
+            .pCommandBuffers = &self.command_buffer.handle,
+            .signalSemaphoreCount = signal_semaphores.len,
+            .pSignalSemaphores = &signal_semaphores,
+        };
+        try checkVk(c.vkQueueSubmit(
+            self.device.graphics_queue.handle,
+            1,
+            &submit_info,
+            self.sync.in_flight_fence.handle,
+        ));
+
+        // Present the image to the screen.
+        const swapchains = [_]c.VkSwapchainKHR{self.swapchain.handle};
+        const present_info = c.VkPresentInfoKHR{
+            .waitSemaphoreCount = signal_semaphores.len,
+            .pWaitSemaphores = &signal_semaphores,
+            .swapchainCount = swapchains.len,
+            .pSwapchains = &swapchains,
+            .pImageIndices = &image_index,
+        };
+
+        try checkVk(
+            c.vkQueuePresentKHR(self.device.graphics_queue.handle, &present_info),
+        );
+    }
+
+    /// Helper function
+    fn initVertexBuffer(self: *Self) !void {
         // Calculate the total size needed for both axis and grid vertices.
         const total_vertex_count = self.scene.axis.len + self.scene.grid.len;
         const buffer_size = @sizeOf(Vertex) * total_vertex_count;
 
         if (buffer_size == 0) return; // Avoid creating a zero-size buffer
 
-        const buffer = try self.createBuffer(
+        self.vertex_buffer = try Buffer.init(
+            self.device,
             buffer_size,
-            c.VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+            .Vertex,
             c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
         );
-        self.vertex_buffer = buffer.buffer;
-        self.vertex_buffer_memory = buffer.memory;
 
         // --- Copy vertex data to the buffer ---
         var data_ptr: ?*anyopaque = undefined;
-        try checkVk(c.vkMapMemory(self.device, buffer.memory, 0, buffer_size, 0, &data_ptr));
-        defer c.vkUnmapMemory(self.device, buffer.memory);
+        try checkVk(
+            c.vkMapMemory(self.device.handle, self.vertex_buffer.memory, 0, buffer_size, 0, &data_ptr),
+        );
+        defer c.vkUnmapMemory(self.device.handle, self.vertex_buffer.memory);
 
         const many_item_ptr: [*]Vertex = @ptrCast(@alignCast(data_ptr.?));
         const mapped_vertex_slice = many_item_ptr[0..total_vertex_count];
@@ -1057,30 +1602,16 @@ const App = struct {
         @memcpy(mapped_vertex_slice[grid_offset .. grid_offset + self.scene.grid.len], self.scene.grid);
     }
 
-    fn updateVertexBuffers(self: *Self) !void {
-        const buffer_size = @sizeOf(Vertex) * (self.scene.axis.len + self.scene.grid.len);
-
-        var data_ptr: ?*anyopaque = undefined;
-        try checkVk(c.vkMapMemory(self.device, self.vertex_buffer_memory, 0, buffer_size, 0, &data_ptr));
-        defer c.vkUnmapMemory(self.device, self.vertex_buffer_memory);
-
-        const mapped_vertex_slice: [*]Vertex = @ptrCast(@alignCast(data_ptr));
-        @memcpy(mapped_vertex_slice[0..self.scene.axis.len], &self.scene.axis);
-        const grid_offset = self.scene.axis.len;
-        @memcpy(mapped_vertex_slice[grid_offset .. grid_offset + self.scene.grid.len], self.scene.grid);
-    }
-
-    fn createUniformBuffer(self: *Self) !void {
+    /// Helper function
+    fn initUniformBuffer(self: *Self) !void {
         // FIX: The buffer size must match the UniformBufferObject struct, not the Vertex struct.
         const ubo_size = @sizeOf(UniformBufferObject);
-        const uniform_buffer_obj = try self.createBuffer(
+        self.uniform_buffer = try Buffer.init(
+            self.device,
             ubo_size,
-            c.VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+            .Uniform,
             c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
         );
-
-        self.uniform_buffer = uniform_buffer_obj.buffer;
-        self.uniform_buffer_memory = uniform_buffer_obj.memory;
     }
 
     fn updateUniformBuffer(self: *Self) !void {
@@ -1105,129 +1636,64 @@ const App = struct {
         };
 
         var ubo_data_ptr: ?*anyopaque = undefined;
-        try checkVk(c.vkMapMemory(self.device, self.uniform_buffer_memory, 0, @sizeOf(UniformBufferObject), 0, &ubo_data_ptr));
+        try checkVk(c.vkMapMemory(self.device.handle, self.uniform_buffer.memory, 0, @sizeOf(UniformBufferObject), 0, &ubo_data_ptr));
         const mapped_ubo: *UniformBufferObject = @ptrCast(@alignCast(ubo_data_ptr.?));
         mapped_ubo.* = ubo;
-        c.vkUnmapMemory(self.device, self.uniform_buffer_memory);
+        c.vkUnmapMemory(self.device.handle, self.uniform_buffer.memory);
     }
 
-    fn createCommandPool(self: *Self) !void {
-        const queue_family_index = try findQueueFamilies(self.allocator, self.physical_device, self.surface);
-        var cmd_pool_info = c.VkCommandPoolCreateInfo{
-            .flags = c.VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
-            .queueFamilyIndex = queue_family_index,
-        };
-
-        try checkVk(c.vkCreateCommandPool(self.device, &cmd_pool_info, null, &self.command_pool));
-    }
-
-    fn createCommandBuffer(self: *Self) !void {
-        const alloc_info = c.VkCommandBufferAllocateInfo{
-            .commandPool = self.command_pool,
-            .level = c.VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-            .commandBufferCount = 1,
-        };
-        try checkVk(c.vkAllocateCommandBuffers(self.device, &alloc_info, &self.command_buffer));
-    }
-
-    fn createSyncObjects(self: *Self) !void {
-        const sync_create_info = c.VkSemaphoreCreateInfo{};
-        const fence_create_info = c.VkFenceCreateInfo{
-            .flags = c.VK_FENCE_CREATE_SIGNALED_BIT,
-        }; // Create signaled so first frame doesn't wait.
-
-        try checkVk(c.vkCreateSemaphore(self.device, &sync_create_info, self.alloc_callbacks, &self.image_available_semaphore));
-        try checkVk(c.vkCreateSemaphore(self.device, &sync_create_info, self.alloc_callbacks, &self.render_finished_semaphore));
-        try checkVk(c.vkCreateFence(self.device, &fence_create_info, self.alloc_callbacks, &self.in_flight_fence));
-    }
-
-    // --- Per-frame Drawing Logic ---
-    fn drawFrame(self: *Self) !void {
-        // Wait for the previous frame's fence to be signaled (meaning it's done rendering).
-        try checkVk(c.vkWaitForFences(self.device, 1, &self.in_flight_fence, c.VK_TRUE, std.math.maxInt(u64)));
-        try self.updateUniformBuffer();
-        try checkVk(c.vkResetFences(self.device, 1, &self.in_flight_fence));
-
-        // Acquire an image from the swapchain.
-        var image_index: u32 = 0;
-        try checkVk(c.vkAcquireNextImageKHR(self.device, self.swapchain, std.math.maxInt(u64), self.image_available_semaphore, null, &image_index));
-
-        // Reset and record the command buffer.
-        try checkVk(c.vkResetCommandBuffer(self.command_buffer, 0));
-        try self.recordCommandBuffer(image_index);
-
-        // Submit the command buffer to the graphics queue.
-        const wait_semaphores = [_]c.VkSemaphore{self.image_available_semaphore};
-        const wait_stages = [_]c.VkPipelineStageFlags{c.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
-        const signal_semaphores = [_]c.VkSemaphore{self.render_finished_semaphore};
-
-        const submit_info = c.VkSubmitInfo{
-            .waitSemaphoreCount = wait_semaphores.len,
-            .pWaitSemaphores = &wait_semaphores,
-            .pWaitDstStageMask = &wait_stages,
-            .commandBufferCount = 1,
-            .pCommandBuffers = &self.command_buffer,
-            .signalSemaphoreCount = signal_semaphores.len,
-            .pSignalSemaphores = &signal_semaphores,
-        };
-        try checkVk(c.vkQueueSubmit(self.graphics_queue, 1, &submit_info, self.in_flight_fence));
-
-        // Present the image to the screen.
-        const swapchains = [_]c.VkSwapchainKHR{self.swapchain};
-        const present_info = c.VkPresentInfoKHR{
-            .waitSemaphoreCount = signal_semaphores.len,
-            .pWaitSemaphores = &signal_semaphores,
-            .swapchainCount = swapchains.len,
-            .pSwapchains = &swapchains,
-            .pImageIndices = &image_index,
-        };
-
-        try checkVk(c.vkQueuePresentKHR(self.graphics_queue, &present_info));
-    }
-
-    fn recordCommandBuffer(self: *Self, image_index: u32) !void {
+    pub fn recordCommandBuffer(self: *Self, image_index: u32) !void {
         const begin_info = c.VkCommandBufferBeginInfo{};
-        try checkVk(c.vkBeginCommandBuffer(self.command_buffer, &begin_info));
+        try checkVk(
+            c.vkBeginCommandBuffer(self.command_buffer.handle, &begin_info),
+        );
 
-        const _clear_color = c.VkClearValue{ .color = .{ .float32 = .{ 0.1, 0.1, 0.1, 1.0 } } };
+        const clear_color = c.VkClearValue{ .color = .{ .float32 = .{ 0.1, 0.1, 0.1, 1.0 } } };
 
         const render_pass_info = c.VkRenderPassBeginInfo{
-            .renderPass = self.render_pass,
-            .framebuffer = self.framebuffers[@intCast(image_index)],
+            .renderPass = self.render_pass.handle,
+            .framebuffer = self.render_pass.framebuffers[image_index],
             .renderArea = .{
                 .offset = .{ .x = 0, .y = 0 },
-                .extent = self.swapchain_extent,
+                .extent = self.swapchain.capabilities.currentExtent,
             },
             .clearValueCount = 1,
-            .pClearValues = &_clear_color,
+            .pClearValues = &clear_color,
         };
-        c.vkCmdBeginRenderPass(self.command_buffer, &render_pass_info, c.VK_SUBPASS_CONTENTS_INLINE);
+        c.vkCmdBeginRenderPass(
+            self.command_buffer.handle,
+            &render_pass_info,
+            c.VK_SUBPASS_CONTENTS_INLINE,
+        );
 
         // Bind the graphics pipeline.
-        c.vkCmdBindPipeline(self.command_buffer, c.VK_PIPELINE_BIND_POINT_GRAPHICS, self.graphics_pipeline);
+        c.vkCmdBindPipeline(
+            self.command_buffer.handle,
+            c.VK_PIPELINE_BIND_POINT_GRAPHICS,
+            self.pipeline.handle,
+        );
 
         // Bind the vertex buffer.
-        const vertex_buffers = [_]c.VkBuffer{self.vertex_buffer};
+        const vertex_buffers = [_]c.VkBuffer{self.vertex_buffer.handle};
         const offsets = [_]c.VkDeviceSize{0};
-        c.vkCmdBindVertexBuffers(self.command_buffer, 0, 1, &vertex_buffers, &offsets);
+        c.vkCmdBindVertexBuffers(self.command_buffer.handle, 0, 1, &vertex_buffers, &offsets);
         c.vkCmdBindDescriptorSets(
-            self.command_buffer,
+            self.command_buffer.handle,
             c.VK_PIPELINE_BIND_POINT_GRAPHICS,
-            self.pipeline_layout,
+            self.pipeline_layout.handle,
             0,
             1,
-            &self.descriptor_set,
+            &self.descriptor_set.handle,
             0,
             null,
         );
 
-        c.vkCmdDraw(self.command_buffer, @intCast(self.scene.axis.len + self.scene.grid.len), 1, 0, 0);
+        c.vkCmdDraw(self.command_buffer.handle, @intCast(self.scene.axis.len + self.scene.grid.len), 1, 0, 0);
 
-        c.vkCmdEndRenderPass(self.command_buffer);
-        try checkVk(c.vkEndCommandBuffer(self.command_buffer));
+        c.vkCmdEndRenderPass(self.command_buffer.handle);
+        try checkVk(c.vkEndCommandBuffer(self.command_buffer.handle));
     }
 };
-
 // --- Zig Entry Point ---
 // --- Entry Point ---
 pub fn main() !void {
@@ -1242,17 +1708,18 @@ pub fn main() !void {
 
     const allocator = da.allocator();
 
-    const app = try allocator.create(App);
+    var app = try allocator.create(App);
     defer allocator.destroy(app);
 
     app.* = .{
         .allocator = allocator,
-        .scene = try Scene.init(allocator),
+        .scene = try Scene.init(allocator, 20),
     };
 
-    defer app.cleanup();
+    defer app.deinit();
 
     try app.initWindow();
     try app.initVulkan();
+
     try app.run();
 }
