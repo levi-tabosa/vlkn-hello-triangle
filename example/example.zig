@@ -37,6 +37,7 @@ fn checkVk(result: c.VkResult) !void {
         c.VK_ERROR_UNKNOWN => error.VulkanUnknown,
         c.VK_ERROR_SURFACE_LOST_KHR => error.VulkanSurfaceLost,
         c.VK_ERROR_NATIVE_WINDOW_IN_USE_KHR => error.NativeWindowInUse,
+        c.VK_SUBOPTIMAL_KHR => error.VulkanSuboptimalKHR,
         else => error.VulkanDefault,
     };
 }
@@ -121,6 +122,14 @@ const Callbacks = struct {
 
         // app.scene.;
     }
+
+    fn cbFramebufferResize(wd: ?*c.GLFWwindow, width: c_int, height: c_int) callconv(.C) void {
+        std.debug.print("width : {} height : {}\n", .{ width, height });
+        const user_ptr = c.glfwGetWindowUserPointer(wd orelse return) orelse @panic("No window user ptr");
+        const app: *App = @alignCast(@ptrCast(user_ptr));
+        // We just set a flag here. The actual recreation will happen in the draw loop.
+        app.framebuffer_resized = true;
+    }
 };
 
 const Window = struct {
@@ -139,6 +148,7 @@ const Window = struct {
         c.glfwSetWindowUserPointer(handle, user_ptr);
         _ = c.glfwSetCursorPosCallback(handle, Callbacks.cbCursorPos);
         _ = c.glfwSetKeyCallback(handle, Callbacks.cbKey);
+        _ = c.glfwSetFramebufferSizeCallback(handle, Callbacks.cbFramebufferResize);
 
         return .{
             .handle = handle,
@@ -354,22 +364,21 @@ const Swapchain = struct {
     const Self = @This();
 
     handle: c.VkSwapchainKHR = undefined,
-    surface_format: c.VkSurfaceFormatKHR = undefined,
-    capabilities: c.VkSurfaceCapabilitiesKHR = undefined,
+    image_format: c.VkSurfaceFormatKHR = undefined,
+    extent: c.VkExtent2D = undefined,
     images: []c.VkImage = undefined,
     image_views: []c.VkImageView = undefined,
-    present_mode: c_uint = undefined,
     owner: c.VkDevice,
 
-    pub fn init(allocator: Allocator, physical_device: PhysicalDevice, device: *Device, surface: Surface) !Self {
-        assert(physical_device.handle != null and surface.handle != null);
+    pub fn init(allocator: Allocator, device: Device, surface: Surface) !Self {
+        assert(device.handle != null and surface.handle != null);
         var self = Self{
             .owner = device.handle,
         };
 
         var fmt_count: u32 = 0;
         try checkVk(c.vkGetPhysicalDeviceSurfaceFormatsKHR(
-            physical_device.handle,
+            device.physical.handle,
             surface.handle,
             &fmt_count,
             null,
@@ -378,17 +387,17 @@ const Swapchain = struct {
         const fmts = try allocator.alloc(c.VkSurfaceFormatKHR, fmt_count);
         defer allocator.free(fmts);
         try checkVk(c.vkGetPhysicalDeviceSurfaceFormatsKHR(
-            physical_device.handle,
+            device.physical.handle,
             surface.handle,
             &fmt_count,
             fmts.ptr,
         ));
 
-        self.surface_format = fmts[0];
+        self.image_format = fmts[0];
 
         var present_modes_count: u32 = undefined;
         try checkVk(c.vkGetPhysicalDeviceSurfacePresentModesKHR(
-            physical_device.handle,
+            device.physical.handle,
             surface.handle,
             &present_modes_count,
             null,
@@ -396,41 +405,45 @@ const Swapchain = struct {
         const present_modes = allocator.alloc(c.VkPresentModeKHR, present_modes_count) catch @panic("OOM");
         defer allocator.free(present_modes);
         try checkVk(c.vkGetPhysicalDeviceSurfacePresentModesKHR(
-            physical_device.handle,
+            device.physical.handle,
             surface.handle,
             &present_modes_count,
             present_modes.ptr,
         ));
 
-        self.present_mode = c.VK_PRESENT_MODE_FIFO_KHR; // V-Sync, guaranteed to be available.
+        var present_mode: c_uint = c.VK_PRESENT_MODE_FIFO_KHR; // V-Sync, guaranteed to be available.
         for (present_modes) |mode| {
             if (mode == c.VK_PRESENT_MODE_MAILBOX_KHR) {
-                self.present_mode = c.VK_PRESENT_MODE_MAILBOX_KHR; // Triple buffering, better for latency.
+                present_mode = c.VK_PRESENT_MODE_MAILBOX_KHR; // Triple buffering, better for latency.
                 break;
             }
         }
 
+        var capabilities: c.VkSurfaceCapabilitiesKHR = undefined;
         try checkVk(
-            c.vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physical_device.handle, surface.handle, &self.capabilities),
+            c.vkGetPhysicalDeviceSurfaceCapabilitiesKHR(device.physical.handle, surface.handle, &capabilities),
         );
+        // Get handle for `extent`
+        self.extent = capabilities.currentExtent;
 
-        var image_count = self.capabilities.minImageCount + 1;
-        if (self.capabilities.maxImageCount > 0 and image_count > self.capabilities.maxImageCount) {
-            image_count = self.capabilities.maxImageCount;
+        // Image count is
+        var image_count = capabilities.minImageCount + 1;
+        if (capabilities.maxImageCount > 0 and image_count > capabilities.maxImageCount) {
+            image_count = capabilities.maxImageCount;
         }
 
         const create_info = c.VkSwapchainCreateInfoKHR{
             .surface = surface.handle,
             .minImageCount = image_count,
-            .imageFormat = self.surface_format.format,
-            .imageColorSpace = self.surface_format.colorSpace,
-            .imageExtent = self.capabilities.currentExtent,
+            .imageFormat = self.image_format.format,
+            .imageColorSpace = self.image_format.colorSpace,
+            .imageExtent = capabilities.currentExtent,
             .imageArrayLayers = 1,
             .imageUsage = c.VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
             .imageSharingMode = c.VK_SHARING_MODE_EXCLUSIVE,
-            .preTransform = self.capabilities.currentTransform,
+            .preTransform = capabilities.currentTransform,
             .compositeAlpha = c.VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
-            .presentMode = self.present_mode,
+            .presentMode = present_mode,
             .clipped = c.VK_TRUE,
             .oldSwapchain = null,
         };
@@ -454,7 +467,7 @@ const Swapchain = struct {
             const info = c.VkImageViewCreateInfo{
                 .image = image,
                 .viewType = c.VK_IMAGE_VIEW_TYPE_2D,
-                .format = self.surface_format.format,
+                .format = self.image_format.format,
                 .components = .{}, // Use default .r, .g, .b, .a mapping
                 .subresourceRange = .{
                     .aspectMask = c.VK_IMAGE_ASPECT_COLOR_BIT,
@@ -496,7 +509,7 @@ const RenderPass = struct {
         };
 
         var color_attachment = c.VkAttachmentDescription{
-            .format = swapchain.surface_format.format,
+            .format = swapchain.image_format.format,
             .samples = c.VK_SAMPLE_COUNT_1_BIT,
             .loadOp = c.VK_ATTACHMENT_LOAD_OP_CLEAR,
             .storeOp = c.VK_ATTACHMENT_STORE_OP_STORE,
@@ -557,8 +570,8 @@ const RenderPass = struct {
                 .renderPass = self.handle,
                 .attachmentCount = attachments.len,
                 .pAttachments = &attachments,
-                .width = swapchain.capabilities.currentExtent.width,
-                .height = swapchain.capabilities.currentExtent.height,
+                .width = swapchain.extent.width,
+                .height = swapchain.extent.height,
                 .layers = 1,
             };
             try checkVk(
@@ -1006,7 +1019,7 @@ const Pipeline = struct {
         device: Device,
         render_pass: RenderPass,
         layout: PipelineLayout,
-        swapchain_capabilities: c.VkSurfaceCapabilitiesKHR,
+        swapchain: Swapchain,
     ) !Self {
         assert(device.handle != null and render_pass.handle != null and layout.handle != null);
         var self = Self{
@@ -1045,15 +1058,15 @@ const Pipeline = struct {
         const viewport = c.VkViewport{
             .x = 0.0,
             .y = 0.0,
-            .width = @floatFromInt(swapchain_capabilities.currentExtent.width),
-            .height = @floatFromInt(swapchain_capabilities.currentExtent.height),
+            .width = @floatFromInt(swapchain.extent.width),
+            .height = @floatFromInt(swapchain.extent.height),
             .minDepth = 0.0,
             .maxDepth = 1.0,
         };
 
         const scissor = c.VkRect2D{
             .offset = .{ .x = 0, .y = 0 },
-            .extent = swapchain_capabilities.currentExtent,
+            .extent = swapchain.extent,
         };
 
         var viewport_state = c.VkPipelineViewportStateCreateInfo{
@@ -1190,6 +1203,7 @@ const App = struct {
     command_pool: CommandPool = undefined,
     command_buffer: CommandBuffer = undefined,
     sync: SyncObjects = undefined,
+    framebuffer_resized: bool = false,
 
     pub fn initWindow(self: *Self) !void {
         self.window = try Window.init(self, 800, 600, "legal", null, null);
@@ -1207,7 +1221,7 @@ const App = struct {
         self.device = try Device.init(&self.physical_device);
 
         // Initialize swapchain
-        self.swapchain = try Swapchain.init(self.allocator, self.physical_device, &self.device, self.surface);
+        self.swapchain = try Swapchain.init(self.allocator, self.device, self.surface);
 
         // Initialize descriptor set layout and pool
         self.descriptor_layout = try DescriptorSetLayout.init(self.device, .Uniform);
@@ -1237,7 +1251,7 @@ const App = struct {
             self.device,
             self.render_pass,
             self.pipeline_layout,
-            self.swapchain.capabilities,
+            self.swapchain,
         );
 
         // Initialize command pool and buffer
@@ -1290,23 +1304,29 @@ const App = struct {
 
         try self.updateUniformBuffer();
 
-        try checkVk(c.vkResetFences(
-            self.device.handle,
-            1,
-            &self.sync.in_flight_fence.handle,
-        ));
-
         // Acquire an image from the swapchain.
         var image_index: u32 = 0;
+
+        const acquire_result = c.vkAcquireNextImageKHR(
+            self.device.handle,
+            self.swapchain.handle,
+            std.math.maxInt(u64),
+            self.sync.img_available_semaphore.handle,
+            null,
+            &image_index,
+        );
+
+        if (acquire_result == c.VK_ERROR_OUT_OF_DATE_KHR) {
+            // The swapchain is no longer compatible with the surface. Recreate it and try again next frame.
+            try self.recreateSwapchain();
+            return;
+        } else if (acquire_result != c.VK_SUCCESS and acquire_result != c.VK_SUBOPTIMAL_KHR) {
+            // For other errors, we propagate them.
+            try checkVk(acquire_result);
+        }
+
         try checkVk(
-            c.vkAcquireNextImageKHR(
-                self.device.handle,
-                self.swapchain.handle,
-                std.math.maxInt(u64),
-                self.sync.img_available_semaphore.handle,
-                null,
-                &image_index,
-            ),
+            c.vkResetFences(self.device.handle, 1, &self.sync.in_flight_fence.handle),
         );
 
         // Reset and record the command buffer.
@@ -1350,9 +1370,14 @@ const App = struct {
             .pImageIndices = &image_index,
         };
 
-        try checkVk(
-            c.vkQueuePresentKHR(self.device.graphics_queue.handle, &present_info),
-        );
+        const present_result = c.vkQueuePresentKHR(self.device.graphics_queue.handle, &present_info);
+
+        if (present_result == c.VK_ERROR_OUT_OF_DATE_KHR or present_result == c.VK_SUBOPTIMAL_KHR) {
+            self.framebuffer_resized = false;
+            try self.recreateSwapchain();
+        } else {
+            try checkVk(present_result);
+        }
     }
 
     /// Helper function
@@ -1430,6 +1455,30 @@ const App = struct {
         c.vkUnmapMemory(self.device.handle, self.uniform_buffer.memory);
     }
 
+    fn recreateSwapchain(self: *Self) !void {
+        // Wait until the device is idle before we start destroying resources.
+        try checkVk(c.vkDeviceWaitIdle(self.device.handle));
+
+        // --- 1. Destroy old resources ---
+        // Destroy in reverse order of creation.
+        self.pipeline.deinit();
+        self.pipeline_layout.deinit();
+        self.render_pass.deinit(self.allocator);
+        self.swapchain.deinit(self.allocator);
+
+        // --- 2. Recreate resources with new properties ---
+        self.swapchain = try Swapchain.init(self.allocator, self.device, self.surface);
+        self.render_pass = try RenderPass.init(self.allocator, self.device, self.swapchain);
+        self.pipeline_layout = try PipelineLayout.init(self.device, self.descriptor_layout);
+        self.pipeline = try Pipeline.init(
+            self.allocator,
+            self.device,
+            self.render_pass,
+            self.pipeline_layout,
+            self.swapchain,
+        );
+    }
+
     pub fn recordCommandBuffer(self: *Self, image_index: u32) !void {
         const begin_info = c.VkCommandBufferBeginInfo{};
         try checkVk(
@@ -1443,7 +1492,7 @@ const App = struct {
             .framebuffer = self.render_pass.framebuffers[image_index],
             .renderArea = .{
                 .offset = .{ .x = 0, .y = 0 },
-                .extent = self.swapchain.capabilities.currentExtent,
+                .extent = self.swapchain.extent,
             },
             .clearValueCount = 1,
             .pClearValues = &clear_color,
