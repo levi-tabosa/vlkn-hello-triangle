@@ -124,9 +124,10 @@ const Callbacks = struct {
     }
 
     fn cbFramebufferResize(wd: ?*c.GLFWwindow, width: c_int, height: c_int) callconv(.C) void {
-        std.debug.print("width : {} height : {}\n", .{ width, height });
         const user_ptr = c.glfwGetWindowUserPointer(wd orelse return) orelse @panic("No window user ptr");
         const app: *App = @alignCast(@ptrCast(user_ptr));
+        app.window.size.x = width;
+        app.window.size.y = height;
         // We just set a flag here. The actual recreation will happen in the draw loop.
         app.framebuffer_resized = true;
     }
@@ -159,6 +160,10 @@ const Window = struct {
     pub fn deinit(self: *Self) void {
         c.glfwDestroyWindow(self.handle);
         self.handle = undefined;
+    }
+
+    pub fn minimized(self: Self) bool {
+        return self.size.x == 0 or self.size.y == 0;
     }
 };
 
@@ -499,7 +504,7 @@ const RenderPass = struct {
     const Self = @This();
 
     handle: c.VkRenderPass = undefined,
-    framebuffers: []c.VkFramebuffer = undefined,
+    framebuffer: []c.VkFramebuffer = undefined,
     owner: c.VkDevice,
 
     pub fn init(allocator: Allocator, device: Device, swapchain: Swapchain) !Self {
@@ -552,18 +557,18 @@ const RenderPass = struct {
             c.vkCreateRenderPass(device.handle, &create_info, null, &self.handle),
         );
 
-        try self.initFrameBuffers(allocator, swapchain);
+        try self.initFrameBuffer(allocator, swapchain);
 
         return self;
     }
 
     pub fn deinit(self: *Self, allocator: Allocator) void {
-        allocator.free(self.framebuffers);
+        self.deinitFramebuffer(allocator);
         c.vkDestroyRenderPass(self.owner, self.handle, null);
     }
 
-    pub fn initFrameBuffers(self: *Self, allocator: Allocator, swapchain: Swapchain) !void {
-        self.framebuffers = try allocator.alloc(c.VkFramebuffer, swapchain.image_views.len);
+    pub fn initFrameBuffer(self: *Self, allocator: Allocator, swapchain: Swapchain) !void {
+        self.framebuffer = try allocator.alloc(c.VkFramebuffer, swapchain.image_views.len);
         for (swapchain.image_views, 0..) |iv, i| {
             const attachments = [_]c.VkImageView{iv};
             const f_buffer_create_info = c.VkFramebufferCreateInfo{
@@ -575,9 +580,16 @@ const RenderPass = struct {
                 .layers = 1,
             };
             try checkVk(
-                c.vkCreateFramebuffer(self.owner, &f_buffer_create_info, null, &self.framebuffers[i]),
+                c.vkCreateFramebuffer(self.owner, &f_buffer_create_info, null, &self.framebuffer[i]),
             );
         }
+    }
+
+    pub fn deinitFramebuffer(self: *Self, allocator: Allocator) void {
+        for (self.framebuffer) |fb| {
+            c.vkDestroyFramebuffer(self.owner, fb, null);
+        }
+        allocator.free(self.framebuffer);
     }
 };
 
@@ -1283,6 +1295,10 @@ const App = struct {
     pub fn run(self: *Self) !void {
         while (c.glfwWindowShouldClose(self.window.handle) == 0) {
             c.glfwPollEvents();
+            if (self.window.minimized()) {
+                c.glfwWaitEvents();
+                continue;
+            }
             try self.draw();
         }
         // Wait for the GPU to finish all operations before we start cleaning up.
@@ -1432,9 +1448,8 @@ const App = struct {
                 // FIX: This is the correct perspective matrix for Vulkan's coordinate system.
                 //TODO: Internalize this better, maybe use a function to generate it.
                 const fovy = std.math.degreesToRadians(45.0);
-                // self.window.size.y
                 // TODO: Get these values from input and served window dimentions
-                const aspect: f32 = @as(f32, @floatFromInt(WINDOW_WIDTH)) / @as(f32, @floatFromInt(WINDOW_HEIGHT));
+                const aspect: f32 = @as(f32, @floatFromInt(self.window.size.x)) / @as(f32, @floatFromInt(self.window.size.y));
                 const near = 0.1;
                 const far = 100.0;
                 const f = 1.0 / std.math.tan(fovy / 2.0);
@@ -1463,12 +1478,12 @@ const App = struct {
         // Destroy in reverse order of creation.
         self.pipeline.deinit();
         self.pipeline_layout.deinit();
-        self.render_pass.deinit(self.allocator);
+        self.render_pass.deinitFramebuffer(self.allocator);
         self.swapchain.deinit(self.allocator);
 
         // --- 2. Recreate resources with new properties ---
         self.swapchain = try Swapchain.init(self.allocator, self.device, self.surface);
-        self.render_pass = try RenderPass.init(self.allocator, self.device, self.swapchain);
+        try self.render_pass.initFrameBuffer(self.allocator, self.swapchain);
         self.pipeline_layout = try PipelineLayout.init(self.device, self.descriptor_layout);
         self.pipeline = try Pipeline.init(
             self.allocator,
@@ -1489,7 +1504,7 @@ const App = struct {
 
         const render_pass_info = c.VkRenderPassBeginInfo{
             .renderPass = self.render_pass.handle,
-            .framebuffer = self.render_pass.framebuffers[image_index],
+            .framebuffer = self.render_pass.framebuffer[image_index],
             .renderArea = .{
                 .offset = .{ .x = 0, .y = 0 },
                 .extent = self.swapchain.extent,
