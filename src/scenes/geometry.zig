@@ -44,6 +44,7 @@ pub const V3 = extern struct {
 pub const Scene = struct {
     const Self = @This();
 
+    allocator: std.mem.Allocator,
     pitch: f32 = 0.5,
     yaw: f32 = 0.2,
     view_matrix: [16]f32,
@@ -57,7 +58,9 @@ pub const Scene = struct {
             .{ .pos = .{ res_float, res_float, res_float } },
             res_float,
         );
+
         return .{
+            .allocator = allocator,
             .axis = .{
                 // X-axis (Red)
                 .{ .pos = .{ -res_float, 0.0, 0.0 }, .color = .{ 1.0, 0.0, 0.0, 1.0 } }, .{ .pos = .{ res_float, 0.0, 0.0 }, .color = .{ 1.0, 0.0, 0.0, 1.0 } },
@@ -100,6 +103,11 @@ pub const Scene = struct {
         }
 
         self.view_matrix = self.camera.viewMatrix();
+    }
+
+    pub fn setGridResolution(self: *Self, new_resolution: u32) !void {
+        self.allocator.free(self.grid);
+        self.grid = try createGrid(self.allocator, new_resolution);
     }
 
     fn createGrid(allocator: std.mem.Allocator, resolution: u32) ![]V3 {
