@@ -45,9 +45,6 @@ pub const Scene = struct {
     const Self = @This();
 
     allocator: std.mem.Allocator,
-    pitch: f32 = 0.5,
-    yaw: f32 = 0.2,
-    view_matrix: [16]f32,
     camera: Camera,
     axis: [6]V3,
     grid: []V3,
@@ -55,10 +52,6 @@ pub const Scene = struct {
 
     pub fn init(allocator: std.mem.Allocator, resolution: u32) !Self {
         const res_float: f32 = @floatFromInt(resolution / 2);
-        var camera = Camera.init(
-            .{ .pos = .{ res_float, res_float, res_float } },
-            res_float,
-        );
 
         return .{
             .allocator = allocator,
@@ -72,8 +65,7 @@ pub const Scene = struct {
             },
             .grid = try createGrid(allocator, resolution),
             .lines = std.ArrayList(V3).init(allocator),
-            .camera = camera,
-            .view_matrix = camera.viewMatrix(),
+            .camera = Camera.init(.{ .pos = .{ res_float, res_float, res_float } }, 20.0),
         };
     }
 
@@ -84,32 +76,6 @@ pub const Scene = struct {
 
     pub fn clear(self: *Self) void {
         self.lines.clearRetainingCapacity();
-    }
-
-    pub fn setPitchYaw(self: *Self, pitch: f32, yaw: f32) void {
-        self.pitch = pitch;
-        self.yaw = yaw;
-        self.updateViewMatrix();
-    }
-
-    pub fn updateViewMatrix(self: *Self) void {
-        if (self.camera.radius) |r| {
-            self.camera.pos = .{
-                .pos = .{
-                    r * @cos(self.yaw) * @cos(self.pitch),
-                    r * @sin(self.yaw) * @cos(self.pitch),
-                    r * @sin(self.pitch),
-                },
-            };
-        } else {
-            self.camera.target = V3.add(self.camera.pos, V3{ .pos = .{
-                @cos(-self.yaw) * @cos(self.pitch),
-                @sin(-self.yaw) * @cos(self.pitch),
-                @sin(self.pitch),
-            } });
-        }
-
-        self.view_matrix = self.camera.viewMatrix();
     }
 
     pub fn setGridResolution(self: *Self, new_resolution: u32) !void {
@@ -151,7 +117,10 @@ const Camera = struct {
 
     pos: V3,
     target: V3 = .{ .pos = .{ 0, 0, 0 } },
-    up: V3 = .{ .pos = .{ 0, 0, 1 } }, // Z is up
+    up: V3 = .{ .pos = .{ 0, 0, 1 } },
+    pitch: f32 = 0.5,
+    yaw: f32 = 0.2,
+    fov_degrees: f32 = 75.0,
     radius: ?f32 = null,
     shape: [8]V3,
 
@@ -171,12 +140,42 @@ const Camera = struct {
         };
         return .{
             .pos = pos,
-            .radius = radius,
+            .radius = std.math.clamp(radius.?, 5.0, 100.0),
             .shape = cube,
         };
     }
 
-    pub fn viewMatrix(self: Self) [16]f32 {
+    pub fn adjustPitchYaw(self: *Self, pitch_delta: f32, yaw_delta: f32) void {
+        self.pitch += pitch_delta;
+        self.yaw += yaw_delta;
+
+        // Clamp pitch to avoid flipping upside down
+        const limit = math.pi / 2.0 - 0.01;
+        self.pitch = math.clamp(self.pitch, -limit, limit);
+    }
+
+    pub fn adjustFov(self: *Self, fov_delta_degrees: f32) void {
+        self.fov_degrees -= fov_delta_degrees; // Invert so moving mouse up zooms in
+        self.fov_degrees = math.clamp(self.fov_degrees, 15.0, 120.0);
+    }
+
+    pub fn viewMatrix(self: *Self) [16]f32 {
+        if (self.radius) |r| {
+            self.pos = .{ .pos = .{
+                r * @cos(self.yaw) * @cos(self.pitch),
+                r * @sin(self.yaw) * @cos(self.pitch),
+                r * @sin(self.pitch),
+            } };
+        } else {
+            self.target = V3.add(
+                self.pos,
+                .{ .pos = .{
+                    @cos(-self.yaw) * @cos(self.pitch),
+                    @sin(-self.yaw) * @cos(self.pitch),
+                    @sin(self.pitch),
+                } },
+            );
+        }
         const z_axis = V3.normalize(V3.subtract(self.pos, self.target));
         const x_axis = V3.normalize(V3.cross(self.up, z_axis));
         const y_axis = V3.cross(z_axis, x_axis);
@@ -186,6 +185,20 @@ const Camera = struct {
             x_axis.pos[1],             y_axis.pos[1],             z_axis.pos[1],             0.0,
             x_axis.pos[2],             y_axis.pos[2],             z_axis.pos[2],             0.0,
             -V3.dot(x_axis, self.pos), -V3.dot(y_axis, self.pos), -V3.dot(z_axis, self.pos), 1.0,
+        };
+    }
+
+    pub fn projectionMatrix(self: Self, aspect_ratio: f32) [16]f32 {
+        const fovy = math.degreesToRadians(self.fov_degrees);
+        const near: f32 = 0.1;
+        const far: f32 = 100.0;
+        const f = 1.0 / math.tan(fovy / 2.0);
+
+        return .{
+            f / aspect_ratio, 0, 0, 0,
+            0, -f, 0,                           0, // Note the -f to flip Y for Vulkan
+            0, 0,  far / (near - far),          -1,
+            0, 0,  (far * near) / (near - far), 0,
         };
     }
 };

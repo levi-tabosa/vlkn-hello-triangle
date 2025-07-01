@@ -87,48 +87,42 @@ const UniformBufferObject = extern struct {
 
 // --- Callbacks and Window ---
 const Callbacks = struct {
-    const Self = @This();
     fn cbCursorPos(wd: ?*c.GLFWwindow, xpos: f64, ypos: f64) callconv(.C) void {
-        const user_ptr = c.glfwGetWindowUserPointer(wd orelse return) orelse @panic("No window user ptr");
-        const app: *App = @alignCast(@ptrCast(user_ptr));
-
-        const ndc_x = @as(f32, @floatCast(xpos)) / @as(f32, @floatFromInt(WINDOW_WIDTH)) * 2.0 - 1.0;
-        const ndc_y = @as(f32, @floatCast(ypos)) / @as(f32, @floatFromInt(WINDOW_HEIGHT)) * 2.0 - 1.0;
-
-        const pitch = -ndc_y * std.math.pi / 2.0;
-        const yaw = ndc_x * std.math.pi;
-
-        app.scene.setPitchYaw(pitch, yaw);
-        app.updateUniformBuffer() catch unreachable;
+        const app: *App = @alignCast(@ptrCast(c.glfwGetWindowUserPointer(wd orelse return) orelse return));
         app.gui_ctx.handleCursorPos(xpos, ypos);
+        // NEW: Forward to the input context as well
+        app.wd_ctx.handleCursorPos(xpos, ypos);
     }
 
     fn cbMouseButton(wd: ?*c.GLFWwindow, button: c_int, action: c_int, mods: c_int) callconv(.C) void {
-        const user_ptr = c.glfwGetWindowUserPointer(wd orelse return) orelse @panic("No window user ptr");
-        const app: *App = @alignCast(@ptrCast(user_ptr));
+        const app: *App = @alignCast(@ptrCast(c.glfwGetWindowUserPointer(wd orelse return) orelse return));
         app.gui_ctx.handleMouseButton(button, action, mods);
+        app.wd_ctx.handleMouseButton(button, action);
     }
 
-    fn cbKey(wd: ?*c.GLFWwindow, char: c_int, code: c_int, btn: c_int, mods: c_int) callconv(.C) void {
-        _ = char;
-        _ = btn;
-        _ = mods;
-        const user_ptr = c.glfwGetWindowUserPointer(wd orelse return) orelse @panic("No window user ptr");
-        const app: *App = @alignCast(@ptrCast(user_ptr));
+    fn cbKey(wd: ?*c.GLFWwindow, key: c_int, code: c_int, action: c_int, mods: c_int) callconv(.C) void {
+        const app: *App = @alignCast(@ptrCast(c.glfwGetWindowUserPointer(wd orelse return) orelse return));
+        app.wd_ctx.handleKey(key, action, mods);
 
-        app.scene.setGridResolution(@intCast(code)) catch unreachable;
-        // app.vertex_buffer.deinit(app.vk_ctx);
-        app.updateVertexBuffer() catch unreachable;
+        // TODO: Change
+        if (action == c.GLFW_PRESS) {
+            app.scene.setGridResolution(@intCast(code)) catch unreachable;
+            app.updateVertexBuffer() catch @panic("Update VB failed");
+        }
     }
 
     fn cbFramebufferResize(wd: ?*c.GLFWwindow, width: c_int, height: c_int) callconv(.C) void {
-        const user_ptr = c.glfwGetWindowUserPointer(wd orelse return) orelse @panic("No window user ptr");
-        const app: *App = @alignCast(@ptrCast(user_ptr));
+        const app: *App = @alignCast(@ptrCast(c.glfwGetWindowUserPointer(wd orelse return) orelse return));
         app.window.size.x = width;
         app.window.size.y = height;
-
         app.framebuffer_resized = true;
-        app.updateUniformBuffer() catch @panic("resize callback error on update UB");
+    }
+
+    fn cbScroll(wd: ?*c.GLFWwindow, xoffset: f64, yoffset: f64) callconv(.C) void {
+        const user_ptr = c.glfwGetWindowUserPointer(wd orelse return) orelse @panic("No window user ptr");
+        const app: *App = @alignCast(@ptrCast(user_ptr));
+
+        app.wd_ctx.handleScroll(xoffset, yoffset);
     }
 };
 
@@ -145,23 +139,107 @@ const Window = struct {
     pub fn init(user_ptr: ?*anyopaque, width: c_int, height: c_int, title: [*c]const u8, monitor: ?*c.GLFWmonitor, share: ?*c.GLFWwindow) !Self {
         c.glfwWindowHint(c.GLFW_CLIENT_API, c.GLFW_NO_API);
         c.glfwWindowHint(c.GLFW_RESIZABLE, c.GLFW_TRUE);
-        const handle = c.glfwCreateWindow(width, height, title, monitor, share);
-        if (handle == null) return error.GlfwCreateWindowFailed;
+        const handle = c.glfwCreateWindow(width, height, title, monitor, share) orelse return error.GlfwCreateWindowFailed;
         c.glfwSetWindowUserPointer(handle, user_ptr);
+
         _ = c.glfwSetCursorPosCallback(handle, Callbacks.cbCursorPos);
         _ = c.glfwSetMouseButtonCallback(handle, Callbacks.cbMouseButton);
         _ = c.glfwSetKeyCallback(handle, Callbacks.cbKey);
         _ = c.glfwSetFramebufferSizeCallback(handle, Callbacks.cbFramebufferResize);
+        _ = c.glfwSetScrollCallback(handle, Callbacks.cbScroll);
         return .{ .handle = handle, .size = .{ .x = width, .y = height } };
     }
 
     pub fn deinit(self: *Self) void {
         c.glfwDestroyWindow(self.handle);
-        self.handle = undefined;
     }
 
     pub fn minimized(self: Self) bool {
         return c.glfwGetWindowAttrib(self.handle, c.GLFW_ICONIFIED) == 1;
+    }
+};
+
+pub const WindowContext = struct {
+    const Self = @This();
+
+    // Raw State from GLFW
+    last_cursor_x: f64 = -1.0,
+    last_cursor_y: f64 = -1.0,
+    cursor_dx: f64 = 0,
+    cursor_dy: f64 = 0,
+    scroll_dy: f64 = 0,
+    scroll_changed: bool = false,
+    left_mouse_down: bool = false,
+    ctrl_down: bool = false,
+
+    // --- Public API for App ---
+
+    /// Call this at the start of each frame to reset per-frame state.
+    pub fn beginFrame(self: *Self) void {
+        self.cursor_dx = 0;
+        self.cursor_dy = 0;
+        self.scroll_dy = 0;
+        self.scroll_changed = false;
+    }
+
+    /// Processes camera movement based on its state.
+    /// Returns true if the camera was updated.
+    pub fn processCameraInput(self: Self, s: *Scene) bool {
+        var updated = false;
+
+        if (self.ctrl_down) {
+            const fov_change = @as(f32, @floatCast(self.scroll_dy)) * 4;
+            s.camera.adjustFov(fov_change);
+            updated = true;
+        } else if (self.scroll_changed) {
+            if (s.camera.radius) |*r| r.* += @as(f32, @floatCast(self.scroll_dy)) * 2;
+            updated = true;
+        }
+        if (self.left_mouse_down) {
+            // Pitch/Yaw change
+            // Scale mouse delta to a reasonable radian value.
+            const pitch_change = @as(f32, @floatCast(self.cursor_dy)) * 0.005;
+            const yaw_change = @as(f32, @floatCast(self.cursor_dx)) * 0.005;
+            s.camera.adjustPitchYaw(pitch_change, yaw_change);
+            updated = true;
+        }
+
+        return updated;
+    }
+
+    // --- Callback Handlers (called by GLFW callbacks) ---
+
+    pub fn handleCursorPos(self: *Self, x: f64, y: f64) void {
+        // On first event, just store position to avoid a large jump.
+        if (self.last_cursor_x == -1.0) {
+            self.last_cursor_x = x;
+            self.last_cursor_y = y;
+            return;
+        }
+
+        self.cursor_dx = x - self.last_cursor_x;
+        self.cursor_dy = y - self.last_cursor_y;
+
+        self.last_cursor_x = x;
+        self.last_cursor_y = y;
+    }
+
+    pub fn handleMouseButton(self: *Self, button: c_int, action: c_int) void {
+        if (button == c.GLFW_MOUSE_BUTTON_LEFT) {
+            self.left_mouse_down = (action == c.GLFW_PRESS);
+        }
+    }
+
+    pub fn handleKey(self: *Self, key: c_int, action: c_int, mods: c_int) void {
+        if (mods & c.GLFW_MOD_CONTROL != 0) self.ctrl_down = !self.ctrl_down;
+
+        _ = action;
+        _ = key;
+    }
+
+    pub fn handleScroll(self: *Self, _: f64, yoffset: f64) void {
+        self.scroll_changed = true;
+        self.scroll_dy = yoffset;
     }
 };
 
@@ -876,6 +954,7 @@ const App = struct {
     window: Window,
     vk_ctx: *VulkanContext,
     gui_ctx: gui.GuiContext,
+    wd_ctx: WindowContext,
 
     // Vulkan objects that depend on the swapchain (and are recreated)
     swapchain: Swapchain,
@@ -904,6 +983,7 @@ const App = struct {
         app.window = window;
         app.vk_ctx = vk_ctx;
         app.scene = try Scene.init(allocator, 20);
+        app.wd_ctx = .{};
 
         try app.initVulkanResources();
 
@@ -962,8 +1042,13 @@ const App = struct {
 
     pub fn run(self: *Self) !void {
         while (c.glfwWindowShouldClose(self.window.handle) == 0) {
-            c.glfwPollEvents();
             self.gui_ctx.beginFrame();
+            self.wd_ctx.beginFrame();
+            c.glfwPollEvents();
+            if (self.wd_ctx.processCameraInput(&self.scene)) {
+                try self.updateUniformBuffer();
+            }
+
             if (self.window.minimized()) {
                 c.glfwWaitEvents();
                 continue;
@@ -983,8 +1068,8 @@ const App = struct {
                 try self.updateVertexBuffer();
             }
             if (self.gui_ctx.button(10, 50, 150, 30)) {
-                // Example: Quit the application
-                c.glfwSetWindowShouldClose(self.window.handle, 1);
+                self.scene.clear();
+                try self.updateVertexBuffer();
             }
             // self.gui_ctx.draw();
             try self.draw();
@@ -1088,19 +1173,10 @@ const App = struct {
     }
 
     fn updateUniformBuffer(self: *Self) !void {
-        const fovy = std.math.degreesToRadians(90.0);
-        const aspect = @as(f32, @floatFromInt(self.window.size.x)) / @as(f32, @floatFromInt(self.window.size.y));
-        const near = 0.1;
-        const far = 100.0;
-        const f = 1.0 / std.math.tan(fovy / 2.0);
+        const aspect_ratio = @as(f32, @floatFromInt(self.window.size.x)) / @as(f32, @floatFromInt(self.window.size.y));
         const ubo = UniformBufferObject{
-            .view_matrix = self.scene.view_matrix,
-            .perspective_matrix = .{
-                f / aspect, 0,  0,                           0,
-                0,          -f, 0,                           0,
-                0,          0,  far / (near - far),          -1,
-                0,          0,  (far * near) / (near - far), 0,
-            },
+            .view_matrix = self.scene.camera.viewMatrix(),
+            .perspective_matrix = self.scene.camera.projectionMatrix(aspect_ratio),
         };
 
         const data_ptr = try self.uniform_buffer.map(self.vk_ctx, UniformBufferObject);
@@ -1111,7 +1187,7 @@ const App = struct {
     fn recreateSwapchain(self: *Self) !void {
         try vkCheck(c.vkDeviceWaitIdle(self.vk_ctx.device.handle));
 
-        self.cleanupSwapchain(); // This now correctly calls gui_context.destroyPipeline()
+        self.cleanupSwapchain(); // This now correctly calls gui_ctx.destroyPipeline()
 
         self.swapchain = try Swapchain.init(self.vk_ctx);
         self.render_pass = try RenderPass.init(self.vk_ctx, &self.swapchain);
