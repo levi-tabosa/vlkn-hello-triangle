@@ -832,7 +832,6 @@ const Buffer = struct {
             .owner = device.handle,
             .size = size,
             .mem_property_flags = property_flags,
-            // .mem_type_index = device.physical.q_family_idx,
         };
 
         var buffer_info = c.VkBufferCreateInfo{
