@@ -4,6 +4,8 @@ const assert = std.debug.assert;
 const spirv = @import("spirv");
 const scene = @import("geometry");
 const gui = @import("./gui/gui.zig");
+//TODO: remove
+const rand = std.Random;
 const c = @import("c").c;
 
 const Allocator = std.mem.Allocator;
@@ -115,8 +117,8 @@ const Callbacks = struct {
         const app: *App = @alignCast(@ptrCast(user_ptr));
 
         app.scene.setGridResolution(@intCast(code)) catch unreachable;
-        app.vertex_buffer.deinit(app.vk_ctx);
-        app.initVertexBuffer() catch unreachable;
+        // app.vertex_buffer.deinit(app.vk_ctx);
+        app.updateVertexBuffer() catch unreachable;
     }
 
     fn cbFramebufferResize(wd: ?*c.GLFWwindow, width: c_int, height: c_int) callconv(.C) void {
@@ -769,7 +771,6 @@ pub const PipelineLayout = struct {
     const Self = @This();
 
     handle: c.VkPipelineLayout = undefined,
-    owner: c.VkDevice,
 
     pub fn init(
         vk_ctx: *VulkanContext,
@@ -777,9 +778,7 @@ pub const PipelineLayout = struct {
         push_consts_range: ?PushConstantRange,
     ) !Self {
         assert(desc_set_layout != null or push_consts_range != null);
-        var self = Self{
-            .owner = vk_ctx.device.handle,
-        };
+        var self = Self{};
         var pipeline_layout_info = if (desc_set_layout) |l|
             c.VkPipelineLayoutCreateInfo{
                 .setLayoutCount = 1,
@@ -793,18 +792,18 @@ pub const PipelineLayout = struct {
         try vkCheck(c.vkCreatePipelineLayout(vk_ctx.device.handle, &pipeline_layout_info, null, &self.handle));
         return self;
     }
-    pub fn deinit(self: *Self) void {
-        c.vkDestroyPipelineLayout(self.owner, self.handle, null);
+    pub fn deinit(self: *Self, vk_ctx: *VulkanContext) void {
+        c.vkDestroyPipelineLayout(vk_ctx.device.handle, self.handle, null);
     }
 };
 
 pub const Pipeline = struct {
     const Self = @This();
+
     handle: c.VkPipeline = undefined,
-    owner: c.VkDevice,
 
     pub fn init(vk_ctx: *VulkanContext, render_pass: RenderPass, layout: PipelineLayout, swapchain: Swapchain) !Self {
-        var self = Self{ .owner = vk_ctx.device.handle };
+        var self = Self{};
 
         var vert_shader_module = try ShaderModule.init(vk_ctx.allocator, vk_ctx.device.handle, vert_shader_bin);
         defer vert_shader_module.deinit();
@@ -864,8 +863,8 @@ pub const Pipeline = struct {
         return self;
     }
 
-    pub fn deinit(self: *Self) void {
-        c.vkDestroyPipeline(self.owner, self.handle, null);
+    pub fn deinit(self: *Self, vk_ctx: *VulkanContext) void {
+        c.vkDestroyPipeline(vk_ctx.device.handle, self.handle, null);
     }
 };
 
@@ -897,13 +896,10 @@ const App = struct {
 
     pub fn init(allocator: Allocator) !*Self {
         const window = try Window.init(null, WINDOW_WIDTH, WINDOW_HEIGHT, "Vulkan Line App", null, null);
-        const app = try allocator.create(App);
         const vk_ctx = try allocator.create(VulkanContext);
         vk_ctx.* = try VulkanContext.init(allocator, window);
 
-        // Can't create app struct until we can pass `self` to the window user pointer.
-        // We'll create it on the stack, then copy it to the heap.
-        app.* = undefined;
+        const app = try allocator.create(App);
         app.allocator = allocator;
         app.window = window;
         app.vk_ctx = vk_ctx;
@@ -958,8 +954,8 @@ const App = struct {
 
     fn cleanupSwapchain(self: *Self) void {
         self.gui_ctx.destroyPipeline();
-        self.pipeline.deinit();
-        self.pipeline_layout.deinit();
+        self.pipeline.deinit(self.vk_ctx);
+        self.pipeline_layout.deinit(self.vk_ctx);
         self.render_pass.deinit(self.vk_ctx);
         self.swapchain.deinit(self.vk_ctx);
     }
@@ -968,23 +964,31 @@ const App = struct {
         while (c.glfwWindowShouldClose(self.window.handle) == 0) {
             c.glfwPollEvents();
             self.gui_ctx.beginFrame();
-
-            // Draw the UI Widgets. This is where you define your UI layout for the frame.
-            if (self.gui_ctx.button(10, 10, 150, 30)) {
-                std.log.info("Button was clicked!", .{});
-            }
-            if (self.gui_ctx.button(10, 50, 150, 30)) {
-                // Example: Quit the application
-                std.log.info("Button was clicked!", .{});
-                // c.glfwSetWindowShouldClose(self.window.handle, 1);
-            }
             if (self.window.minimized()) {
                 c.glfwWaitEvents();
                 continue;
             }
+            // Draw the UI Widgets.
+            if (self.gui_ctx.button(10, 10, 150, 30)) {
+                var prng = rand.DefaultPrng.init(@intCast(std.time.milliTimestamp()));
+                const random = prng.random();
+                try self.scene.addVector(
+                    .{ 0, 0, 0 },
+                    .{
+                        random.float(f32) * 2.0 - 1.0,
+                        random.float(f32) * 2.0 - 1.0,
+                        random.float(f32) * 2.0 - 1.0,
+                    },
+                );
+                try self.updateVertexBuffer();
+            }
+            if (self.gui_ctx.button(10, 50, 150, 30)) {
+                // Example: Quit the application
+                c.glfwSetWindowShouldClose(self.window.handle, 1);
+            }
+            // self.gui_ctx.draw();
             try self.draw();
         }
-        try vkCheck(c.vkDeviceWaitIdle(self.vk_ctx.device.handle));
     }
 
     fn draw(self: *Self) !void {
@@ -1037,7 +1041,7 @@ const App = struct {
     }
 
     fn initVertexBuffer(self: *Self) !void {
-        const buffer_size = @sizeOf(Vertex) * (self.scene.axis.len + self.scene.grid.len);
+        const buffer_size = @sizeOf(Vertex) * self.scene.getTotalVertexCount();
         if (buffer_size == 0) return;
 
         var staging_buffer = try Buffer.init(self.vk_ctx, buffer_size, c.VK_BUFFER_USAGE_TRANSFER_SRC_BIT, c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
@@ -1046,11 +1050,34 @@ const App = struct {
         const data_ptr = try staging_buffer.map(self.vk_ctx, Vertex);
         defer staging_buffer.unmap(self.vk_ctx);
 
-        const mapped_slice = data_ptr[0 .. self.scene.axis.len + self.scene.grid.len];
-        @memcpy(mapped_slice[0..self.scene.axis.len], &self.scene.axis);
-        @memcpy(mapped_slice[self.scene.axis.len..], self.scene.grid);
+        const mapped_slice = data_ptr[0..self.scene.getTotalVertexCount()];
+        const lines_offset = self.scene.axis.len + self.scene.grid.len;
 
+        @memcpy(mapped_slice[0..self.scene.axis.len], &self.scene.axis);
+        @memcpy(mapped_slice[self.scene.axis.len..lines_offset], self.scene.grid);
+        @memcpy(mapped_slice[lines_offset .. lines_offset + self.scene.lines.items.len], self.scene.lines.items);
         self.vertex_buffer = try Buffer.init(self.vk_ctx, @sizeOf(Vertex) * 1024 * 1024, c.VK_BUFFER_USAGE_TRANSFER_DST_BIT | c.VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, c.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+
+        try staging_buffer.copyTo(self.vk_ctx, self.vertex_buffer);
+    }
+
+    fn updateVertexBuffer(self: *Self) !void {
+        // c.vkWa
+        const buffer_size = @sizeOf(Vertex) * self.scene.getTotalVertexCount();
+        if (buffer_size == 0) return;
+
+        var staging_buffer = try Buffer.init(self.vk_ctx, buffer_size, c.VK_BUFFER_USAGE_TRANSFER_SRC_BIT, c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        defer staging_buffer.deinit(self.vk_ctx);
+
+        const data_ptr = try staging_buffer.map(self.vk_ctx, Vertex);
+        defer staging_buffer.unmap(self.vk_ctx);
+
+        const mapped_slice = data_ptr[0 .. self.scene.axis.len + self.scene.grid.len + self.scene.lines.items.len];
+        const lines_offset = self.scene.axis.len + self.scene.grid.len;
+        @memcpy(mapped_slice[0..self.scene.axis.len], &self.scene.axis);
+        @memcpy(mapped_slice[self.scene.axis.len..lines_offset], self.scene.grid);
+        @memcpy(mapped_slice[lines_offset .. lines_offset + self.scene.lines.items.len], self.scene.lines.items);
+
         try staging_buffer.copyTo(self.vk_ctx, self.vertex_buffer);
     }
 
@@ -1113,7 +1140,7 @@ const App = struct {
         const offsets = [_]c.VkDeviceSize{0};
         c.vkCmdBindVertexBuffers(self.command_buffer.handle, 0, 1, &vertex_buffers, &offsets);
         c.vkCmdBindDescriptorSets(self.command_buffer.handle, c.VK_PIPELINE_BIND_POINT_GRAPHICS, self.pipeline_layout.handle, 0, 1, &self.descriptor_set, 0, null);
-        c.vkCmdDraw(self.command_buffer.handle, @intCast(self.scene.axis.len + self.scene.grid.len), 1, 0, 0);
+        c.vkCmdDraw(self.command_buffer.handle, @intCast(self.scene.getTotalVertexCount()), 1, 0, 0);
         self.gui_ctx.endFrame(
             self.command_buffer.handle,
             @floatFromInt(self.window.size.x),

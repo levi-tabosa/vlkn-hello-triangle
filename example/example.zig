@@ -1579,7 +1579,7 @@ const App = struct {
         defer staging_buffer.unlockMemory();
 
         const many_item_ptr: [*]Vertex = @ptrCast(@alignCast(data_ptr.?));
-        const mapped_vertex_slice = many_item_ptr[0 .. self.scene.axis.len + self.scene.grid.len];
+        const mapped_vertex_slice = many_item_ptr[0..self.scene.getTotalVertexCount()];
 
         // Copy the axis vertices to the beginning of the buffer.
         @memcpy(mapped_vertex_slice[0..self.scene.axis.len], &self.scene.axis);
@@ -1745,7 +1745,7 @@ const App = struct {
             null,
         );
 
-        c.vkCmdDraw(self.command_buffer.handle, @intCast(self.scene.axis.len + self.scene.grid.len), 1, 0, 0);
+        c.vkCmdDraw(self.command_buffer.handle, @intCast(self.scene.axis.len + self.scene.grid.len + self.scene.lines.items.len), 1, 0, 0);
 
         c.vkCmdEndRenderPass(self.command_buffer.handle);
         try checkVk(c.vkEndCommandBuffer(self.command_buffer.handle));

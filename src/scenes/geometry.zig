@@ -51,6 +51,7 @@ pub const Scene = struct {
     camera: Camera,
     axis: [6]V3,
     grid: []V3,
+    lines: std.ArrayList(V3),
 
     pub fn init(allocator: std.mem.Allocator, resolution: u32) !Self {
         const res_float: f32 = @floatFromInt(resolution / 2);
@@ -70,6 +71,7 @@ pub const Scene = struct {
                 .{ .pos = .{ 0.0, 0.0, -res_float }, .color = .{ 0.0, 0.0, 1.0, 1.0 } }, .{ .pos = .{ 0.0, 0.0, res_float }, .color = .{ 0.0, 0.0, 1.0, 1.0 } },
             },
             .grid = try createGrid(allocator, resolution),
+            .lines = std.ArrayList(V3).init(allocator),
             .camera = camera,
             .view_matrix = camera.viewMatrix(),
         };
@@ -77,6 +79,11 @@ pub const Scene = struct {
 
     pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
         allocator.free(self.grid);
+        self.lines.deinit();
+    }
+
+    pub fn clear(self: *Self) void {
+        self.lines.clearRetainingCapacity();
     }
 
     pub fn setPitchYaw(self: *Self, pitch: f32, yaw: f32) void {
@@ -127,6 +134,15 @@ pub const Scene = struct {
         }
 
         return grid;
+    }
+
+    pub fn addVector(self: *Self, start: [3]f32, end: [3]f32) !void {
+        try self.lines.append(.{ .pos = start, .color = .{ 1.0, 0.0, 1.0, 1.0 } });
+        try self.lines.append(.{ .pos = end, .color = .{ 1.0, 0.0, 1.0, 1.0 } });
+    }
+
+    pub fn getTotalVertexCount(self: Self) usize {
+        return self.axis.len + self.grid.len + self.lines.items.len;
     }
 };
 

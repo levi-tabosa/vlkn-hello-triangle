@@ -158,13 +158,12 @@ pub const GuiContext = struct {
             .subpass = 0,
         };
 
-        self.pipeline.owner = self.vk_ctx.device.handle;
         try vk.vkCheck(c.vkCreateGraphicsPipelines(self.vk_ctx.device.handle, null, 1, &pipeline_info, null, &self.pipeline.handle));
     }
 
     pub fn destroyPipeline(self: *Self) void {
-        self.pipeline_layout.deinit();
-        self.pipeline.deinit();
+        self.pipeline_layout.deinit(self.vk_ctx);
+        self.pipeline.deinit(self.vk_ctx);
     }
 
     pub fn deinit(self: *Self) void {
@@ -179,6 +178,17 @@ pub const GuiContext = struct {
         self.index_count = 0;
         self.last_id = 0;
         self.hot_id = 0;
+    }
+
+    pub fn draw(self: *Self) void {
+        if (self.button(10, 10, 150, 30)) {
+            std.log.info("Button was clicked!", .{});
+        }
+        if (self.button(10, 50, 150, 30)) {
+            // Example: Quit the application
+            std.log.info("Button was clicked!", .{});
+            // c.glfwSetWindowShouldClose(self.window.handle, 1);
+        }
     }
 
     pub fn endFrame(self: *Self, cmd: c.VkCommandBuffer, window_width: f32, window_height: f32) void {
