@@ -6,21 +6,20 @@ const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const spirv = @import("spirv");
 const scene = @import("geometry");
-const c = @cImport({
-    @cDefine("GLFW_INCLUDE_VULKAN", {});
-    @cInclude("vulkan/vulkan.h");
-    @cInclude("GLFW/glfw3.h");
-});
+const gui = @import("./gui/gui.zig");
+pub const c = @import("c").c;
 
 // --- Shader Bytecode ---
-const vert_shader_code = spirv.vs;
-const frag_shader_code = spirv.fs;
+const vert_shader_bin = spirv.vs;
+const frag_shader_bin = spirv.fs;
+const gui_vert_shader_bin = spirv.gui_vs;
+const gui_frag_shader_bin = spirv.gui_fs;
 
 const Vertex = scene.V3;
 const Scene = scene.Scene;
 
 // --- Error Checking ---
-fn vkCheck(result: c.VkResult) !void {
+pub fn vkCheck(result: c.VkResult) !void {
     if (result == c.VK_SUCCESS) {
         return;
     }
@@ -41,7 +40,7 @@ fn vkCheck(result: c.VkResult) !void {
     };
 }
 
-fn checkGlfw(result: c_int) !void {
+pub fn checkGlfw(result: c_int) !void {
     if (result == c.GLFW_TRUE) {
         return;
     }
@@ -88,7 +87,7 @@ const UniformBufferObject = extern struct {
     const Self = @This();
     view_matrix: [16]f32,
     perspective_matrix: [16]f32,
-    padding: [128]u8,
+    padding: [128]u8 = undefined,
 };
 
 // --- Callbacks and Window ---
@@ -106,6 +105,13 @@ const Callbacks = struct {
 
         app.scene.setPitchYaw(pitch, yaw);
         app.updateUniformBuffer() catch unreachable;
+        app.gui_ctx.handleCursorPos(xpos, ypos);
+    }
+
+    fn cbMouseButton(wd: ?*c.GLFWwindow, button: c_int, action: c_int, mods: c_int) callconv(.C) void {
+        const user_ptr = c.glfwGetWindowUserPointer(wd orelse return) orelse @panic("No window user ptr");
+        const app: *App = @alignCast(@ptrCast(user_ptr));
+        app.gui_ctx.handleMouseButton(button, action, mods);
     }
 
     fn cbKey(wd: ?*c.GLFWwindow, char: c_int, code: c_int, btn: c_int, mods: c_int) callconv(.C) void {
@@ -150,6 +156,7 @@ const Window = struct {
         if (handle == null) return error.GlfwCreateWindowFailed;
         c.glfwSetWindowUserPointer(handle, user_ptr);
         _ = c.glfwSetCursorPosCallback(handle, Callbacks.cbCursorPos);
+        _ = c.glfwSetMouseButtonCallback(handle, Callbacks.cbMouseButton);
         _ = c.glfwSetKeyCallback(handle, Callbacks.cbKey);
         _ = c.glfwSetFramebufferSizeCallback(handle, Callbacks.cbFramebufferResize);
         return .{ .handle = handle, .size = .{ .x = width, .y = height } };
@@ -325,7 +332,7 @@ const CommandPool = struct {
 };
 
 // --- VULKAN CONTEXT ---
-const VulkanContext = struct {
+pub const VulkanContext = struct {
     const Self = @This();
     allocator: Allocator,
     instance: Instance,
@@ -456,7 +463,7 @@ const Swapchain = struct {
     }
 };
 
-const RenderPass = struct {
+pub const RenderPass = struct {
     const Self = @This();
     handle: c.VkRenderPass = undefined,
     framebuffer: []c.VkFramebuffer = undefined,
@@ -600,8 +607,9 @@ const Fence = struct {
     }
 };
 
-const Buffer = struct {
+pub const Buffer = struct {
     const Self = @This();
+
     handle: c.VkBuffer = undefined,
     memory: c.VkDeviceMemory = undefined,
     size: u64,
@@ -656,6 +664,20 @@ const Buffer = struct {
         const submit_info = c.VkSubmitInfo{ .commandBufferCount = 1, .pCommandBuffers = &command_buffer };
         try vkCheck(c.vkQueueSubmit(vk_ctx.graphics_queue.handle, 1, &submit_info, null));
         try vkCheck(c.vkQueueWaitIdle(vk_ctx.graphics_queue.handle));
+    }
+};
+
+pub const PushConstantRange = struct {
+    const Self = @This();
+
+    handle: c.VkPushConstantRange,
+
+    pub fn init(T: type) Self {
+        return .{ .handle = .{
+            .stageFlags = c.VK_SHADER_STAGE_VERTEX_BIT | c.VK_SHADER_STAGE_FRAGMENT_BIT,
+            .offset = 0,
+            .size = @sizeOf(T),
+        } };
     }
 };
 
@@ -729,7 +751,7 @@ const DescriptorPool = struct {
     }
 };
 
-const ShaderModule = struct {
+pub const ShaderModule = struct {
     const Self = @This();
     handle: c.VkShaderModule = undefined,
     owner: c.VkDevice,
@@ -748,22 +770,40 @@ const ShaderModule = struct {
     }
 };
 
-const PipelineLayout = struct {
+pub const PipelineLayout = struct {
     const Self = @This();
-    handle: c.VkPipelineLayout = undefined,
 
-    pub fn init(vk_ctx: *VulkanContext, desc_set_layout: DescriptorSetLayout) !Self {
-        var self = Self{};
-        var pipeline_layout_info = c.VkPipelineLayoutCreateInfo{ .setLayoutCount = 1, .pSetLayouts = &desc_set_layout.handle };
+    handle: c.VkPipelineLayout = undefined,
+    owner: c.VkDevice,
+
+    pub fn init(
+        vk_ctx: *VulkanContext,
+        desc_set_layout: ?DescriptorSetLayout,
+        push_consts_range: ?PushConstantRange,
+    ) !Self {
+        assert(desc_set_layout != null or push_consts_range != null);
+        var self = Self{
+            .owner = vk_ctx.device.handle,
+        };
+        var pipeline_layout_info = if (desc_set_layout) |l|
+            c.VkPipelineLayoutCreateInfo{
+                .setLayoutCount = 1,
+                .pSetLayouts = &l.handle,
+            }
+        else
+            c.VkPipelineLayoutCreateInfo{
+                .pushConstantRangeCount = 1,
+                .pPushConstantRanges = &push_consts_range.?.handle,
+            };
         try vkCheck(c.vkCreatePipelineLayout(vk_ctx.device.handle, &pipeline_layout_info, null, &self.handle));
         return self;
     }
-    pub fn deinit(self: *Self, vk_ctx: *VulkanContext) void {
-        c.vkDestroyPipelineLayout(vk_ctx.device.handle, self.handle, null);
+    pub fn deinit(self: *Self) void {
+        c.vkDestroyPipelineLayout(self.owner, self.handle, null);
     }
 };
 
-const Pipeline = struct {
+pub const Pipeline = struct {
     const Self = @This();
     handle: c.VkPipeline = undefined,
     owner: c.VkDevice,
@@ -771,9 +811,9 @@ const Pipeline = struct {
     pub fn init(vk_ctx: *VulkanContext, render_pass: RenderPass, layout: PipelineLayout, swapchain: Swapchain) !Self {
         var self = Self{ .owner = vk_ctx.device.handle };
 
-        var vert_shader_module = try ShaderModule.init(vk_ctx.allocator, vk_ctx.device.handle, vert_shader_code);
+        var vert_shader_module = try ShaderModule.init(vk_ctx.allocator, vk_ctx.device.handle, vert_shader_bin);
         defer vert_shader_module.deinit();
-        var frag_shader_module = try ShaderModule.init(vk_ctx.allocator, vk_ctx.device.handle, frag_shader_code);
+        var frag_shader_module = try ShaderModule.init(vk_ctx.allocator, vk_ctx.device.handle, frag_shader_bin);
         defer frag_shader_module.deinit();
 
         const shader_stages = [_]c.VkPipelineShaderStageCreateInfo{
@@ -841,6 +881,7 @@ const App = struct {
     scene: Scene,
     window: Window,
     vk_ctx: VulkanContext,
+    gui_ctx: gui.GuiContext,
 
     // Vulkan objects that depend on the swapchain (and are recreated)
     swapchain: Swapchain,
@@ -895,15 +936,19 @@ const App = struct {
         self.descriptor_pool.updateSet(&self.vk_ctx, self.descriptor_set, self.uniform_buffer, UniformBufferObject);
 
         self.render_pass = try RenderPass.init(&self.vk_ctx, &self.swapchain);
-        self.pipeline_layout = try PipelineLayout.init(&self.vk_ctx, self.descriptor_layout);
+        self.pipeline_layout = try PipelineLayout.init(&self.vk_ctx, self.descriptor_layout, null);
         self.pipeline = try Pipeline.init(&self.vk_ctx, self.render_pass, self.pipeline_layout, self.swapchain);
+
+        // Initialize GUI at the end
+        self.gui_ctx = try gui.GuiContext.init(&self.vk_ctx, self.render_pass);
     }
 
     pub fn deinit(self: *Self) void {
         // Wait for device to be idle before cleaning up
         _ = c.vkDeviceWaitIdle(self.vk_ctx.device.handle);
 
-        self.cleanupSwapchain();
+        self.gui_ctx.deinit(); // Deinit GUI resources
+        self.gui_ctx.destroyPipeline();
 
         self.sync.deinit(&self.vk_ctx);
         self.vertex_buffer.deinit(&self.vk_ctx);
@@ -917,8 +962,10 @@ const App = struct {
     }
 
     fn cleanupSwapchain(self: *Self) void {
+        self.gui_ctx.destroyPipeline();
+        self.pipeline_layout.deinit();
         self.pipeline.deinit();
-        self.pipeline_layout.deinit(&self.vk_ctx);
+        self.pipeline_layout.deinit();
         self.render_pass.deinit(&self.vk_ctx);
         self.swapchain.deinit(&self.vk_ctx);
     }
@@ -926,6 +973,17 @@ const App = struct {
     pub fn run(self: *Self) !void {
         while (c.glfwWindowShouldClose(self.window.handle) == 0) {
             c.glfwPollEvents();
+            self.gui_ctx.beginFrame();
+
+            // Draw the UI Widgets. This is where you define your UI layout for the frame.
+            if (self.gui_ctx.button(10, 10, 150, 30)) {
+                std.log.info("Button was clicked!", .{});
+            }
+            if (self.gui_ctx.button(10, 50, 150, 30)) {
+                // Example: Quit the application
+                std.log.info("Button was clicked!", .{});
+                // c.glfwSetWindowShouldClose(self.window.handle, 1);
+            }
             if (self.window.minimized()) {
                 c.glfwWaitEvents();
                 continue;
@@ -1031,11 +1089,16 @@ const App = struct {
 
     fn recreateSwapchain(self: *Self) !void {
         try vkCheck(c.vkDeviceWaitIdle(self.vk_ctx.device.handle));
-        self.cleanupSwapchain();
+
+        self.cleanupSwapchain(); // This now correctly calls gui_context.destroyPipeline()
+
         self.swapchain = try Swapchain.init(&self.vk_ctx);
         self.render_pass = try RenderPass.init(&self.vk_ctx, &self.swapchain);
-        self.pipeline_layout = try PipelineLayout.init(&self.vk_ctx, self.descriptor_layout);
+        self.pipeline_layout = try PipelineLayout.init(&self.vk_ctx, self.descriptor_layout, null);
         self.pipeline = try Pipeline.init(&self.vk_ctx, self.render_pass, self.pipeline_layout, self.swapchain);
+
+        // Recreate ONLY the GUI pipeline with the new render pass
+        try self.gui_ctx.createPipeline(self.render_pass);
     }
 
     pub fn recordCommandBuffer(self: *Self, image_index: u32) !void {
@@ -1057,6 +1120,11 @@ const App = struct {
         c.vkCmdBindVertexBuffers(self.command_buffer.handle, 0, 1, &vertex_buffers, &offsets);
         c.vkCmdBindDescriptorSets(self.command_buffer.handle, c.VK_PIPELINE_BIND_POINT_GRAPHICS, self.pipeline_layout.handle, 0, 1, &self.descriptor_set, 0, null);
         c.vkCmdDraw(self.command_buffer.handle, @intCast(self.scene.axis.len + self.scene.grid.len), 1, 0, 0);
+        self.gui_ctx.endFrame(
+            self.command_buffer.handle,
+            @floatFromInt(self.window.size.x),
+            @floatFromInt(self.window.size.y),
+        );
         c.vkCmdEndRenderPass(self.command_buffer.handle);
         try vkCheck(c.vkEndCommandBuffer(self.command_buffer.handle));
     }
