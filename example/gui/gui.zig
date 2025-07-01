@@ -19,8 +19,18 @@ const GuiVertex = extern struct {
 
     pub fn getAttributeDescriptions() [2]c.VkVertexInputAttributeDescription {
         return .{
-            .{ .binding = 0, .location = 0, .format = c.VK_FORMAT_R32G32_SFLOAT, .offset = @offsetOf(GuiVertex, "pos") },
-            .{ .binding = 0, .location = 1, .format = c.VK_FORMAT_R32G32B32A32_SFLOAT, .offset = @offsetOf(GuiVertex, "color") },
+            .{
+                .binding = 0,
+                .location = 0,
+                .format = c.VK_FORMAT_R32G32_SFLOAT,
+                .offset = @offsetOf(GuiVertex, "pos"),
+            },
+            .{
+                .binding = 0,
+                .location = 1,
+                .format = c.VK_FORMAT_R32G32B32A32_SFLOAT,
+                .offset = @offsetOf(GuiVertex, "color"),
+            },
         };
     }
 };
@@ -181,8 +191,16 @@ pub const GuiContext = struct {
         c.vkCmdBindIndexBuffer(cmd, self.index_buffer.handle, 0, c.VK_INDEX_TYPE_UINT32);
 
         // Set dynamic viewport/scissor
-        const viewport = c.VkViewport{ .width = window_width, .height = window_height, .minDepth = 0.0, .maxDepth = 1.0 };
-        const scissor = c.VkRect2D{ .extent = .{ .width = @intFromFloat(window_width), .height = @intFromFloat(window_height) } };
+        const viewport = c.VkViewport{
+            .width = window_width,
+            .height = window_height,
+            .minDepth = 0.0,
+            .maxDepth = 1.0,
+        };
+        const scissor = c.VkRect2D{ .extent = .{
+            .width = @intFromFloat(window_width),
+            .height = @intFromFloat(window_height),
+        } };
         c.vkCmdSetViewport(cmd, 0, 1, &viewport);
         c.vkCmdSetScissor(cmd, 0, 1, &scissor);
 

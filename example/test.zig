@@ -1,30 +1,25 @@
 // test.zig
-
 const std = @import("std");
-
 const assert = std.debug.assert;
-const Allocator = std.mem.Allocator;
 const spirv = @import("spirv");
 const scene = @import("geometry");
 const gui = @import("./gui/gui.zig");
-pub const c = @import("c").c;
+const c = @import("c").c;
+
+const Allocator = std.mem.Allocator;
 
 // --- Shader Bytecode ---
 const vert_shader_bin = spirv.vs;
 const frag_shader_bin = spirv.fs;
-const gui_vert_shader_bin = spirv.gui_vs;
-const gui_frag_shader_bin = spirv.gui_fs;
 
 const Vertex = scene.V3;
 const Scene = scene.Scene;
 
 // --- Error Checking ---
 pub fn vkCheck(result: c.VkResult) !void {
-    if (result == c.VK_SUCCESS) {
-        return;
-    }
-    std.log.err("Vulkan call failed with code: {}", .{result});
+    if (result == c.VK_SUCCESS) return;
 
+    std.log.err("Vulkan call failed with code: {}", .{result});
     return switch (result) {
         c.VK_INCOMPLETE => error.VulkanIncomplete,
         c.VK_ERROR_DEVICE_LOST => error.VulkanDeviceLost,
@@ -40,10 +35,9 @@ pub fn vkCheck(result: c.VkResult) !void {
     };
 }
 
-pub fn checkGlfw(result: c_int) !void {
-    if (result == c.GLFW_TRUE) {
-        return;
-    }
+pub fn checkGlfw(result: c_int) !void { // TODO: maybe remove
+    if (result == c.GLFW_TRUE) return;
+
     std.log.err("Glfw call failed with code: {}", .{result});
     return switch (result) {
         c.GLFW_PLATFORM_ERROR => error.GlfwPlatformError,
@@ -84,7 +78,6 @@ pub fn getVertexAttributeDescriptions() [3]c.VkVertexInputAttributeDescription {
 }
 
 const UniformBufferObject = extern struct {
-    const Self = @This();
     view_matrix: [16]f32,
     perspective_matrix: [16]f32,
     padding: [128]u8 = undefined,
@@ -115,13 +108,14 @@ const Callbacks = struct {
     }
 
     fn cbKey(wd: ?*c.GLFWwindow, char: c_int, code: c_int, btn: c_int, mods: c_int) callconv(.C) void {
+        _ = char;
+        _ = btn;
+        _ = mods;
         const user_ptr = c.glfwGetWindowUserPointer(wd orelse return) orelse @panic("No window user ptr");
         const app: *App = @alignCast(@ptrCast(user_ptr));
 
-        std.debug.print("{}; code : {} action : {} mods : {} \n", .{ char, code, btn, mods });
-
         app.scene.setGridResolution(@intCast(code)) catch unreachable;
-        app.vertex_buffer.deinit(&app.vk_ctx);
+        app.vertex_buffer.deinit(app.vk_ctx);
         app.initVertexBuffer() catch unreachable;
     }
 
@@ -131,17 +125,14 @@ const Callbacks = struct {
         app.window.size.x = width;
         app.window.size.y = height;
 
-        std.debug.print("{} {}\n", .{
-            width,
-            height,
-        });
         app.framebuffer_resized = true;
-        app.updateUniformBuffer() catch unreachable;
+        app.updateUniformBuffer() catch @panic("resize callback error on update UB");
     }
 };
 
 const Window = struct {
     const Self = @This();
+
     handle: ?*c.GLFWwindow = undefined,
     size: struct {
         const Self = @This();
@@ -176,6 +167,7 @@ const Window = struct {
 
 const Instance = struct {
     const Self = @This();
+
     handle: c.VkInstance = undefined,
 
     pub fn init() !Self {
@@ -205,22 +197,23 @@ const Instance = struct {
 
 const Surface = struct {
     const Self = @This();
+
     handle: c.VkSurfaceKHR = undefined,
-    owner: c.VkInstance,
 
     pub fn init(instance: Instance, window: Window) !Self {
         assert(instance.handle != null and window.handle != null);
-        var self = Self{ .owner = instance.handle };
+        var self = Self{};
         try vkCheck(c.glfwCreateWindowSurface(instance.handle, window.handle, null, &self.handle));
         return self;
     }
-    pub fn deinit(self: *Self) void {
-        c.vkDestroySurfaceKHR(self.owner, self.handle, null);
+    pub fn deinit(self: *Self, vk_ctx: *VulkanContext) void {
+        c.vkDestroySurfaceKHR(vk_ctx.instance.handle, self.handle, null);
     }
 };
 
 const PhysicalDevice = struct {
     const Self = @This();
+
     handle: c.VkPhysicalDevice = undefined,
     q_family_idx: u32 = undefined,
 
@@ -254,7 +247,7 @@ const PhysicalDevice = struct {
         }
         return error.NoSuitableQueueFamily;
     }
-    pub fn deinit(_: *Self) void {}
+    pub fn deinit(_: *Self) void {} //TODO: remove
 
     pub fn findMemoryType(self: Self, type_filter: u32, properties: c.VkMemoryPropertyFlags) !u32 {
         var mem_props: c.VkPhysicalDeviceMemoryProperties = undefined;
@@ -272,6 +265,7 @@ const PhysicalDevice = struct {
 
 const Device = struct {
     const Self = @This();
+
     handle: c.VkDevice = undefined,
     physical: PhysicalDevice,
 
@@ -302,6 +296,7 @@ const Device = struct {
 
 const Queue = struct {
     const Self = @This();
+
     handle: c.VkQueue = undefined,
 
     pub fn init(device: Device) !Self {
@@ -309,16 +304,16 @@ const Queue = struct {
         c.vkGetDeviceQueue(device.handle, device.physical.q_family_idx, 0, &self.handle);
         return self;
     }
-    pub fn deinit(_: *Self) void {}
+    pub fn deinit(_: *Self) void {} // TODO: remove
 };
 
 const CommandPool = struct {
     const Self = @This();
+
     handle: c.VkCommandPool = undefined,
-    owner: c.VkDevice,
 
     pub fn init(device: Device) !Self {
-        var self = Self{ .owner = device.handle };
+        var self = Self{};
         var cmd_pool_info = c.VkCommandPoolCreateInfo{
             .flags = c.VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
             .queueFamilyIndex = device.physical.q_family_idx,
@@ -326,8 +321,8 @@ const CommandPool = struct {
         try vkCheck(c.vkCreateCommandPool(device.handle, &cmd_pool_info, null, &self.handle));
         return self;
     }
-    pub fn deinit(self: *Self) void {
-        c.vkDestroyCommandPool(self.owner, self.handle, null);
+    pub fn deinit(self: *Self, vk_ctx: *VulkanContext) void {
+        c.vkDestroyCommandPool(vk_ctx.device.handle, self.handle, null);
     }
 };
 
@@ -363,11 +358,11 @@ pub const VulkanContext = struct {
 
     pub fn deinit(self: *Self) void {
         // Destroy in reverse order of creation
-        self.command_pool.deinit();
+        self.command_pool.deinit(self);
         self.graphics_queue.deinit();
         self.device.deinit();
         self.physical_device.deinit();
-        self.surface.deinit();
+        self.surface.deinit(self);
         self.instance.deinit();
     }
 };
@@ -880,7 +875,7 @@ const App = struct {
     allocator: Allocator,
     scene: Scene,
     window: Window,
-    vk_ctx: VulkanContext,
+    vk_ctx: *VulkanContext,
     gui_ctx: gui.GuiContext,
 
     // Vulkan objects that depend on the swapchain (and are recreated)
@@ -902,45 +897,44 @@ const App = struct {
 
     pub fn init(allocator: Allocator) !*Self {
         const window = try Window.init(null, WINDOW_WIDTH, WINDOW_HEIGHT, "Vulkan Line App", null, null);
-        const vk_ctx = try VulkanContext.init(allocator, window);
+        const app = try allocator.create(App);
+        const vk_ctx = try allocator.create(VulkanContext);
+        vk_ctx.* = try VulkanContext.init(allocator, window);
 
         // Can't create app struct until we can pass `self` to the window user pointer.
         // We'll create it on the stack, then copy it to the heap.
-        var app_stack: App = undefined;
-        app_stack.allocator = allocator;
-        app_stack.window = window;
-        app_stack.vk_ctx = vk_ctx;
-        app_stack.scene = try Scene.init(allocator, 20);
+        app.* = undefined;
+        app.allocator = allocator;
+        app.window = window;
+        app.vk_ctx = vk_ctx;
+        app.scene = try Scene.init(allocator, 20);
 
-        try app_stack.initVulkanResources();
+        try app.initVulkanResources();
 
-        // Now allocate on heap and copy
-        const app_heap = try allocator.create(App);
-        app_heap.* = app_stack;
-        c.glfwSetWindowUserPointer(app_heap.window.handle, app_heap);
-        return app_heap;
+        c.glfwSetWindowUserPointer(app.window.handle, app);
+        return app;
     }
 
     // Initialize Vulkan resources after the context is created
     fn initVulkanResources(self: *Self) !void {
-        self.swapchain = try Swapchain.init(&self.vk_ctx);
-        self.descriptor_layout = try DescriptorSetLayout.init(&self.vk_ctx, .Uniform);
-        self.descriptor_pool = try DescriptorPool.init(&self.vk_ctx, .Uniform);
-        self.descriptor_set = try self.descriptor_pool.allocateSet(&self.vk_ctx, self.descriptor_layout);
-        self.command_buffer = try CommandBuffer.allocate(&self.vk_ctx, true);
-        self.sync = try SyncObjects.init(&self.vk_ctx);
+        self.swapchain = try Swapchain.init(self.vk_ctx);
+        self.descriptor_layout = try DescriptorSetLayout.init(self.vk_ctx, .Uniform);
+        self.descriptor_pool = try DescriptorPool.init(self.vk_ctx, .Uniform);
+        self.descriptor_set = try self.descriptor_pool.allocateSet(self.vk_ctx, self.descriptor_layout);
+        self.command_buffer = try CommandBuffer.allocate(self.vk_ctx, true);
+        self.sync = try SyncObjects.init(self.vk_ctx);
 
         try self.initVertexBuffer();
         try self.initUniformBuffer();
 
-        self.descriptor_pool.updateSet(&self.vk_ctx, self.descriptor_set, self.uniform_buffer, UniformBufferObject);
+        self.descriptor_pool.updateSet(self.vk_ctx, self.descriptor_set, self.uniform_buffer, UniformBufferObject);
 
-        self.render_pass = try RenderPass.init(&self.vk_ctx, &self.swapchain);
-        self.pipeline_layout = try PipelineLayout.init(&self.vk_ctx, self.descriptor_layout, null);
-        self.pipeline = try Pipeline.init(&self.vk_ctx, self.render_pass, self.pipeline_layout, self.swapchain);
+        self.render_pass = try RenderPass.init(self.vk_ctx, &self.swapchain);
+        self.pipeline_layout = try PipelineLayout.init(self.vk_ctx, self.descriptor_layout, null);
+        self.pipeline = try Pipeline.init(self.vk_ctx, self.render_pass, self.pipeline_layout, self.swapchain);
 
         // Initialize GUI at the end
-        self.gui_ctx = try gui.GuiContext.init(&self.vk_ctx, self.render_pass);
+        self.gui_ctx = try gui.GuiContext.init(self.vk_ctx, self.render_pass);
     }
 
     pub fn deinit(self: *Self) void {
@@ -948,26 +942,26 @@ const App = struct {
         _ = c.vkDeviceWaitIdle(self.vk_ctx.device.handle);
 
         self.gui_ctx.deinit(); // Deinit GUI resources
-        self.gui_ctx.destroyPipeline();
+        self.cleanupSwapchain();
 
-        self.sync.deinit(&self.vk_ctx);
-        self.vertex_buffer.deinit(&self.vk_ctx);
-        self.uniform_buffer.deinit(&self.vk_ctx);
-        self.descriptor_layout.deinit(&self.vk_ctx);
-        self.descriptor_pool.deinit(&self.vk_ctx);
+        self.sync.deinit(self.vk_ctx);
+        self.vertex_buffer.deinit(self.vk_ctx);
+        self.uniform_buffer.deinit(self.vk_ctx);
+        self.descriptor_layout.deinit(self.vk_ctx);
+        self.descriptor_pool.deinit(self.vk_ctx);
 
         self.vk_ctx.deinit();
         self.scene.deinit(self.allocator);
         self.window.deinit();
+        self.allocator.destroy(self.vk_ctx);
     }
 
     fn cleanupSwapchain(self: *Self) void {
         self.gui_ctx.destroyPipeline();
-        self.pipeline_layout.deinit();
         self.pipeline.deinit();
         self.pipeline_layout.deinit();
-        self.render_pass.deinit(&self.vk_ctx);
-        self.swapchain.deinit(&self.vk_ctx);
+        self.render_pass.deinit(self.vk_ctx);
+        self.swapchain.deinit(self.vk_ctx);
     }
 
     pub fn run(self: *Self) !void {
@@ -1046,23 +1040,23 @@ const App = struct {
         const buffer_size = @sizeOf(Vertex) * (self.scene.axis.len + self.scene.grid.len);
         if (buffer_size == 0) return;
 
-        var staging_buffer = try Buffer.init(&self.vk_ctx, buffer_size, c.VK_BUFFER_USAGE_TRANSFER_SRC_BIT, c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-        defer staging_buffer.deinit(&self.vk_ctx);
+        var staging_buffer = try Buffer.init(self.vk_ctx, buffer_size, c.VK_BUFFER_USAGE_TRANSFER_SRC_BIT, c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        defer staging_buffer.deinit(self.vk_ctx);
 
-        const data_ptr = try staging_buffer.map(&self.vk_ctx, Vertex);
-        defer staging_buffer.unmap(&self.vk_ctx);
+        const data_ptr = try staging_buffer.map(self.vk_ctx, Vertex);
+        defer staging_buffer.unmap(self.vk_ctx);
 
         const mapped_slice = data_ptr[0 .. self.scene.axis.len + self.scene.grid.len];
         @memcpy(mapped_slice[0..self.scene.axis.len], &self.scene.axis);
         @memcpy(mapped_slice[self.scene.axis.len..], self.scene.grid);
 
-        self.vertex_buffer = try Buffer.init(&self.vk_ctx, @sizeOf(Vertex) * 1024 * 1024, c.VK_BUFFER_USAGE_TRANSFER_DST_BIT | c.VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, c.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-        try staging_buffer.copyTo(&self.vk_ctx, self.vertex_buffer);
+        self.vertex_buffer = try Buffer.init(self.vk_ctx, @sizeOf(Vertex) * 1024 * 1024, c.VK_BUFFER_USAGE_TRANSFER_DST_BIT | c.VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, c.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        try staging_buffer.copyTo(self.vk_ctx, self.vertex_buffer);
     }
 
     fn initUniformBuffer(self: *Self) !void {
         const ubo_size = @sizeOf(UniformBufferObject);
-        self.uniform_buffer = try Buffer.init(&self.vk_ctx, ubo_size, c.VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        self.uniform_buffer = try Buffer.init(self.vk_ctx, ubo_size, c.VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
         try self.updateUniformBuffer();
     }
 
@@ -1082,8 +1076,8 @@ const App = struct {
             },
         };
 
-        const data_ptr = try self.uniform_buffer.map(&self.vk_ctx, UniformBufferObject);
-        defer self.uniform_buffer.unmap(&self.vk_ctx);
+        const data_ptr = try self.uniform_buffer.map(self.vk_ctx, UniformBufferObject);
+        defer self.uniform_buffer.unmap(self.vk_ctx);
         data_ptr[0] = ubo;
     }
 
@@ -1092,10 +1086,10 @@ const App = struct {
 
         self.cleanupSwapchain(); // This now correctly calls gui_context.destroyPipeline()
 
-        self.swapchain = try Swapchain.init(&self.vk_ctx);
-        self.render_pass = try RenderPass.init(&self.vk_ctx, &self.swapchain);
-        self.pipeline_layout = try PipelineLayout.init(&self.vk_ctx, self.descriptor_layout, null);
-        self.pipeline = try Pipeline.init(&self.vk_ctx, self.render_pass, self.pipeline_layout, self.swapchain);
+        self.swapchain = try Swapchain.init(self.vk_ctx);
+        self.render_pass = try RenderPass.init(self.vk_ctx, &self.swapchain);
+        self.pipeline_layout = try PipelineLayout.init(self.vk_ctx, self.descriptor_layout, null);
+        self.pipeline = try Pipeline.init(self.vk_ctx, self.render_pass, self.pipeline_layout, self.swapchain);
 
         // Recreate ONLY the GUI pipeline with the new render pass
         try self.gui_ctx.createPipeline(self.render_pass);
