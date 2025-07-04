@@ -102,7 +102,7 @@ pub const Scene = struct {
         return grid;
     }
 
-    pub fn addVector(self: *Self, start: [3]f32, end: [3]f32) !void {
+    pub fn addLine(self: *Self, start: [3]f32, end: [3]f32) !void {
         try self.lines.append(.{ .pos = start, .color = .{ 1.0, 0.0, 1.0, 1.0 } });
         try self.lines.append(.{ .pos = end, .color = .{ 1.0, 0.0, 1.0, 1.0 } });
     }
@@ -121,6 +121,7 @@ const Camera = struct {
     pitch: f32 = 0.5,
     yaw: f32 = 0.2,
     fov_degrees: f32 = 75.0,
+    near_plane: f32 = 0.1,
     radius: ?f32 = null,
     shape: [8]V3,
 
@@ -159,6 +160,13 @@ const Camera = struct {
         self.fov_degrees = math.clamp(self.fov_degrees, 15.0, 120.0);
     }
 
+    pub fn adjustRadius(self: *Self, radius_delta: f32) void {
+        if (self.radius) |*r| {
+            r.* += radius_delta;
+            r.* = math.clamp(r.*, 5.0, 100000.0);
+        }
+    }
+
     pub fn viewMatrix(self: *Self) [16]f32 {
         if (self.radius) |r| {
             self.pos = .{ .pos = .{
@@ -189,16 +197,16 @@ const Camera = struct {
     }
 
     pub fn projectionMatrix(self: Self, aspect_ratio: f32) [16]f32 {
-        const fovy = math.degreesToRadians(self.fov_degrees);
-        const near: f32 = 0.1;
-        const far: f32 = 100.0;
-        const f = 1.0 / math.tan(fovy / 2.0);
+        const fovy = std.math.degreesToRadians(self.fov_degrees);
+        const f = 1.0 / std.math.tan(fovy / 2.0);
+        const near = self.near_plane; // Use the dynamic near plane
 
+        // Reversed-Z projection matrix
         return .{
-            f / aspect_ratio, 0, 0, 0,
-            0, -f, 0,                           0, // Note the -f to flip Y for Vulkan
-            0, 0,  far / (near - far),          -1,
-            0, 0,  (far * near) / (near - far), 0,
+            f / aspect_ratio, 0.0, 0.0, 0.0,
+            0.0, -f, 0.0, 0.0, // Flip Y for Vulkan
+            0.0, 0.0, 0.0, -1.0, // Maps far plane to depth 0
+            0.0, 0.0, near, 0.0, // Maps near plane to depth 1
         };
     }
 };

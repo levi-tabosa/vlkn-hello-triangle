@@ -1,9 +1,49 @@
 // gui.zig
 const std = @import("std");
+const assert = std.debug.assert;
 const vk = @import("../test.zig"); // Reuse structs and helpers from main file
+const App = vk.App;
 const c = @import("c").c; // Reuse cImport from main file
 const gui_vert_shader_code = @import("spirv").gui_vs;
 const gui_frag_shader_code = @import("spirv").gui_fs;
+
+const OnClickFn = *const fn (app: *App) void;
+
+const WidgetData = union(enum) {
+    button: struct {
+        text: []const u8,
+    },
+};
+
+pub const Widget = struct {
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    on_click: ?OnClickFn = null,
+    data: WidgetData,
+};
+
+pub const UI = struct {
+    const Self = @This();
+
+    widgets: std.ArrayList(Widget),
+
+    pub fn init(allocator: std.mem.Allocator) Self {
+        return .{
+            .widgets = std.ArrayList(Widget).init(allocator),
+        };
+    }
+
+    pub fn deinit(self: *Self) void {
+        self.widgets.deinit();
+    }
+
+    pub fn addButton(self: *Self, widget: Widget) !void {
+        assert(widget.data == .button); // Ensure it's a button
+        try self.widgets.append(widget);
+    }
+};
 
 const GuiVertex = extern struct {
     pos: [2]f32,
@@ -41,7 +81,7 @@ const MouseState = struct {
     left_button_down: bool = false,
 };
 
-pub const GuiContext = struct {
+pub const GuiRenderer = struct {
     const Self = @This();
 
     vk_ctx: *vk.VulkanContext,
@@ -67,7 +107,7 @@ pub const GuiContext = struct {
     const MAX_VERTICES = 4096;
     const MAX_INDICES = MAX_VERTICES * 3 / 2;
 
-    pub fn init(vk_ctx: *vk.VulkanContext, render_pass: vk.RenderPass) !Self {
+    pub fn init(vk_ctx: *vk.VulkanContext, render_pass: vk.RenderPass, swapchain: vk.Swapchain) !Self {
         var self: Self = .{
             .vk_ctx = vk_ctx,
         };
@@ -81,18 +121,18 @@ pub const GuiContext = struct {
         self.index_buffer = try vk.Buffer.init(vk_ctx, idx_buffer_size, c.VK_BUFFER_USAGE_INDEX_BUFFER_BIT, c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
         self.mapped_indices = try self.index_buffer.map(vk_ctx, u32);
 
-        try self.createPipeline(render_pass);
+        try self.createPipeline(render_pass, swapchain);
         return self;
     }
 
-    pub fn createPipeline(self: *Self, render_pass: vk.RenderPass) !void {
-        // This function contains the exact pipeline creation logic from the old init()
-        // ...
+    pub fn createPipeline(self: *Self, render_pass: vk.RenderPass, swapchain: vk.Swapchain) !void {
         // 1. Pipeline Layout
-        self.pipeline_layout = try vk.PipelineLayout.init(self.vk_ctx, null, vk.PushConstantRange.init([16]f32));
+        self.pipeline_layout = try vk.PipelineLayout.init(self.vk_ctx, .{
+            .pushConstantRangeCount = 1,
+            .pPushConstantRanges = &vk.PushConstantRange.init([16]f32).handle,
+        });
 
         // 2. Shader Modules
-
         var vert_mod = try vk.ShaderModule.init(self.vk_ctx.allocator, self.vk_ctx.device.handle, gui_vert_shader_code);
         defer vert_mod.deinit();
         var frag_mod = try vk.ShaderModule.init(self.vk_ctx.allocator, self.vk_ctx.device.handle, gui_frag_shader_code);
@@ -112,8 +152,30 @@ pub const GuiContext = struct {
             .pVertexAttributeDescriptions = &attrib_desc,
         };
 
-        const input_assembly = c.VkPipelineInputAssemblyStateCreateInfo{ .topology = c.VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, .primitiveRestartEnable = c.VK_FALSE };
-        const viewport_state = c.VkPipelineViewportStateCreateInfo{ .viewportCount = 1, .scissorCount = 1 }; // Dynamic state
+        const input_assembly = c.VkPipelineInputAssemblyStateCreateInfo{
+            .topology = c.VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+            .primitiveRestartEnable = c.VK_FALSE,
+        };
+
+        const viewport = c.VkViewport{
+            .x = 0.0,
+            .y = 0.0,
+            .width = @floatFromInt(swapchain.extent.width),
+            .height = @floatFromInt(swapchain.extent.height),
+            .minDepth = 0.0,
+            .maxDepth = 1.0,
+        };
+        const scissor = c.VkRect2D{
+            .offset = .{ .x = 0, .y = 0 },
+            .extent = swapchain.extent,
+        };
+
+        const viewport_state = c.VkPipelineViewportStateCreateInfo{
+            .viewportCount = 1,
+            .pViewports = &viewport,
+            .scissorCount = 1,
+            .pScissors = &scissor,
+        };
         const rasterizer = c.VkPipelineRasterizationStateCreateInfo{
             .depthClampEnable = c.VK_FALSE,
             .rasterizerDiscardEnable = c.VK_FALSE,
@@ -124,7 +186,7 @@ pub const GuiContext = struct {
         };
         const multisampling = c.VkPipelineMultisampleStateCreateInfo{ .sampleShadingEnable = c.VK_FALSE, .rasterizationSamples = c.VK_SAMPLE_COUNT_1_BIT };
 
-        // --- Important for UI: Blending and No Depth Test ---
+        // --- Blending and No Depth Test ---
         const color_blend_attachment = c.VkPipelineColorBlendAttachmentState{
             .colorWriteMask = c.VK_COLOR_COMPONENT_R_BIT | c.VK_COLOR_COMPONENT_G_BIT | c.VK_COLOR_COMPONENT_B_BIT | c.VK_COLOR_COMPONENT_A_BIT,
             .blendEnable = c.VK_TRUE,
@@ -135,13 +197,16 @@ pub const GuiContext = struct {
             .dstAlphaBlendFactor = 0,
             .alphaBlendOp = c.VK_BLEND_OP_ADD,
         };
-        const color_blending = c.VkPipelineColorBlendStateCreateInfo{ .logicOpEnable = c.VK_FALSE, .attachmentCount = 1, .pAttachments = &color_blend_attachment };
-        const depth_stencil = c.VkPipelineDepthStencilStateCreateInfo{ .depthTestEnable = c.VK_FALSE, .depthWriteEnable = c.VK_FALSE };
-        const dynamic_states = [_]c.VkDynamicState{ c.VK_DYNAMIC_STATE_VIEWPORT, c.VK_DYNAMIC_STATE_SCISSOR };
-        const dynamic_state = c.VkPipelineDynamicStateCreateInfo{ .dynamicStateCount = dynamic_states.len, .pDynamicStates = &dynamic_states };
+        const color_blending = c.VkPipelineColorBlendStateCreateInfo{
+            .logicOpEnable = c.VK_FALSE,
+            .attachmentCount = 1,
+            .pAttachments = &color_blend_attachment,
+        };
+        const depth_stencil = c.VkPipelineDepthStencilStateCreateInfo{
+            .depthTestEnable = c.VK_FALSE,
+            .depthWriteEnable = c.VK_FALSE,
+        };
 
-        // 3. Pipeline Create Info
-        // ...
         const pipeline_info = c.VkGraphicsPipelineCreateInfo{
             .stageCount = shader_stages.len,
             .pStages = &shader_stages,
@@ -150,14 +215,14 @@ pub const GuiContext = struct {
             .pViewportState = &viewport_state,
             .pRasterizationState = &rasterizer,
             .pMultisampleState = &multisampling,
-            .pDepthStencilState = &depth_stencil,
             .pColorBlendState = &color_blending,
-            .pDynamicState = &dynamic_state,
+            .pDepthStencilState = &depth_stencil,
             .layout = self.pipeline_layout.handle,
             .renderPass = render_pass.handle,
             .subpass = 0,
         };
 
+        // self.pipeline = try vk.Pipeline.init(self.vk_ctx, render_pass, self.pipeline_layout);
         try vk.vkCheck(c.vkCreateGraphicsPipelines(self.vk_ctx.device.handle, null, 1, &pipeline_info, null, &self.pipeline.handle));
     }
 
@@ -180,25 +245,14 @@ pub const GuiContext = struct {
         self.hot_id = 0;
     }
 
-    pub fn draw(self: *Self) void {
-        if (self.button(10, 10, 150, 30)) {
-            std.log.info("Button was clicked!", .{});
-        }
-        if (self.button(10, 50, 150, 30)) {
-            // Example: Quit the application
-            std.log.info("Button was clicked!", .{});
-            // c.glfwSetWindowShouldClose(self.window.handle, 1);
-        }
-    }
-
-    pub fn endFrame(self: *Self, cmd: c.VkCommandBuffer, window_width: f32, window_height: f32) void {
+    pub fn endFrame(self: *Self, cmd_buffer: c.VkCommandBuffer, window_width: f32, window_height: f32) void {
         if (self.index_count == 0) return;
 
-        c.vkCmdBindPipeline(cmd, c.VK_PIPELINE_BIND_POINT_GRAPHICS, self.pipeline.handle);
+        c.vkCmdBindPipeline(cmd_buffer, c.VK_PIPELINE_BIND_POINT_GRAPHICS, self.pipeline.handle);
         const vtx_buffers = [_]c.VkBuffer{self.vertex_buffer.handle};
         const offsets = [_]c.VkDeviceSize{0};
-        c.vkCmdBindVertexBuffers(cmd, 0, 1, &vtx_buffers, &offsets);
-        c.vkCmdBindIndexBuffer(cmd, self.index_buffer.handle, 0, c.VK_INDEX_TYPE_UINT32);
+        c.vkCmdBindVertexBuffers(cmd_buffer, 0, 1, &vtx_buffers, &offsets);
+        c.vkCmdBindIndexBuffer(cmd_buffer, self.index_buffer.handle, 0, c.VK_INDEX_TYPE_UINT32);
 
         // Set dynamic viewport/scissor
         const viewport = c.VkViewport{
@@ -211,8 +265,8 @@ pub const GuiContext = struct {
             .width = @intFromFloat(window_width),
             .height = @intFromFloat(window_height),
         } };
-        c.vkCmdSetViewport(cmd, 0, 1, &viewport);
-        c.vkCmdSetScissor(cmd, 0, 1, &scissor);
+        c.vkCmdSetViewport(cmd_buffer, 0, 1, &viewport);
+        c.vkCmdSetScissor(cmd_buffer, 0, 1, &scissor);
 
         // Set orthographic projection matrix via push constants
         const L: f32 = 0;
@@ -225,9 +279,9 @@ pub const GuiContext = struct {
             0.0,                0.0,                1.0, 0.0, // Can use 1.0 for Z since we don't use depth
             -(R + L) / (R - L), -(B + T) / (B - T), 0.0, 1.0,
         };
-        c.vkCmdPushConstants(cmd, self.pipeline_layout.handle, c.VK_SHADER_STAGE_VERTEX_BIT, 0, @sizeOf([16]f32), &ortho_projection);
+        c.vkCmdPushConstants(cmd_buffer, self.pipeline_layout.handle, c.VK_SHADER_STAGE_VERTEX_BIT, 0, @sizeOf([16]f32), &ortho_projection);
 
-        c.vkCmdDrawIndexed(cmd, self.index_count, 1, 0, 0, 0);
+        c.vkCmdDrawIndexed(cmd_buffer, self.index_count, 1, 0, 0, 0);
 
         // De-activate widget if mouse button is released
         if (!self.mouse_state.left_button_down) {
@@ -235,40 +289,53 @@ pub const GuiContext = struct {
         }
     }
 
-    // --- Widgets ---
+    pub fn processAndDrawUi(self: *Self, app: *App, ui_to_draw: *const UI) void {
+        for (ui_to_draw.widgets.items, 1..) |widget, i| {
+            const id: u32 = @intCast(i); // Use index + 1 as the ID
+            var clicked = false;
 
-    pub fn button(self: *Self, x: f32, y: f32, width: f32, height: f32) bool {
-        self.last_id += 1;
-        const id = self.last_id;
+            // --- Interaction Logic (same as before, but generic) ---
+            const mouse_x = self.mouse_state.x;
+            const mouse_y = self.mouse_state.y;
 
-        const mouse_x = self.mouse_state.x;
-        const mouse_y = self.mouse_state.y;
-        var clicked = false;
-
-        // Check for hover
-        if (mouse_x >= x and mouse_x <= x + width and mouse_y >= y and mouse_y <= y + height) {
-            self.hot_id = id;
-            if (self.mouse_state.left_button_down) {
-                self.active_id = id;
+            if (mouse_x >= widget.x and mouse_x <= widget.x + widget.width and
+                mouse_y >= widget.y and mouse_y <= widget.y + widget.height)
+            {
+                self.hot_id = id;
+                if (self.mouse_state.left_button_down) {
+                    self.active_id = id;
+                }
             }
-        }
 
-        // Determine state and color
-        var color: [4]f32 = .{ 0.3, 0.3, 0.8, 1.0 }; // Normal
-        if (self.hot_id == id) {
-            color = .{ 1, 0, 0, 1.0 }; // Hover
-            if (self.active_id == id) {
-                color = .{ 0.2, 0.2, 0.7, 1.0 }; // Active/Pressed
-                // Click happens on mouse *up* while widget is active
-                if (!self.mouse_state.left_button_down) {
-                    clicked = true;
+            // A click is registered on mouse-up if this widget was the active one.
+            if (self.hot_id == id and self.active_id == id and !self.mouse_state.left_button_down) {
+                clicked = true;
+            }
+
+            // --- Rendering Logic ---
+            switch (widget.data) {
+                .button => |button_data| {
+                    _ = button_data;
+                    // Determine state and color
+                    var color: [4]f32 = .{ 0.3, 0.3, 0.8, 1.0 }; // Normal
+                    if (self.hot_id == id) {
+                        color = .{ 0.4, 0.4, 0.9, 1.0 }; // Hover
+                        if (self.active_id == id) {
+                            color = .{ 0.2, 0.2, 0.7, 1.0 }; // Active
+                        }
+                    }
+                    self.drawRect(widget.x, widget.y, widget.width, widget.height, color);
+                },
+            }
+
+            // --- Callback Execution ---
+            if (clicked) {
+                if (widget.on_click) |callback| {
+                    // Execute the function pointer!
+                    callback(app);
                 }
             }
         }
-
-        self.drawRect(x, y, width, height, color);
-
-        return clicked;
     }
 
     fn drawRect(self: *Self, x: f32, y: f32, w: f32, h: f32, color: [4]f32) void {

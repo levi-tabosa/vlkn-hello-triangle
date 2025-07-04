@@ -89,14 +89,14 @@ const UniformBufferObject = extern struct {
 const Callbacks = struct {
     fn cbCursorPos(wd: ?*c.GLFWwindow, xpos: f64, ypos: f64) callconv(.C) void {
         const app: *App = @alignCast(@ptrCast(c.glfwGetWindowUserPointer(wd orelse return) orelse return));
-        app.gui_ctx.handleCursorPos(xpos, ypos);
+        app.gui_renderer.handleCursorPos(xpos, ypos);
         // NEW: Forward to the input context as well
         app.wd_ctx.handleCursorPos(xpos, ypos);
     }
 
     fn cbMouseButton(wd: ?*c.GLFWwindow, button: c_int, action: c_int, mods: c_int) callconv(.C) void {
         const app: *App = @alignCast(@ptrCast(c.glfwGetWindowUserPointer(wd orelse return) orelse return));
-        app.gui_ctx.handleMouseButton(button, action, mods);
+        app.gui_renderer.handleMouseButton(button, action, mods);
         app.wd_ctx.handleMouseButton(button, action);
     }
 
@@ -125,6 +125,31 @@ const Callbacks = struct {
         app.wd_ctx.handleScroll(xoffset, yoffset);
     }
 };
+
+fn addLineCallback(app: *App) void {
+    std.log.info("Button clicked: Adding a new line...", .{});
+    var prng = rand.DefaultPrng.init(@intCast(std.time.milliTimestamp()));
+    const random = prng.random();
+    app.scene.addLine(
+        .{ 0, 0, 0 },
+        .{
+            random.float(f32) * 2.0 - 1.0,
+            random.float(f32) * 2.0 - 1.0,
+            random.float(f32) * 2.0 - 1.0,
+        },
+    ) catch unreachable;
+    app.updateVertexBuffer() catch unreachable;
+}
+
+fn clearLinesCallback(app: *App) void {
+    std.log.info("Button clicked: Clearing lines.", .{});
+    app.scene.clear();
+}
+
+fn quitCallback(app: *App) void {
+    std.log.info("Button clicked: Quitting.", .{});
+    c.glfwSetWindowShouldClose(app.window.handle, 1);
+}
 
 const Window = struct {
     const Self = @This();
@@ -192,7 +217,7 @@ pub const WindowContext = struct {
             s.camera.adjustFov(fov_change);
             updated = true;
         } else if (self.scroll_changed) {
-            if (s.camera.radius) |*r| r.* += @as(f32, @floatCast(self.scroll_dy)) * 2;
+            s.camera.adjustRadius(@as(f32, @floatCast(self.scroll_dy)) * 2);
             updated = true;
         }
         if (self.left_mouse_down) {
@@ -341,6 +366,35 @@ const PhysicalDevice = struct {
         }
         return error.MissingMemoryType;
     }
+
+    pub fn findSupportedFormat(
+        self: Self,
+        candidates: []const c.VkFormat,
+        tiling: c.VkImageTiling,
+        features: c.VkFormatFeatureFlags,
+    ) !c.VkFormat {
+        for (candidates) |format| {
+            var props: c.VkFormatProperties = undefined;
+            c.vkGetPhysicalDeviceFormatProperties(self.handle, format, &props);
+
+            if (tiling == c.VK_IMAGE_TILING_LINEAR and (props.linearTilingFeatures & features) == features) {
+                return format;
+            } else if (tiling == c.VK_IMAGE_TILING_OPTIMAL and (props.optimalTilingFeatures & features) == features) {
+                return format;
+            }
+        }
+        return error.NoSuitableFormatFound;
+    }
+
+    // And a specific helper for the depth format
+    pub fn findDepthFormat(self: Self) !c.VkFormat {
+        return findSupportedFormat(
+            self,
+            &.{ c.VK_FORMAT_D32_SFLOAT, c.VK_FORMAT_D32_SFLOAT_S8_UINT, c.VK_FORMAT_D24_UNORM_S8_UINT },
+            c.VK_IMAGE_TILING_OPTIMAL,
+            c.VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT,
+        );
+    }
 };
 
 const Device = struct {
@@ -384,7 +438,66 @@ const Queue = struct {
         c.vkGetDeviceQueue(device.handle, device.physical.q_family_idx, 0, &self.handle);
         return self;
     }
+
     pub fn deinit(_: *Self) void {} // TODO: remove
+
+    // pub fn submit(self: *Self, )
+};
+
+const CommandBuffer = struct {
+    const Self = @This();
+    handle: c.VkCommandBuffer = undefined,
+
+    pub fn allocate(vk_ctx: *VulkanContext, is_primary: bool) !Self {
+        var self = Self{};
+        const alloc_info = c.VkCommandBufferAllocateInfo{
+            .commandPool = vk_ctx.command_pool.handle,
+            .level = if (is_primary) c.VK_COMMAND_BUFFER_LEVEL_PRIMARY else c.VK_COMMAND_BUFFER_LEVEL_SECONDARY,
+            .commandBufferCount = 1,
+        };
+        try vkCheck(c.vkAllocateCommandBuffers(vk_ctx.device.handle, &alloc_info, &self.handle));
+        return self;
+    }
+
+    pub fn begin(self: *Self, flags: c.VkCommandBufferUsageFlags) !void {
+        const begin_info = c.VkCommandBufferBeginInfo{
+            .flags = flags,
+        };
+        try vkCheck(c.vkBeginCommandBuffer(self.handle, &begin_info));
+    }
+
+    pub fn end(self: *Self) !void {
+        try vkCheck(c.vkEndCommandBuffer(self.handle));
+    }
+
+    fn beginSingleTimeCommands(vk_ctx: *VulkanContext, is_primary: bool) !Self {
+        var self = Self{};
+
+        const alloc_info = c.VkCommandBufferAllocateInfo{
+            .level = if (is_primary) c.VK_COMMAND_BUFFER_LEVEL_PRIMARY else c.VK_COMMAND_BUFFER_LEVEL_SECONDARY,
+            .commandPool = vk_ctx.command_pool.handle,
+            .commandBufferCount = 1,
+        };
+        try vkCheck(c.vkAllocateCommandBuffers(vk_ctx.device.handle, &alloc_info, &self.handle));
+
+        const begin_info = c.VkCommandBufferBeginInfo{ .flags = c.VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT };
+        try vkCheck(c.vkBeginCommandBuffer(self.handle, &begin_info));
+
+        return self;
+    }
+
+    fn endSingleTimeCommands(self: Self, vk_ctx: *VulkanContext) !void {
+        try vkCheck(c.vkEndCommandBuffer(self.handle));
+
+        const submit_info = c.VkSubmitInfo{
+            .commandBufferCount = 1,
+            .pCommandBuffers = &self.handle,
+        };
+        try vkCheck(c.vkQueueSubmit(vk_ctx.graphics_queue.handle, 1, &submit_info, null));
+        try vkCheck(c.vkQueueWaitIdle(vk_ctx.graphics_queue.handle));
+
+        c.vkFreeCommandBuffers(vk_ctx.device.handle, vk_ctx.command_pool.handle, 1, &self.handle);
+    }
 };
 
 const CommandPool = struct {
@@ -406,48 +519,7 @@ const CommandPool = struct {
     }
 };
 
-// --- VULKAN CONTEXT ---
-pub const VulkanContext = struct {
-    const Self = @This();
-    allocator: Allocator,
-    instance: Instance,
-    surface: Surface,
-    physical_device: PhysicalDevice,
-    device: Device,
-    graphics_queue: Queue,
-    command_pool: CommandPool,
-
-    pub fn init(allocator: Allocator, window: Window) !Self {
-        const instance = try Instance.init();
-        const surface = try Surface.init(instance, window);
-        const physical_device = try PhysicalDevice.init(allocator, instance, surface);
-        const device = try Device.init(physical_device);
-        const graphics_queue = try Queue.init(device);
-        const command_pool = try CommandPool.init(device);
-
-        return .{
-            .allocator = allocator,
-            .instance = instance,
-            .surface = surface,
-            .physical_device = physical_device,
-            .device = device,
-            .graphics_queue = graphics_queue,
-            .command_pool = command_pool,
-        };
-    }
-
-    pub fn deinit(self: *Self) void {
-        // Destroy in reverse order of creation
-        self.command_pool.deinit(self);
-        self.graphics_queue.deinit();
-        self.device.deinit();
-        self.physical_device.deinit();
-        self.surface.deinit(self);
-        self.instance.deinit();
-    }
-};
-
-const Swapchain = struct {
+pub const Swapchain = struct {
     const Self = @This();
     handle: c.VkSwapchainKHR = undefined,
     image_format: c.VkSurfaceFormatKHR = undefined,
@@ -538,6 +610,213 @@ const Swapchain = struct {
     }
 };
 
+pub const Image = struct {
+    handle: c.VkImage,
+    memory: c.VkDeviceMemory,
+    width: u32,
+    height: u32,
+    format: c.VkFormat,
+
+    /// Creates a VkImage and allocates its memory.
+    pub fn create(
+        vk_ctx: *VulkanContext,
+        width: u32,
+        height: u32,
+        format: c.VkFormat,
+        tiling: c.VkImageTiling,
+        usage: c.VkImageUsageFlags,
+        properties: c.VkMemoryPropertyFlags,
+    ) !Image {
+        const image_info = c.VkImageCreateInfo{
+            .imageType = c.VK_IMAGE_TYPE_2D,
+            .extent = .{ .width = width, .height = height, .depth = 1 },
+            .mipLevels = 1,
+            .arrayLayers = 1,
+            .format = format,
+            .tiling = tiling,
+            .initialLayout = c.VK_IMAGE_LAYOUT_UNDEFINED,
+            .usage = usage,
+            .samples = c.VK_SAMPLE_COUNT_1_BIT,
+            .sharingMode = c.VK_SHARING_MODE_EXCLUSIVE,
+        };
+
+        var image_handle: c.VkImage = undefined;
+        try vkCheck(c.vkCreateImage(vk_ctx.device.handle, &image_info, null, &image_handle));
+
+        var mem_reqs: c.VkMemoryRequirements = undefined;
+        c.vkGetImageMemoryRequirements(vk_ctx.device.handle, image_handle, &mem_reqs);
+
+        const mem_type_index = try vk_ctx.physical_device.findMemoryType(mem_reqs.memoryTypeBits, properties);
+
+        const alloc_info = c.VkMemoryAllocateInfo{
+            .allocationSize = mem_reqs.size,
+            .memoryTypeIndex = mem_type_index,
+        };
+
+        var image_memory: c.VkDeviceMemory = undefined;
+        try vkCheck(c.vkAllocateMemory(vk_ctx.device.handle, &alloc_info, null, &image_memory));
+
+        try vkCheck(c.vkBindImageMemory(vk_ctx.device.handle, image_handle, image_memory, 0));
+
+        return Image{
+            .handle = image_handle,
+            .memory = image_memory,
+            .width = width,
+            .height = height,
+            .format = format,
+        };
+    }
+
+    pub fn deinit(self: *Image, vk_ctx: *VulkanContext) void {
+        c.vkDestroyImage(vk_ctx.device.handle, self.handle, null);
+        c.vkFreeMemory(vk_ctx.device.handle, self.memory, null);
+    }
+
+    /// Creates a VkImageView for this image.
+    pub fn createView(
+        self: Image,
+        vk_ctx: *VulkanContext,
+        aspect_flags: c.VkImageAspectFlags,
+    ) !c.VkImageView {
+        const view_info = c.VkImageViewCreateInfo{
+            .image = self.handle,
+            .viewType = c.VK_IMAGE_VIEW_TYPE_2D,
+            .format = self.format,
+            .subresourceRange = .{
+                .aspectMask = aspect_flags,
+                .baseMipLevel = 0,
+                .levelCount = 1,
+                .baseArrayLayer = 0,
+                .layerCount = 1,
+            },
+        };
+
+        var view: c.VkImageView = undefined;
+        try vkCheck(c.vkCreateImageView(vk_ctx.device.handle, &view_info, null, &view));
+        return view;
+    }
+
+    /// Transitions the image from one layout to another using a barrier.
+    pub fn transitionLayout(
+        self: Image,
+        vk_ctx: *VulkanContext,
+        old_layout: c.VkImageLayout,
+        new_layout: c.VkImageLayout,
+    ) !void {
+        const command_buffer = try CommandBuffer.beginSingleTimeCommands(vk_ctx, true);
+
+        var barrier = c.VkImageMemoryBarrier{
+            .oldLayout = old_layout,
+            .newLayout = new_layout,
+            .srcQueueFamilyIndex = c.VK_QUEUE_FAMILY_IGNORED,
+            .dstQueueFamilyIndex = c.VK_QUEUE_FAMILY_IGNORED,
+            .image = self.handle,
+            .subresourceRange = .{
+                .aspectMask = if (self.hasDepthComponent()) c.VK_IMAGE_ASPECT_DEPTH_BIT else c.VK_IMAGE_ASPECT_COLOR_BIT,
+                .baseMipLevel = 0,
+                .levelCount = 1,
+                .baseArrayLayer = 0,
+                .layerCount = 1,
+            },
+        };
+
+        var source_stage: c.VkPipelineStageFlags = undefined;
+        var destination_stage: c.VkPipelineStageFlags = undefined;
+        source_stage = c.VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+        destination_stage = c.VK_PIPELINE_STAGE_TRANSFER_BIT;
+
+        // Determine pipeline stages and access masks based on layout transition
+        // if (old_layout == c.VK_IMAGE_LAYOUT_UNDEFINED and new_layout == c.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) {
+        //     barrier.srcAccessMask = 0;
+        //     barrier.dstAccessMask = c.VK_ACCESS_TRANSFER_WRITE_BIT;
+
+        //     source_stage = c.VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+        //     destination_stage = c.VK_PIPELINE_STAGE_TRANSFER_BIT;
+        // } else if (old_layout == c.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL and new_layout == c.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
+        //     barrier.srcAccessMask = c.VK_ACCESS_TRANSFER_WRITE_BIT;
+        //     barrier.dstAccessMask = c.VK_ACCESS_SHADER_READ_BIT;
+
+        //     source_stage = c.VK_PIPELINE_STAGE_TRANSFER_BIT;
+        //     destination_stage = c.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+        // } else if (old_layout == c.VK_IMAGE_LAYOUT_UNDEFINED and new_layout == c.VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL) {
+        //     barrier.srcAccessMask = 0;
+        //     barrier.dstAccessMask = c.VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | c.VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+
+        //     source_stage = c.VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+        //     destination_stage = c.VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+        // } else {
+        //     return error.UnsupportedLayoutTransition;
+        // }
+
+        c.vkCmdPipelineBarrier(command_buffer.handle, source_stage, destination_stage, 0, 0, null, 0, null, 1, &barrier);
+
+        try command_buffer.endSingleTimeCommands(vk_ctx);
+    }
+
+    /// Copies data from a buffer to this image.
+    pub fn copyFromBuffer(self: Image, vk_ctx: *VulkanContext, buffer: Buffer) !void {
+        const command_buffer = try CommandBuffer.beginSingleTimeCommands(vk_ctx, true);
+
+        const region = c.VkBufferImageCopy{
+            .bufferOffset = 0,
+            .bufferRowLength = 0,
+            .bufferImageHeight = 0,
+            .imageSubresource = .{
+                .aspectMask = c.VK_IMAGE_ASPECT_COLOR_BIT,
+                .mipLevel = 0,
+                .baseArrayLayer = 0,
+                .layerCount = 1,
+            },
+            .imageOffset = .{ .x = 0, .y = 0, .z = 0 },
+            .imageExtent = .{ .width = self.width, .height = self.height, .depth = 1 },
+        };
+
+        c.vkCmdCopyBufferToImage(command_buffer, buffer.handle, self.handle, c.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+
+        try command_buffer.endSingleTimeCommands(vk_ctx);
+    }
+
+    pub fn hasDepthComponent(self: Image) bool {
+        return self.format == c.VK_FORMAT_D32_SFLOAT or self.format == c.VK_FORMAT_D32_SFLOAT_S8_UINT or self.format == c.VK_FORMAT_D24_UNORM_S8_UINT;
+    }
+};
+
+const DepthBuffer = struct {
+    const Self = @This();
+
+    image: Image, // You'll need an Image struct that holds VkImage and VkDeviceMemory
+    view: c.VkImageView,
+    format: c.VkFormat,
+
+    pub fn init(vk_ctx: *VulkanContext, width: u32, height: u32) !Self {
+        const format = try vk_ctx.physical_device.findDepthFormat();
+
+        // This is a simplified version of image creation.
+        // A full implementation would be a function `createImage(...)`.
+        const image = try Image.create(
+            vk_ctx,
+            width,
+            height,
+            format,
+            c.VK_IMAGE_TILING_OPTIMAL,
+            c.VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+            c.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+        );
+
+        const view = try image.createView(vk_ctx, c.VK_IMAGE_ASPECT_DEPTH_BIT);
+
+        // Important: Transition the image layout so it's ready for use as a depth attachment
+        try image.transitionLayout(vk_ctx, c.VK_IMAGE_LAYOUT_UNDEFINED, c.VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+
+        return .{ .image = image, .view = view, .format = format };
+    }
+
+    pub fn deinit(self: *Self, vk_ctx: *VulkanContext) void {
+        c.vkDestroyImageView(vk_ctx.device.handle, self.view, null);
+        self.image.deinit(vk_ctx);
+    }
+};
+
 pub const RenderPass = struct {
     const Self = @This();
     handle: c.VkRenderPass = undefined,
@@ -547,7 +826,7 @@ pub const RenderPass = struct {
     pub fn init(vk_ctx: *VulkanContext, swapchain: *Swapchain) !Self {
         var self = Self{ .owner = vk_ctx.device.handle };
 
-        var color_attachment = c.VkAttachmentDescription{
+        const color_attachment = c.VkAttachmentDescription{
             .format = swapchain.image_format.format,
             .samples = c.VK_SAMPLE_COUNT_1_BIT,
             .loadOp = c.VK_ATTACHMENT_LOAD_OP_CLEAR,
@@ -561,11 +840,7 @@ pub const RenderPass = struct {
             .attachment = 0,
             .layout = c.VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
         };
-        const subpass = c.VkSubpassDescription{
-            .pipelineBindPoint = c.VK_PIPELINE_BIND_POINT_GRAPHICS,
-            .colorAttachmentCount = 1,
-            .pColorAttachments = &color_attachment_ref,
-        };
+
         var subpass_dep = c.VkSubpassDependency{
             .srcSubpass = c.VK_SUBPASS_EXTERNAL,
             .dstSubpass = 0,
@@ -574,17 +849,46 @@ pub const RenderPass = struct {
             .dstStageMask = c.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
             .dstAccessMask = c.VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
         };
+
+        const depth_format = try vk_ctx.physical_device.findDepthFormat();
+        const depth_attachment = c.VkAttachmentDescription{
+            .format = depth_format,
+            .samples = c.VK_SAMPLE_COUNT_1_BIT,
+            .loadOp = c.VK_ATTACHMENT_LOAD_OP_CLEAR, // Clear depth at the start of the pass
+            .storeOp = c.VK_ATTACHMENT_STORE_OP_DONT_CARE, // We don't need to save depth after
+            .stencilLoadOp = c.VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+            .stencilStoreOp = c.VK_ATTACHMENT_STORE_OP_DONT_CARE,
+            .initialLayout = c.VK_IMAGE_LAYOUT_UNDEFINED,
+            .finalLayout = c.VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+        };
+
+        // 2. Create an attachment reference for the subpass
+        const depth_attachment_ref = c.VkAttachmentReference{
+            .attachment = 1, // Color is 0, Depth is 1
+            .layout = c.VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+        };
+
+        // 3. Point the subpass description to it
+        const subpass = c.VkSubpassDescription{
+            .pipelineBindPoint = c.VK_PIPELINE_BIND_POINT_GRAPHICS,
+            .colorAttachmentCount = 1,
+            .pColorAttachments = &color_attachment_ref,
+            .pDepthStencilAttachment = &depth_attachment_ref, // Set this!
+        };
+
+        // 4. Update the render pass create info
+        const attachments = [_]c.VkAttachmentDescription{ color_attachment, depth_attachment };
         const create_info = c.VkRenderPassCreateInfo{
-            .attachmentCount = 1,
-            .pAttachments = &color_attachment,
+            .attachmentCount = attachments.len,
+            .pAttachments = &attachments,
             .subpassCount = 1,
             .pSubpasses = &subpass,
             .dependencyCount = 1,
             .pDependencies = &subpass_dep,
         };
+
         try vkCheck(c.vkCreateRenderPass(vk_ctx.device.handle, &create_info, null, &self.handle));
 
-        try self.initFrameBuffer(vk_ctx, swapchain);
         return self;
     }
 
@@ -593,13 +897,13 @@ pub const RenderPass = struct {
         c.vkDestroyRenderPass(self.owner, self.handle, null);
     }
 
-    pub fn initFrameBuffer(self: *Self, vk_ctx: *VulkanContext, swapchain: *Swapchain) !void {
+    pub fn initFrameBuffer(self: *Self, vk_ctx: *VulkanContext, swapchain: *Swapchain, depth_view: c.VkImageView) !void {
         self.framebuffer = try vk_ctx.allocator.alloc(c.VkFramebuffer, swapchain.image_views.len);
         for (swapchain.image_views, 0..) |iv, i| {
-            const attachments = [_]c.VkImageView{iv};
+            const attachments = [_]c.VkImageView{ iv, depth_view }; // Color and depth
             const f_buffer_create_info = c.VkFramebufferCreateInfo{
                 .renderPass = self.handle,
-                .attachmentCount = attachments.len,
+                .attachmentCount = attachments.len, // 2
                 .pAttachments = &attachments,
                 .width = swapchain.extent.width,
                 .height = swapchain.extent.height,
@@ -614,22 +918,6 @@ pub const RenderPass = struct {
             c.vkDestroyFramebuffer(self.owner, fb, null);
         }
         allocator.free(self.framebuffer);
-    }
-};
-
-const CommandBuffer = struct {
-    const Self = @This();
-    handle: c.VkCommandBuffer = undefined,
-
-    pub fn allocate(vk_ctx: *VulkanContext, is_primary: bool) !Self {
-        var self = Self{};
-        const alloc_info = c.VkCommandBufferAllocateInfo{
-            .commandPool = vk_ctx.command_pool.handle,
-            .level = if (is_primary) c.VK_COMMAND_BUFFER_LEVEL_PRIMARY else c.VK_COMMAND_BUFFER_LEVEL_SECONDARY,
-            .commandBufferCount = 1,
-        };
-        try vkCheck(c.vkAllocateCommandBuffers(vk_ctx.device.handle, &alloc_info, &self.handle));
-        return self;
     }
 };
 
@@ -691,13 +979,21 @@ pub const Buffer = struct {
 
     pub fn init(vk_ctx: *VulkanContext, size: u64, usage: c.VkBufferUsageFlags, properties: c.VkMemoryPropertyFlags) !Self {
         var self = Self{ .size = size };
-        var buffer_info = c.VkBufferCreateInfo{ .size = size, .usage = usage, .sharingMode = c.VK_SHARING_MODE_EXCLUSIVE };
+        var buffer_info = c.VkBufferCreateInfo{
+            .size = size,
+            .usage = usage,
+            // Not shared between queues
+            .sharingMode = c.VK_SHARING_MODE_EXCLUSIVE,
+        };
         try vkCheck(c.vkCreateBuffer(vk_ctx.device.handle, &buffer_info, null, &self.handle));
 
         var mem_reqs: c.VkMemoryRequirements = undefined;
         c.vkGetBufferMemoryRequirements(vk_ctx.device.handle, self.handle, &mem_reqs);
         const mem_type_index = try vk_ctx.physical_device.findMemoryType(mem_reqs.memoryTypeBits, properties);
-        var alloc_info = c.VkMemoryAllocateInfo{ .allocationSize = mem_reqs.size, .memoryTypeIndex = mem_type_index };
+        var alloc_info = c.VkMemoryAllocateInfo{
+            .allocationSize = mem_reqs.size,
+            .memoryTypeIndex = mem_type_index,
+        };
         try vkCheck(c.vkAllocateMemory(vk_ctx.device.handle, &alloc_info, null, &self.memory));
         try vkCheck(c.vkBindBufferMemory(vk_ctx.device.handle, self.handle, self.memory, 0));
         return self;
@@ -736,7 +1032,11 @@ pub const Buffer = struct {
 
         try vkCheck(c.vkEndCommandBuffer(command_buffer));
 
-        const submit_info = c.VkSubmitInfo{ .commandBufferCount = 1, .pCommandBuffers = &command_buffer };
+        const submit_info = c.VkSubmitInfo{
+            .commandBufferCount = 1,
+            .pCommandBuffers = &command_buffer,
+        };
+        // try vk_ctx.graphics_queue.
         try vkCheck(c.vkQueueSubmit(vk_ctx.graphics_queue.handle, 1, &submit_info, null));
         try vkCheck(c.vkQueueWaitIdle(vk_ctx.graphics_queue.handle));
     }
@@ -852,22 +1152,10 @@ pub const PipelineLayout = struct {
 
     pub fn init(
         vk_ctx: *VulkanContext,
-        desc_set_layout: ?DescriptorSetLayout,
-        push_consts_range: ?PushConstantRange,
+        create_info: c.VkPipelineLayoutCreateInfo,
     ) !Self {
-        assert(desc_set_layout != null or push_consts_range != null);
         var self = Self{};
-        var pipeline_layout_info = if (desc_set_layout) |l|
-            c.VkPipelineLayoutCreateInfo{
-                .setLayoutCount = 1,
-                .pSetLayouts = &l.handle,
-            }
-        else
-            c.VkPipelineLayoutCreateInfo{
-                .pushConstantRangeCount = 1,
-                .pPushConstantRanges = &push_consts_range.?.handle,
-            };
-        try vkCheck(c.vkCreatePipelineLayout(vk_ctx.device.handle, &pipeline_layout_info, null, &self.handle));
+        try vkCheck(c.vkCreatePipelineLayout(vk_ctx.device.handle, &create_info, null, &self.handle));
         return self;
     }
     pub fn deinit(self: *Self, vk_ctx: *VulkanContext) void {
@@ -900,7 +1188,10 @@ pub const Pipeline = struct {
             .vertexAttributeDescriptionCount = attribute_descriptions.len,
             .pVertexAttributeDescriptions = &attribute_descriptions,
         };
-        const input_assembly = c.VkPipelineInputAssemblyStateCreateInfo{ .topology = c.VK_PRIMITIVE_TOPOLOGY_LINE_LIST, .primitiveRestartEnable = c.VK_FALSE };
+        const input_assembly = c.VkPipelineInputAssemblyStateCreateInfo{
+            .topology = c.VK_PRIMITIVE_TOPOLOGY_LINE_LIST,
+            .primitiveRestartEnable = c.VK_FALSE,
+        };
         const viewport = c.VkViewport{
             .x = 0.0,
             .y = 0.0,
@@ -909,20 +1200,47 @@ pub const Pipeline = struct {
             .minDepth = 0.0,
             .maxDepth = 1.0,
         };
-        const scissor = c.VkRect2D{ .offset = .{ .x = 0, .y = 0 }, .extent = swapchain.extent };
-        var viewport_state = c.VkPipelineViewportStateCreateInfo{ .viewportCount = 1, .pViewports = &viewport, .scissorCount = 1, .pScissors = &scissor };
+        const scissor = c.VkRect2D{
+            .offset = .{ .x = 0, .y = 0 },
+            .extent = swapchain.extent,
+        };
+        var viewport_state = c.VkPipelineViewportStateCreateInfo{
+            .viewportCount = 1,
+            .pViewports = &viewport,
+            .scissorCount = 1,
+            .pScissors = &scissor,
+        };
         var rasterizer = c.VkPipelineRasterizationStateCreateInfo{
             .depthClampEnable = c.VK_FALSE,
             .rasterizerDiscardEnable = c.VK_FALSE,
             .polygonMode = c.VK_POLYGON_MODE_FILL,
             .lineWidth = 1.0,
-            .cullMode = c.VK_CULL_MODE_NONE,
+            .cullMode = c.VK_CULL_MODE_BACK_BIT,
             .frontFace = c.VK_FRONT_FACE_COUNTER_CLOCKWISE,
             .depthBiasEnable = c.VK_FALSE,
         };
-        var multisampling = c.VkPipelineMultisampleStateCreateInfo{ .sampleShadingEnable = c.VK_FALSE, .rasterizationSamples = c.VK_SAMPLE_COUNT_1_BIT };
-        var color_blend_attachment = c.VkPipelineColorBlendAttachmentState{ .colorWriteMask = c.VK_COLOR_COMPONENT_R_BIT | c.VK_COLOR_COMPONENT_G_BIT | c.VK_COLOR_COMPONENT_B_BIT | c.VK_COLOR_COMPONENT_A_BIT, .blendEnable = c.VK_FALSE };
-        var color_blending = c.VkPipelineColorBlendStateCreateInfo{ .logicOpEnable = c.VK_FALSE, .attachmentCount = 1, .pAttachments = &color_blend_attachment };
+        var multisampling = c.VkPipelineMultisampleStateCreateInfo{
+            .sampleShadingEnable = c.VK_FALSE,
+            .rasterizationSamples = c.VK_SAMPLE_COUNT_1_BIT,
+        };
+        var color_blend_attachment = c.VkPipelineColorBlendAttachmentState{
+            .colorWriteMask = c.VK_COLOR_COMPONENT_R_BIT | c.VK_COLOR_COMPONENT_G_BIT | c.VK_COLOR_COMPONENT_B_BIT | c.VK_COLOR_COMPONENT_A_BIT,
+            .blendEnable = c.VK_FALSE,
+        };
+        var color_blending = c.VkPipelineColorBlendStateCreateInfo{
+            .logicOpEnable = c.VK_FALSE,
+            .attachmentCount = 1,
+            .pAttachments = &color_blend_attachment,
+        };
+        var depth_stencil = c.VkPipelineDepthStencilStateCreateInfo{
+            .depthTestEnable = c.VK_TRUE,
+            .depthWriteEnable = c.VK_TRUE,
+            // THE KEY CHANGE: Use GREATER or GREATER_OR_EQUAL
+            .depthCompareOp = c.VK_COMPARE_OP_GREATER_OR_EQUAL,
+            .depthBoundsTestEnable = c.VK_FALSE,
+            .stencilTestEnable = c.VK_FALSE,
+        };
+
         var pipeline_info = c.VkGraphicsPipelineCreateInfo{
             .stageCount = shader_stages.len,
             .pStages = &shader_stages,
@@ -932,6 +1250,7 @@ pub const Pipeline = struct {
             .pRasterizationState = &rasterizer,
             .pMultisampleState = &multisampling,
             .pColorBlendState = &color_blending,
+            .pDepthStencilState = &depth_stencil,
             .layout = layout.handle,
             .renderPass = render_pass.handle,
             .subpass = 0,
@@ -946,17 +1265,60 @@ pub const Pipeline = struct {
     }
 };
 
+// --- VULKAN CONTEXT ---
+pub const VulkanContext = struct {
+    const Self = @This();
+    allocator: Allocator,
+    instance: Instance,
+    surface: Surface,
+    physical_device: PhysicalDevice,
+    device: Device,
+    graphics_queue: Queue,
+    command_pool: CommandPool,
+
+    pub fn init(allocator: Allocator, window: Window) !Self {
+        const instance = try Instance.init();
+        const surface = try Surface.init(instance, window);
+        const physical_device = try PhysicalDevice.init(allocator, instance, surface);
+        const device = try Device.init(physical_device);
+        const graphics_queue = try Queue.init(device);
+        const command_pool = try CommandPool.init(device);
+
+        return .{
+            .allocator = allocator,
+            .instance = instance,
+            .surface = surface,
+            .physical_device = physical_device,
+            .device = device,
+            .graphics_queue = graphics_queue,
+            .command_pool = command_pool,
+        };
+    }
+
+    pub fn deinit(self: *Self) void {
+        // Destroy in reverse order of creation
+        self.command_pool.deinit(self);
+        self.graphics_queue.deinit();
+        self.device.deinit();
+        self.physical_device.deinit();
+        self.surface.deinit(self);
+        self.instance.deinit();
+    }
+};
+
 // --- MAIN APPLICATION STRUCT ---
-const App = struct {
+pub const App = struct {
     const Self = @This();
     allocator: Allocator,
     scene: Scene,
     window: Window,
     vk_ctx: *VulkanContext,
-    gui_ctx: gui.GuiContext,
+    gui_renderer: gui.GuiRenderer,
+    main_ui: gui.UI,
     wd_ctx: WindowContext,
 
     // Vulkan objects that depend on the swapchain (and are recreated)
+    depth_buffer: DepthBuffer,
     swapchain: Swapchain,
     render_pass: RenderPass,
     descriptor_layout: DescriptorSetLayout,
@@ -973,6 +1335,7 @@ const App = struct {
 
     framebuffer_resized: bool = false,
 
+    /// Caller owns memory
     pub fn init(allocator: Allocator) !*Self {
         const window = try Window.init(null, WINDOW_WIDTH, WINDOW_HEIGHT, "Vulkan Line App", null, null);
         const vk_ctx = try allocator.create(VulkanContext);
@@ -984,6 +1347,8 @@ const App = struct {
         app.vk_ctx = vk_ctx;
         app.scene = try Scene.init(allocator, 20);
         app.wd_ctx = .{};
+        app.main_ui = gui.UI.init(allocator);
+        try app.initUi();
 
         try app.initVulkanResources();
 
@@ -994,6 +1359,7 @@ const App = struct {
     // Initialize Vulkan resources after the context is created
     fn initVulkanResources(self: *Self) !void {
         self.swapchain = try Swapchain.init(self.vk_ctx);
+        self.depth_buffer = try DepthBuffer.init(self.vk_ctx, self.swapchain.extent.width, self.swapchain.extent.height);
         self.descriptor_layout = try DescriptorSetLayout.init(self.vk_ctx, .Uniform);
         self.descriptor_pool = try DescriptorPool.init(self.vk_ctx, .Uniform);
         self.descriptor_set = try self.descriptor_pool.allocateSet(self.vk_ctx, self.descriptor_layout);
@@ -1006,18 +1372,52 @@ const App = struct {
         self.descriptor_pool.updateSet(self.vk_ctx, self.descriptor_set, self.uniform_buffer, UniformBufferObject);
 
         self.render_pass = try RenderPass.init(self.vk_ctx, &self.swapchain);
-        self.pipeline_layout = try PipelineLayout.init(self.vk_ctx, self.descriptor_layout, null);
+        try self.render_pass.initFrameBuffer(self.vk_ctx, &self.swapchain, self.depth_buffer.view);
+        self.pipeline_layout = try PipelineLayout.init(self.vk_ctx, .{
+            .pSetLayouts = &[_]c.VkDescriptorSetLayout{self.descriptor_layout.handle},
+            .setLayoutCount = 1,
+        });
         self.pipeline = try Pipeline.init(self.vk_ctx, self.render_pass, self.pipeline_layout, self.swapchain);
 
         // Initialize GUI at the end
-        self.gui_ctx = try gui.GuiContext.init(self.vk_ctx, self.render_pass);
+        self.gui_renderer = try gui.GuiRenderer.init(self.vk_ctx, self.render_pass, self.swapchain);
+    }
+
+    pub fn initUi(self: *Self) !void {
+        try self.main_ui.addButton(.{
+            .x = 10,
+            .y = 10,
+            .width = 150,
+            .height = 30,
+            .on_click = addLineCallback,
+            .data = .{ .button = .{ .text = "Add Line" } },
+        });
+
+        try self.main_ui.addButton(.{
+            .x = 10,
+            .y = 50,
+            .width = 150,
+            .height = 30,
+            .on_click = clearLinesCallback,
+            .data = .{ .button = .{ .text = "Clear Lines" } },
+        });
+
+        try self.main_ui.addButton(.{
+            .x = 10,
+            .y = 90,
+            .width = 150,
+            .height = 30,
+            .on_click = quitCallback,
+            .data = .{ .button = .{ .text = "Quit" } },
+        });
     }
 
     pub fn deinit(self: *Self) void {
         // Wait for device to be idle before cleaning up
         _ = c.vkDeviceWaitIdle(self.vk_ctx.device.handle);
 
-        self.gui_ctx.deinit(); // Deinit GUI resources
+        self.main_ui.deinit();
+        self.gui_renderer.deinit(); // Deinit GUI resources
         self.cleanupSwapchain();
 
         self.sync.deinit(self.vk_ctx);
@@ -1033,16 +1433,17 @@ const App = struct {
     }
 
     fn cleanupSwapchain(self: *Self) void {
-        self.gui_ctx.destroyPipeline();
+        self.gui_renderer.destroyPipeline();
         self.pipeline.deinit(self.vk_ctx);
         self.pipeline_layout.deinit(self.vk_ctx);
         self.render_pass.deinit(self.vk_ctx);
+        self.depth_buffer.deinit(self.vk_ctx);
         self.swapchain.deinit(self.vk_ctx);
     }
 
     pub fn run(self: *Self) !void {
         while (c.glfwWindowShouldClose(self.window.handle) == 0) {
-            self.gui_ctx.beginFrame();
+            self.gui_renderer.beginFrame();
             self.wd_ctx.beginFrame();
             c.glfwPollEvents();
             if (self.wd_ctx.processCameraInput(&self.scene)) {
@@ -1053,24 +1454,7 @@ const App = struct {
                 c.glfwWaitEvents();
                 continue;
             }
-            // Draw the UI Widgets.
-            if (self.gui_ctx.button(10, 10, 150, 30)) {
-                var prng = rand.DefaultPrng.init(@intCast(std.time.milliTimestamp()));
-                const random = prng.random();
-                try self.scene.addVector(
-                    .{ 0, 0, 0 },
-                    .{
-                        random.float(f32) * 2.0 - 1.0,
-                        random.float(f32) * 2.0 - 1.0,
-                        random.float(f32) * 2.0 - 1.0,
-                    },
-                );
-                try self.updateVertexBuffer();
-            }
-            if (self.gui_ctx.button(10, 50, 150, 30)) {
-                self.scene.clear();
-                try self.updateVertexBuffer();
-            }
+            self.gui_renderer.processAndDrawUi(self, &self.main_ui);
             // self.gui_ctx.draw();
             try self.draw();
         }
@@ -1147,7 +1531,6 @@ const App = struct {
     }
 
     fn updateVertexBuffer(self: *Self) !void {
-        // c.vkWa
         const buffer_size = @sizeOf(Vertex) * self.scene.getTotalVertexCount();
         if (buffer_size == 0) return;
 
@@ -1186,30 +1569,49 @@ const App = struct {
 
     fn recreateSwapchain(self: *Self) !void {
         try vkCheck(c.vkDeviceWaitIdle(self.vk_ctx.device.handle));
-
-        self.cleanupSwapchain(); // This now correctly calls gui_ctx.destroyPipeline()
+        self.cleanupSwapchain();
 
         self.swapchain = try Swapchain.init(self.vk_ctx);
+        self.depth_buffer = try DepthBuffer.init(self.vk_ctx, self.swapchain.extent.width, self.swapchain.extent.height);
         self.render_pass = try RenderPass.init(self.vk_ctx, &self.swapchain);
-        self.pipeline_layout = try PipelineLayout.init(self.vk_ctx, self.descriptor_layout, null);
+        try self.render_pass.initFrameBuffer(self.vk_ctx, &self.swapchain, self.depth_buffer.view);
+        self.pipeline_layout = try PipelineLayout.init(self.vk_ctx, .{
+            .pSetLayouts = &self.descriptor_layout.handle,
+            .setLayoutCount = 1,
+        });
         self.pipeline = try Pipeline.init(self.vk_ctx, self.render_pass, self.pipeline_layout, self.swapchain);
-
-        // Recreate ONLY the GUI pipeline with the new render pass
-        try self.gui_ctx.createPipeline(self.render_pass);
+        try self.gui_renderer.createPipeline(self.render_pass, self.swapchain);
     }
 
     pub fn recordCommandBuffer(self: *Self, image_index: u32) !void {
         const begin_info = c.VkCommandBufferBeginInfo{};
         try vkCheck(c.vkBeginCommandBuffer(self.command_buffer.handle, &begin_info));
 
-        const clear_color = c.VkClearValue{ .color = .{ .float32 = .{ 0.1, 0.1, 0.1, 1.0 } } };
+        const clear_values = [_]c.VkClearValue{
+            // Color attachment clear value
+            .{ .color = .{ .float32 = .{ 0.1, 0.1, 0.1, 1.0 } } },
+            // Depth attachment clear value
+            .{ .depthStencil = .{ .depth = 0.0, .stencil = 0 } },
+        };
+
         const render_pass_info = c.VkRenderPassBeginInfo{
             .renderPass = self.render_pass.handle,
             .framebuffer = self.render_pass.framebuffer[image_index],
-            .renderArea = .{ .offset = .{ .x = 0, .y = 0 }, .extent = self.swapchain.extent },
-            .clearValueCount = 1,
-            .pClearValues = &clear_color,
+            .renderArea = .{
+                .offset = .{ .x = 0, .y = 0 },
+                .extent = self.swapchain.extent,
+            },
+            .clearValueCount = clear_values.len,
+            .pClearValues = &clear_values,
         };
+
+        // const render_pass_info = c.VkRenderPassBeginInfo{
+        //     .renderPass = self.render_pass.handle,
+        //     .framebuffer = self.render_pass.framebuffer[image_index],
+        //     .renderArea = .{ .offset = .{ .x = 0, .y = 0 }, .extent = self.swapchain.extent },
+        //     .clearValueCount = 1,
+        //     .pClearValues = &clear_color,
+        // };
         c.vkCmdBeginRenderPass(self.command_buffer.handle, &render_pass_info, c.VK_SUBPASS_CONTENTS_INLINE);
         c.vkCmdBindPipeline(self.command_buffer.handle, c.VK_PIPELINE_BIND_POINT_GRAPHICS, self.pipeline.handle);
         const vertex_buffers = [_]c.VkBuffer{self.vertex_buffer.handle};
@@ -1217,7 +1619,7 @@ const App = struct {
         c.vkCmdBindVertexBuffers(self.command_buffer.handle, 0, 1, &vertex_buffers, &offsets);
         c.vkCmdBindDescriptorSets(self.command_buffer.handle, c.VK_PIPELINE_BIND_POINT_GRAPHICS, self.pipeline_layout.handle, 0, 1, &self.descriptor_set, 0, null);
         c.vkCmdDraw(self.command_buffer.handle, @intCast(self.scene.getTotalVertexCount()), 1, 0, 0);
-        self.gui_ctx.endFrame(
+        self.gui_renderer.endFrame(
             self.command_buffer.handle,
             @floatFromInt(self.window.size.x),
             @floatFromInt(self.window.size.y),
@@ -1231,7 +1633,7 @@ pub fn main() !void {
     try checkGlfw(c.glfwInit());
     defer c.glfwTerminate();
 
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
