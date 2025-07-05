@@ -213,6 +213,7 @@ pub const WindowContext = struct {
 
     /// Processes camera movement based on its state.
     /// Returns true if the camera was updated.
+    /// TODO: Improve
     pub fn processCameraInput(self: Self, s: *Scene) bool {
         var updated = false;
 
@@ -225,7 +226,6 @@ pub const WindowContext = struct {
             updated = true;
         }
         if (self.left_mouse_down) {
-            // Pitch/Yaw change
             // Scale mouse delta to a reasonable radian value.
             const pitch_change = @as(f32, @floatCast(self.cursor_dy)) * 0.005;
             const yaw_change = @as(f32, @floatCast(self.cursor_dx)) * 0.005;
@@ -237,7 +237,6 @@ pub const WindowContext = struct {
     }
 
     // --- Callback Handlers (called by GLFW callbacks) ---
-
     pub fn handleCursorPos(self: *Self, x: f64, y: f64) void {
         // On first event, just store position to avoid a large jump.
         if (self.last_cursor_x == -1.0) {
@@ -356,7 +355,6 @@ const PhysicalDevice = struct {
         }
         return error.NoSuitableQueueFamily;
     }
-    pub fn deinit(_: *Self) void {} //TODO: remove
 
     pub fn findMemoryType(self: Self, type_filter: u32, properties: c.VkMemoryPropertyFlags) !u32 {
         var mem_props: c.VkPhysicalDeviceMemoryProperties = undefined;
@@ -390,7 +388,7 @@ const PhysicalDevice = struct {
         return error.NoSuitableFormatFound;
     }
 
-    // And a specific helper for the depth format
+    // Helper for the depth format
     pub fn findDepthFormat(self: Self) !c.VkFormat {
         return findSupportedFormat(
             self,
@@ -445,9 +443,10 @@ const Queue = struct {
 
     pub fn deinit(_: *Self) void {} // TODO: remove
 
-    // pub fn submit(self: *Self, )
+    // pub fn submit(self: *Self, ) // TODO: create
 };
 
+// TODO: Improve this abstraction to be used in the UI render logic
 const CommandBuffer = struct {
     const Self = @This();
     handle: c.VkCommandBuffer = undefined,
@@ -535,6 +534,7 @@ pub const Swapchain = struct {
     pub fn init(vk_ctx: *VulkanContext) !Self {
         var self = Self{ .owner = vk_ctx.device.handle };
 
+        // TODO: Abstract this under `PhysicalDevice`
         var fmt_count: u32 = 0;
         try vkCheck(c.vkGetPhysicalDeviceSurfaceFormatsKHR(vk_ctx.physical_device.handle, vk_ctx.surface.handle, &fmt_count, null));
         const fmts = try vk_ctx.allocator.alloc(c.VkSurfaceFormatKHR, fmt_count);
@@ -581,6 +581,7 @@ pub const Swapchain = struct {
         };
         try vkCheck(c.vkCreateSwapchainKHR(vk_ctx.device.handle, &create_info, null, &self.handle));
 
+        // TODO: Refactor rest of this function
         var img_count: u32 = undefined;
         try vkCheck(c.vkGetSwapchainImagesKHR(vk_ctx.device.handle, self.handle, &img_count, null));
         self.images = try vk_ctx.allocator.alloc(c.VkImage, img_count);
@@ -644,6 +645,7 @@ pub const Image = struct {
             .sharingMode = c.VK_SHARING_MODE_EXCLUSIVE,
         };
 
+        // TODO: Refactor this under `Device` abstraction
         var image_handle: c.VkImage = undefined;
         try vkCheck(c.vkCreateImage(vk_ctx.device.handle, &image_info, null, &image_handle));
 
@@ -701,6 +703,7 @@ pub const Image = struct {
     }
 
     /// Transitions the image from one layout to another using a barrier.
+    /// TODO: Refactor to use vocabullary types and methods
     pub fn transitionLayout(
         self: Image,
         vk_ctx: *VulkanContext,
@@ -876,7 +879,6 @@ pub const RenderPass = struct {
             .layout = c.VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
         };
 
-        // 3. Point the subpass description to it
         const subpass = c.VkSubpassDescription{
             .pipelineBindPoint = c.VK_PIPELINE_BIND_POINT_GRAPHICS,
             .colorAttachmentCount = 1,
@@ -884,7 +886,7 @@ pub const RenderPass = struct {
             .pDepthStencilAttachment = &depth_attachment_ref, // Set this!
         };
 
-        // 4. Update the render pass create info
+        // RenderPass create info
         const attachments = [_]c.VkAttachmentDescription{ color_attachment, depth_attachment };
         const create_info = c.VkRenderPassCreateInfo{
             .attachmentCount = attachments.len,
@@ -1022,7 +1024,7 @@ pub const Buffer = struct {
         c.vkUnmapMemory(vk_ctx.device.handle, self.memory);
     }
 
-    ///TODO: use vocabullary type methods
+    ///TODO: Use CommandBuffer vocabullary type methods
     pub fn copyTo(self: *Self, vk_ctx: *VulkanContext, dst_buffer: Buffer) !void {
         const alloc_info = c.VkCommandBufferAllocateInfo{
             .level = c.VK_COMMAND_BUFFER_LEVEL_PRIMARY,
@@ -1051,6 +1053,7 @@ pub const Buffer = struct {
     }
 };
 
+// TODO: Pass in PushConstantType
 pub const PushConstantRange = struct {
     const Self = @This();
 
@@ -1250,7 +1253,7 @@ pub const Pipeline = struct {
         var depth_stencil = c.VkPipelineDepthStencilStateCreateInfo{
             .depthTestEnable = c.VK_TRUE,
             .depthWriteEnable = c.VK_TRUE,
-            // THE KEY CHANGE: Use GREATER or GREATER_OR_EQUAL
+            // GREATER or GREATER_OR_EQUAL
             .depthCompareOp = c.VK_COMPARE_OP_GREATER_OR_EQUAL,
             .depthBoundsTestEnable = c.VK_FALSE,
             .stencilTestEnable = c.VK_FALSE,
@@ -1315,7 +1318,6 @@ pub const VulkanContext = struct {
         self.command_pool.deinit(self);
         self.graphics_queue.deinit();
         self.device.deinit();
-        self.physical_device.deinit();
         self.surface.deinit(self);
         self.instance.deinit();
     }
@@ -1401,6 +1403,7 @@ pub const App = struct {
         self.gui_renderer = try gui.GuiRenderer.init(self.vk_ctx, self.render_pass, self.swapchain);
     }
 
+    ///
     pub fn initUi(self: *Self) !void {
         try self.main_ui.addButton(.{
             .x = 10,
@@ -1464,7 +1467,9 @@ pub const App = struct {
             self.perf.beginFrame();
             self.gui_renderer.beginFrame();
             self.wd_ctx.beginFrame();
+
             c.glfwPollEvents();
+
             if (self.wd_ctx.processCameraInput(&self.scene)) {
                 try self.updateUniformBuffer();
             }
@@ -1473,9 +1478,9 @@ pub const App = struct {
                 c.glfwWaitEvents();
                 continue;
             }
+
             self.gui_renderer.processAndDrawUi(self, &self.main_ui);
 
-            // self.gui_ctx.draw();
             self.perf.endFrame();
             const fps = std.fmt.allocPrint(self.vk_ctx.allocator, "fps: {d:1}", .{self.perf.avg_fps}) catch unreachable;
             defer self.vk_ctx.allocator.free(fps);
@@ -1486,7 +1491,7 @@ pub const App = struct {
                 @as(f32, @floatFromInt(self.window.size.y)) - 80.0,
                 .{ 1.0, 0.0, 0.5, 1.0 },
                 0.8,
-            ); // Yellow text at bottom-left
+            );
 
             try self.draw();
         }
