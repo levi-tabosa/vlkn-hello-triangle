@@ -15,5 +15,5 @@ void main() {
 
     // Modulate the vertex color with the texture's alpha.
     // This tints the text and makes the background transparent.
-    outColor = vec4(fragColor.rgb, fragColor.a * 0.1);
+    outColor = vec4(fragColor.rgb, fragColor.a * alpha + vec4(0.1) );
 }

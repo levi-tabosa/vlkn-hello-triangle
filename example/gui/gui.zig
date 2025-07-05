@@ -7,7 +7,6 @@ const font = @import("font.zig");
 const gui_vert_shader_code = @import("spirv").gui_vs;
 const gui_frag_shader_code = @import("spirv").gui_fs;
 
-const Font = font.Font;
 const OnClickFn = *const fn (app: *anyopaque) void;
 
 const WidgetData = union(enum) {
@@ -182,9 +181,15 @@ pub const GuiRenderer = struct {
         self.image_handle = image;
         std.debug.print("{} {} {}\n", .{ image.width, image.height, image.pixels.len });
 
-        const image_size: u64 = @intCast(image.width * image.height);
+        const bytes_per_pixel = image.bit_depth / 8;
+        const image_size: u64 = @intCast(image.width * image.height * bytes_per_pixel);
 
-        var staging_buffer = try vk.Buffer.init(self.vk_ctx, image_size, c.VK_BUFFER_USAGE_TRANSFER_SRC_BIT, c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        var staging_buffer = try vk.Buffer.init(
+            self.vk_ctx,
+            image_size,
+            c.VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+            c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+        );
         defer staging_buffer.deinit(self.vk_ctx);
 
         const data_ptr = try staging_buffer.map(self.vk_ctx, u8);
@@ -195,7 +200,7 @@ pub const GuiRenderer = struct {
             self.vk_ctx,
             @intCast(image.width),
             @intCast(image.height),
-            c.VK_FORMAT_R8_UNORM,
+            if (image.bit_depth == 8) c.VK_FORMAT_R8_UNORM else c.VK_FORMAT_R16_UNORM,
             c.VK_IMAGE_TILING_OPTIMAL,
             c.VK_IMAGE_USAGE_TRANSFER_DST_BIT | c.VK_IMAGE_USAGE_SAMPLED_BIT,
             c.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
@@ -664,6 +669,7 @@ pub fn loadPngGrayscale(
         try decompressor.reader().readAllArrayList(&decompressed_buffer, std.math.maxInt(usize));
     }
     const filtered_scanlines = decompressed_buffer.items;
+
     const bytes_per_pixel = header.bit_depth / 8;
     const scanline_length = header.width * bytes_per_pixel;
     const expected_filtered_size = header.height * (1 + scanline_length);
@@ -723,3 +729,97 @@ pub fn loadPngGrayscale(
     }
     return PngImage{ .width = header.width, .height = header.height, .bit_depth = header.bit_depth, .pixels = final_pixels };
 }
+pub const Glyph = struct {
+    id: u32,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+    xoffset: f32,
+    yoffset: f32,
+    xadvance: f32,
+};
+
+pub const Font = struct {
+    allocator: std.mem.Allocator,
+    glyphs: std.AutoHashMap(u32, Glyph),
+    line_height: f32 = 0,
+    base: f32 = 0,
+    scale_w: f32 = 0,
+    scale_h: f32 = 0,
+
+    pub fn init(allocator: std.mem.Allocator) Font {
+        return .{
+            .allocator = allocator,
+            .glyphs = std.AutoHashMap(u32, Glyph).init(allocator),
+        };
+    }
+
+    pub fn deinit(self: *Font) void {
+        self.glyphs.deinit();
+    }
+
+    // Helper function to make parsing robust
+    fn parseKeyValue(part: []const u8) ?struct { key: []const u8, value: []const u8 } {
+        const eq_idx = std.mem.indexOfScalar(u8, part, '=') orelse return null;
+        const key = part[0..eq_idx];
+        var value = part[eq_idx + 1 ..];
+        // Strip quotes if they exist
+        if (value.len >= 2 and value[0] == '"' and value[value.len - 1] == '"') {
+            value = value[1 .. value.len - 1];
+        }
+        return .{ .key = key, .value = value };
+    }
+
+    pub fn loadFNT(self: *Font) !void {
+        const file_contents = @import("font").mikado_medium_fed68123_fnt;
+
+        var lines = std.mem.splitScalar(u8, file_contents, '\n');
+        while (lines.next()) |line| {
+            const trimmed_line = std.mem.trim(u8, line, " \r");
+            if (trimmed_line.len == 0) continue;
+
+            var parts = std.mem.tokenizeScalar(u8, trimmed_line, ' ');
+            const tag = parts.next() orelse continue;
+
+            if (std.mem.eql(u8, tag, "common")) {
+                while (parts.next()) |part| {
+                    const kv = parseKeyValue(part) orelse continue;
+                    if (std.mem.eql(u8, kv.key, "lineHeight")) self.line_height = try std.fmt.parseFloat(f32, kv.value);
+                    if (std.mem.eql(u8, kv.key, "base")) self.base = try std.fmt.parseFloat(f32, kv.value);
+                    if (std.mem.eql(u8, kv.key, "scaleW")) self.scale_w = try std.fmt.parseFloat(f32, kv.value);
+                    if (std.mem.eql(u8, kv.key, "scaleH")) self.scale_h = try std.fmt.parseFloat(f32, kv.value);
+                }
+            } else if (std.mem.eql(u8, tag, "char")) {
+                var glyph = Glyph{ .id = 0, .x = 0, .y = 0, .width = 0, .height = 0, .xoffset = 0, .yoffset = 0, .xadvance = 0 };
+                var id_parsed = false;
+
+                while (parts.next()) |part| {
+                    const kv = parseKeyValue(part) orelse continue;
+                    if (std.mem.eql(u8, kv.key, "id")) {
+                        glyph.id = try std.fmt.parseInt(u32, kv.value, 10);
+                        id_parsed = true;
+                    } else if (std.mem.eql(u8, kv.key, "x")) {
+                        glyph.x = try std.fmt.parseInt(u32, kv.value, 10);
+                    } else if (std.mem.eql(u8, kv.key, "y")) {
+                        glyph.y = try std.fmt.parseInt(u32, kv.value, 10);
+                    } else if (std.mem.eql(u8, kv.key, "width")) {
+                        glyph.width = try std.fmt.parseInt(u32, kv.value, 10);
+                    } else if (std.mem.eql(u8, kv.key, "height")) {
+                        glyph.height = try std.fmt.parseInt(u32, kv.value, 10);
+                    } else if (std.mem.eql(u8, kv.key, "xoffset")) {
+                        glyph.xoffset = try std.fmt.parseFloat(f32, kv.value);
+                    } else if (std.mem.eql(u8, kv.key, "yoffset")) {
+                        glyph.yoffset = try std.fmt.parseFloat(f32, kv.value);
+                    } else if (std.mem.eql(u8, kv.key, "xadvance")) {
+                        glyph.xadvance = try std.fmt.parseFloat(f32, kv.value);
+                    }
+                }
+
+                if (id_parsed) { // Only put valid glyphs
+                    try self.glyphs.put(glyph.id, glyph);
+                }
+            }
+        }
+    }
+};
