@@ -493,7 +493,7 @@ pub const GuiRenderer = struct {
         self.index_count += 6;
     }
 
-    fn drawText(self: *Self, text: []const u8, x_start: f32, y_start: f32, color: [4]f32, scale: f32) void {
+    pub fn drawText(self: *Self, text: []const u8, x_start: f32, y_start: f32, color: [4]f32, scale: f32) void {
         var current_x = x_start;
         const scale_w = self.font.scale_w;
         const scale_h = self.font.scale_h;

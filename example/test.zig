@@ -730,27 +730,28 @@ pub const Image = struct {
         destination_stage = c.VK_PIPELINE_STAGE_TRANSFER_BIT;
 
         // Determine pipeline stages and access masks based on layout transition
-        // if (old_layout == c.VK_IMAGE_LAYOUT_UNDEFINED and new_layout == c.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) {
-        //     barrier.srcAccessMask = 0;
-        //     barrier.dstAccessMask = c.VK_ACCESS_TRANSFER_WRITE_BIT;
+        // TODO: if-elses maybe unnecessary
+        if (old_layout == c.VK_IMAGE_LAYOUT_UNDEFINED and new_layout == c.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) {
+            barrier.srcAccessMask = 0;
+            barrier.dstAccessMask = c.VK_ACCESS_TRANSFER_WRITE_BIT;
 
-        //     source_stage = c.VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
-        //     destination_stage = c.VK_PIPELINE_STAGE_TRANSFER_BIT;
-        // } else if (old_layout == c.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL and new_layout == c.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
-        //     barrier.srcAccessMask = c.VK_ACCESS_TRANSFER_WRITE_BIT;
-        //     barrier.dstAccessMask = c.VK_ACCESS_SHADER_READ_BIT;
+            source_stage = c.VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+            destination_stage = c.VK_PIPELINE_STAGE_TRANSFER_BIT;
+        } else if (old_layout == c.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL and new_layout == c.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
+            barrier.srcAccessMask = c.VK_ACCESS_TRANSFER_WRITE_BIT;
+            barrier.dstAccessMask = c.VK_ACCESS_SHADER_READ_BIT;
 
-        //     source_stage = c.VK_PIPELINE_STAGE_TRANSFER_BIT;
-        //     destination_stage = c.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-        // } else if (old_layout == c.VK_IMAGE_LAYOUT_UNDEFINED and new_layout == c.VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL) {
-        //     barrier.srcAccessMask = 0;
-        //     barrier.dstAccessMask = c.VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | c.VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+            source_stage = c.VK_PIPELINE_STAGE_TRANSFER_BIT;
+            destination_stage = c.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+        } else if (old_layout == c.VK_IMAGE_LAYOUT_UNDEFINED and new_layout == c.VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL) {
+            barrier.srcAccessMask = 0;
+            barrier.dstAccessMask = c.VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | c.VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
 
-        //     source_stage = c.VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
-        //     destination_stage = c.VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
-        // } else {
-        //     return error.UnsupportedLayoutTransition;
-        // }
+            source_stage = c.VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+            destination_stage = c.VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+        } else {
+            return error.UnsupportedLayoutTransition;
+        }
 
         c.vkCmdPipelineBarrier(command_buffer.handle, source_stage, destination_stage, 0, 0, null, 0, null, 1, &barrier);
 
@@ -830,6 +831,7 @@ pub const RenderPass = struct {
     pub fn init(vk_ctx: *VulkanContext, swapchain: *Swapchain) !Self {
         var self = Self{ .owner = vk_ctx.device.handle };
 
+        // Essencial for framebuffer color baking
         const color_attachment = c.VkAttachmentDescription{
             .format = swapchain.image_format.format,
             .samples = c.VK_SAMPLE_COUNT_1_BIT,
@@ -854,6 +856,8 @@ pub const RenderPass = struct {
             .dstAccessMask = c.VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
         };
 
+        // Depth setup routine avoids far clipping
+
         const depth_format = try vk_ctx.physical_device.findDepthFormat();
         const depth_attachment = c.VkAttachmentDescription{
             .format = depth_format,
@@ -866,7 +870,7 @@ pub const RenderPass = struct {
             .finalLayout = c.VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
         };
 
-        // 2. Create an attachment reference for the subpass
+        // Create an attachment reference for the subpass
         const depth_attachment_ref = c.VkAttachmentReference{
             .attachment = 1, // Color is 0, Depth is 1
             .layout = c.VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
@@ -1018,6 +1022,7 @@ pub const Buffer = struct {
         c.vkUnmapMemory(vk_ctx.device.handle, self.memory);
     }
 
+    ///TODO: use vocabullary type methods
     pub fn copyTo(self: *Self, vk_ctx: *VulkanContext, dst_buffer: Buffer) !void {
         const alloc_info = c.VkCommandBufferAllocateInfo{
             .level = c.VK_COMMAND_BUFFER_LEVEL_PRIMARY,
@@ -1040,7 +1045,7 @@ pub const Buffer = struct {
             .commandBufferCount = 1,
             .pCommandBuffers = &command_buffer,
         };
-        // try vk_ctx.graphics_queue.
+
         try vkCheck(c.vkQueueSubmit(vk_ctx.graphics_queue.handle, 1, &submit_info, null));
         try vkCheck(c.vkQueueWaitIdle(vk_ctx.graphics_queue.handle));
     }
@@ -1139,7 +1144,7 @@ pub const DescriptorPool = struct {
 pub const ShaderModule = struct {
     const Self = @This();
     handle: c.VkShaderModule = undefined,
-    owner: c.VkDevice,
+    owner: c.VkDevice, // TODO: REMOVE
 
     pub fn init(allocator: Allocator, device_handle: c.VkDevice, code: []const u8) !Self {
         var self = Self{ .owner = device_handle };
@@ -1430,7 +1435,7 @@ pub const App = struct {
         _ = c.vkDeviceWaitIdle(self.vk_ctx.device.handle);
 
         self.main_ui.deinit();
-        self.gui_renderer.deinit(); // Deinit GUI resources
+        self.gui_renderer.deinit();
         self.cleanupSwapchain();
 
         self.sync.deinit(self.vk_ctx);
@@ -1469,9 +1474,21 @@ pub const App = struct {
                 continue;
             }
             self.gui_renderer.processAndDrawUi(self, &self.main_ui);
+
             // self.gui_ctx.draw();
-            try self.draw();
             self.perf.endFrame();
+            const fps = std.fmt.allocPrint(self.vk_ctx.allocator, "fps: {d:1}", .{self.perf.avg_fps}) catch unreachable;
+            defer self.vk_ctx.allocator.free(fps);
+
+            self.gui_renderer.drawText(
+                fps,
+                10.0,
+                @as(f32, @floatFromInt(self.window.size.y)) - 80.0,
+                .{ 1.0, 0.0, 0.5, 1.0 },
+                0.8,
+            ); // Yellow text at bottom-left
+
+            try self.draw();
         }
     }
 
