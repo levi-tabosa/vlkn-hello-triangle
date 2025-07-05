@@ -1,9 +1,9 @@
-// build.zig
 const std = @import("std");
 
 fn linkVulkanAndGlfwLibs(exe: *std.Build.Step.Compile, target: std.Build.ResolvedTarget) void {
     exe.linkSystemLibrary("vulkan");
     exe.linkSystemLibrary("glfw");
+    exe.linkSystemLibrary("c");
     if (target.result.os.tag == .linux) {
         exe.linkSystemLibrary("m");
         exe.linkSystemLibrary("pthread");
@@ -12,6 +12,24 @@ fn linkVulkanAndGlfwLibs(exe: *std.Build.Step.Compile, target: std.Build.Resolve
         exe.linkSystemLibrary("xcb");
         exe.linkSystemLibrary("Xrandr");
     }
+}
+
+fn addShaderStep(
+    b: *std.Build,
+    glsl_path: []const u8,
+    spv_path: []const u8,
+    install_path: []const u8,
+    all_shader_steps: *std.ArrayList(*std.Build.Step),
+) !*std.Build.Step {
+    const compile_step = b.addSystemCommand(&.{ "glslc", glsl_path });
+    compile_step.addFileInput(b.path(glsl_path));
+    try all_shader_steps.append(&compile_step.step);
+
+    const install_step = b.addInstallFile(
+        compile_step.addPrefixedOutputFileArg("-o", spv_path),
+        install_path,
+    );
+    return &install_step.step;
 }
 
 pub fn build(b: *std.Build) !void {
@@ -33,56 +51,24 @@ pub fn build(b: *std.Build) !void {
     var all_shader_steps = std.ArrayList(*std.Build.Step).init(b.allocator);
     defer all_shader_steps.deinit();
 
+    // Common shaders (GUI, text)
+    const gui_vert_shader_source = "src/shaders/code/gui/gui.vert";
+    const gui_frag_shader_source = "src/shaders/code/gui/gui.frag";
+    const gui_vert_shader_output = "spirv/bin/gui.vert.spv";
+    const gui_frag_shader_output = "spirv/bin/gui.frag.spv";
+
+    const install_gui_vert_shader = try addShaderStep(b, gui_vert_shader_source, gui_vert_shader_output, "../src/shaders/spirv/bin/gui.vert.spv", &all_shader_steps);
+    const install_gui_frag_shader = try addShaderStep(b, gui_frag_shader_source, gui_frag_shader_output, "../src/shaders/spirv/bin/gui.frag.spv", &all_shader_steps);
+
     for (executables) |exe_info| {
-        // --- DEFINE SHADER PATHS ---
         const shader_code_path = "src/shaders/code/";
         const vert_shader_source = b.fmt(shader_code_path ++ "{s}/{s}.vert", .{ exe_info.step_id, exe_info.step_id });
         const frag_shader_source = b.fmt(shader_code_path ++ "{s}/{s}.frag", .{ exe_info.step_id, exe_info.step_id });
-        const gui_vert_shader_source = shader_code_path ++ "gui/gui.vert";
-        const gui_frag_shader_source = shader_code_path ++ "gui/gui.frag";
         const vert_shader_output = b.fmt("spirv/bin/{s}.vert.spv", .{exe_info.step_id});
         const frag_shader_output = b.fmt("spirv/bin/{s}.frag.spv", .{exe_info.step_id});
-        const gui_vert_shader_output = "spirv/bin/gui.vert.spv";
-        const gui_frag_shader_output = "spirv/bin/gui.frag.spv";
-        // --- COMPILE VERTEX SHADER ---
-        const compile_vert_step = b.addSystemCommand(&.{ "glslc", vert_shader_source });
-        compile_vert_step.addFileInput(b.path(vert_shader_source));
-        try all_shader_steps.append(&compile_vert_step.step);
 
-        const install_vert_shader = b.addInstallFile(
-            compile_vert_step.addPrefixedOutputFileArg("-o", vert_shader_output),
-            "../src/shaders/spirv/bin/vert.spv",
-        );
-
-        // --- COMPILE FRAGMENT SHADER ---
-        const compile_frag_step = b.addSystemCommand(&.{ "glslc", frag_shader_source });
-        compile_frag_step.addFileInput(b.path(frag_shader_source));
-        try all_shader_steps.append(&compile_frag_step.step);
-
-        const intall_frag_shader = b.addInstallFile(
-            compile_frag_step.addPrefixedOutputFileArg("-o", frag_shader_output),
-            "../src/shaders/spirv/bin/frag.spv",
-        );
-
-        // --- COPILE GUI VERTEX SHADER
-        const gui_compile_vert_step = b.addSystemCommand(&.{ "glslc", gui_vert_shader_source });
-        gui_compile_vert_step.addFileInput(b.path(gui_vert_shader_source));
-        try all_shader_steps.append(&gui_compile_vert_step.step);
-
-        const install_gui_vert_shader = b.addInstallFile(
-            gui_compile_vert_step.addPrefixedOutputFileArg("-o", gui_vert_shader_output),
-            "../src/shaders/spirv/bin/gui.vert.spv",
-        );
-
-        // --- COPILE GUI FRAGMENT SHADER
-        const gui_compile_frag_step = b.addSystemCommand(&.{ "glslc", gui_frag_shader_source });
-        gui_compile_frag_step.addFileInput(b.path(gui_frag_shader_source));
-        try all_shader_steps.append(&gui_compile_frag_step.step);
-
-        const install_gui_frag_shader = b.addInstallFile(
-            gui_compile_frag_step.addPrefixedOutputFileArg("-o", gui_frag_shader_output),
-            "../src/shaders/spirv/bin/gui.frag.spv",
-        );
+        const install_vert_shader = try addShaderStep(b, vert_shader_source, vert_shader_output, "../src/shaders/spirv/bin/vert.spv", &all_shader_steps);
+        const install_frag_shader = try addShaderStep(b, frag_shader_source, frag_shader_output, "../src/shaders/spirv/bin/frag.spv", &all_shader_steps);
 
         // --- COMPILE EXECUTABLE ---
         const exe = b.addExecutable(.{
@@ -92,34 +78,31 @@ pub fn build(b: *std.Build) !void {
             .root_source_file = b.path(exe_info.source),
         });
 
-        // C module
         exe.root_module.addAnonymousImport("c", .{
             .root_source_file = b.path("src/c/c.zig"),
             .target = target,
         });
-
-        // The spirv module gets the shaders for the executable.
         exe.root_module.addAnonymousImport("spirv", .{
             .root_source_file = b.path("src/shaders/spirv/spirv.zig"),
             .target = target,
         });
-
-        // Scene modules
+        exe.root_module.addAnonymousImport("font", .{
+            .root_source_file = b.path("src/fonts/fonts.zig"),
+            .target = target,
+        });
         exe.root_module.addAnonymousImport("geometry", .{
             .root_source_file = b.path("src/scenes/geometry.zig"),
             .target = target,
         });
 
         // The executable's compile step must depend on its shaders being cached or recompiled.
-        exe.step.dependOn(&install_vert_shader.step);
-        exe.step.dependOn(&intall_frag_shader.step);
-        exe.step.dependOn(&install_gui_vert_shader.step);
-        exe.step.dependOn(&install_gui_frag_shader.step);
+        exe.step.dependOn(install_vert_shader);
+        exe.step.dependOn(install_frag_shader);
+        exe.step.dependOn(install_gui_vert_shader);
+        exe.step.dependOn(install_gui_frag_shader);
 
-        // Conditionally links libraries based on the target.
         linkVulkanAndGlfwLibs(exe, target);
 
-        // Installs the executable and sets up the run command.
         const install = b.addInstallArtifact(exe, .{
             .dest_dir = if (exe_info.install_dir) |dir|
                 .{ .override = .{ .custom = dir } }
@@ -128,14 +111,11 @@ pub fn build(b: *std.Build) !void {
         });
 
         const cmd = b.addRunArtifact(exe);
-        // Starting point for the build graph.
         const step = b.step(
             exe_info.step_id,
             exe_info.description orelse b.fmt("Run {s}", .{exe_info.step_id}),
         );
-
         step.dependOn(&cmd.step);
-        // Runs immediately after the executable is built.
         cmd.step.dependOn(&install.step);
     }
 }

@@ -3,7 +3,8 @@ const std = @import("std");
 const assert = std.debug.assert;
 const spirv = @import("spirv");
 const scene = @import("geometry");
-const gui = @import("./gui/gui.zig");
+const gui = @import("gui/gui.zig");
+const fps_tracker = @import("fps_tracker/performance_tracker.zig");
 //TODO: remove
 const rand = std.Random;
 const c = @import("c").c;
@@ -126,7 +127,8 @@ const Callbacks = struct {
     }
 };
 
-fn addLineCallback(app: *App) void {
+fn addLineCallback(ptr: *anyopaque) void {
+    const app: *App = @alignCast(@ptrCast(ptr));
     std.log.info("Button clicked: Adding a new line...", .{});
     var prng = rand.DefaultPrng.init(@intCast(std.time.milliTimestamp()));
     const random = prng.random();
@@ -141,12 +143,14 @@ fn addLineCallback(app: *App) void {
     app.updateVertexBuffer() catch unreachable;
 }
 
-fn clearLinesCallback(app: *App) void {
+fn clearLinesCallback(ptr: *anyopaque) void {
+    const app: *App = @alignCast(@ptrCast(ptr));
     std.log.info("Button clicked: Clearing lines.", .{});
     app.scene.clear();
 }
 
-fn quitCallback(app: *App) void {
+fn quitCallback(ptr: *anyopaque) void {
+    const app: *App = @alignCast(@ptrCast(ptr));
     std.log.info("Button clicked: Quitting.", .{});
     c.glfwSetWindowShouldClose(app.window.handle, 1);
 }
@@ -771,7 +775,7 @@ pub const Image = struct {
             .imageExtent = .{ .width = self.width, .height = self.height, .depth = 1 },
         };
 
-        c.vkCmdCopyBufferToImage(command_buffer, buffer.handle, self.handle, c.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+        c.vkCmdCopyBufferToImage(command_buffer.handle, buffer.handle, self.handle, c.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 
         try command_buffer.endSingleTimeCommands(vk_ctx);
     }
@@ -1049,7 +1053,7 @@ pub const PushConstantRange = struct {
 
     pub fn init(T: type) Self {
         return .{ .handle = .{
-            .stageFlags = c.VK_SHADER_STAGE_VERTEX_BIT | c.VK_SHADER_STAGE_FRAGMENT_BIT,
+            .stageFlags = c.VK_SHADER_STAGE_VERTEX_BIT,
             .offset = 0,
             .size = @sizeOf(T),
         } };
@@ -1058,9 +1062,11 @@ pub const PushConstantRange = struct {
 
 const DescriptorType = enum(u8) {
     Uniform,
+    CombinedImageSampler,
     pub fn getVkType(@"type": DescriptorType) c_uint {
         return switch (@"type") {
             .Uniform => c.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+            .CombinedImageSampler => c.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
         };
     }
 };
@@ -1086,14 +1092,18 @@ const DescriptorSetLayout = struct {
     }
 };
 
-const DescriptorPool = struct {
+pub const DescriptorPool = struct {
     const Self = @This();
     handle: c.VkDescriptorPool = undefined,
 
     pub fn init(vk_ctx: *VulkanContext, @"type": DescriptorType) !Self {
         var self = Self{};
         var pool_size = c.VkDescriptorPoolSize{ .type = @"type".getVkType(), .descriptorCount = 1 };
-        var pool_info = c.VkDescriptorPoolCreateInfo{ .poolSizeCount = 1, .pPoolSizes = &pool_size, .maxSets = 1 };
+        var pool_info = c.VkDescriptorPoolCreateInfo{
+            .poolSizeCount = 1,
+            .pPoolSizes = &pool_size,
+            .maxSets = 1,
+        };
         try vkCheck(c.vkCreateDescriptorPool(vk_ctx.device.handle, &pool_info, null, &self.handle));
         return self;
     }
@@ -1309,6 +1319,7 @@ pub const VulkanContext = struct {
 // --- MAIN APPLICATION STRUCT ---
 pub const App = struct {
     const Self = @This();
+
     allocator: Allocator,
     scene: Scene,
     window: Window,
@@ -1334,6 +1345,7 @@ pub const App = struct {
     sync: SyncObjects,
 
     framebuffer_resized: bool = false,
+    perf: fps_tracker.PerformanceTracker,
 
     /// Caller owns memory
     pub fn init(allocator: Allocator) !*Self {
@@ -1348,6 +1360,7 @@ pub const App = struct {
         app.scene = try Scene.init(allocator, 20);
         app.wd_ctx = .{};
         app.main_ui = gui.UI.init(allocator);
+        app.perf = fps_tracker.PerformanceTracker.init();
         try app.initUi();
 
         try app.initVulkanResources();
@@ -1443,6 +1456,7 @@ pub const App = struct {
 
     pub fn run(self: *Self) !void {
         while (c.glfwWindowShouldClose(self.window.handle) == 0) {
+            self.perf.beginFrame();
             self.gui_renderer.beginFrame();
             self.wd_ctx.beginFrame();
             c.glfwPollEvents();
@@ -1457,6 +1471,7 @@ pub const App = struct {
             self.gui_renderer.processAndDrawUi(self, &self.main_ui);
             // self.gui_ctx.draw();
             try self.draw();
+            self.perf.endFrame();
         }
     }
 
@@ -1605,13 +1620,6 @@ pub const App = struct {
             .pClearValues = &clear_values,
         };
 
-        // const render_pass_info = c.VkRenderPassBeginInfo{
-        //     .renderPass = self.render_pass.handle,
-        //     .framebuffer = self.render_pass.framebuffer[image_index],
-        //     .renderArea = .{ .offset = .{ .x = 0, .y = 0 }, .extent = self.swapchain.extent },
-        //     .clearValueCount = 1,
-        //     .pClearValues = &clear_color,
-        // };
         c.vkCmdBeginRenderPass(self.command_buffer.handle, &render_pass_info, c.VK_SUBPASS_CONTENTS_INLINE);
         c.vkCmdBindPipeline(self.command_buffer.handle, c.VK_PIPELINE_BIND_POINT_GRAPHICS, self.pipeline.handle);
         const vertex_buffers = [_]c.VkBuffer{self.vertex_buffer.handle};
