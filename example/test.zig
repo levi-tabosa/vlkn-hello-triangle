@@ -1403,7 +1403,7 @@ pub const App = struct {
             .width = 150,
             .height = 30,
             .on_click = addLineCallback,
-            .data = .{ .button = .{ .text = "Add Line" } },
+            .data = .{ .button = .{ .text = "Add Line", .font_size = 10.0 } },
         });
 
         try self.main_ui.addButton(.{
@@ -1412,16 +1412,16 @@ pub const App = struct {
             .width = 150,
             .height = 30,
             .on_click = clearLinesCallback,
-            .data = .{ .button = .{ .text = "Clear Lines" } },
+            .data = .{ .button = .{ .text = "Clear Lines", .font_size = 30.0 } },
         });
 
         try self.main_ui.addButton(.{
             .x = 10,
-            .y = 90,
+            .y = 550,
             .width = 150,
             .height = 30,
             .on_click = quitCallback,
-            .data = .{ .button = .{ .text = "Quit" } },
+            .data = .{ .button = .{ .text = "Quit", .font_size = 10.0 } },
         });
     }
 

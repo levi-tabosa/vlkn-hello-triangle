@@ -12,6 +12,7 @@ const OnClickFn = *const fn (app: *anyopaque) void;
 const WidgetData = union(enum) {
     button: struct {
         text: []const u8,
+        font_size: f32,
     },
 };
 
@@ -133,8 +134,6 @@ pub const GuiRenderer = struct {
 
         try self.font.loadFNT();
         try self.createFontTextureAndSampler(vk_ctx.allocator, @import("font").mikado_medium_fed68123_png);
-        // self.descriptor_pool = try vk.DescriptorPool.init(vk_ctx, .CombinedImageSampler);
-        // try self.createDescriptorPool();
         try self.createDescriptors();
         // Create buffers that are permanently mapped for easy writing
         const vtx_buffer_size = MAX_VERTICES * @sizeOf(GuiVertex);
@@ -175,7 +174,6 @@ pub const GuiRenderer = struct {
         self.index_buffer.deinit(self.vk_ctx);
     }
 
-    // Function to create font texture, view, and sampler
     fn createFontTextureAndSampler(self: *Self, allocator: std.mem.Allocator, png_data: []const u8) !void {
         const image = try loadPngGrayscale(allocator, png_data);
         self.image_handle = image;
@@ -215,6 +213,11 @@ pub const GuiRenderer = struct {
         const sampler_info = c.VkSamplerCreateInfo{
             .magFilter = c.VK_FILTER_LINEAR,
             .minFilter = c.VK_FILTER_LINEAR,
+            .addressModeU = c.VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+            .addressModeV = c.VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+            .addressModeW = c.VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+            .borderColor = c.VK_BORDER_COLOR_INT_OPAQUE_BLACK,
+            .unnormalizedCoordinates = c.VK_FALSE,
         };
         try vk.vkCheck(c.vkCreateSampler(self.vk_ctx.device.handle, &sampler_info, null, &self.font_sampler));
     }
@@ -232,7 +235,6 @@ pub const GuiRenderer = struct {
         try vk.vkCheck(c.vkCreateDescriptorPool(self.vk_ctx.device.handle, &pool_info, null, &self.descriptor_pool));
     }
 
-    //Function to create descriptor pool, layout, and sets
     fn createDescriptors(self: *Self) !void {
         const sampler_layout_binding = c.VkDescriptorSetLayoutBinding{
             .binding = 0,
@@ -240,7 +242,6 @@ pub const GuiRenderer = struct {
             .descriptorCount = 1,
             .stageFlags = c.VK_SHADER_STAGE_FRAGMENT_BIT,
         };
-        // TODO: change to vo
         const layout_info = c.VkDescriptorSetLayoutCreateInfo{ .bindingCount = 1, .pBindings = &sampler_layout_binding };
         try vk.vkCheck(c.vkCreateDescriptorSetLayout(self.vk_ctx.device.handle, &layout_info, null, &self.descriptor_set_layout));
 
@@ -279,8 +280,6 @@ pub const GuiRenderer = struct {
     }
 
     pub fn createPipeline(self: *Self, render_pass: vk.RenderPass, swapchain: vk.Swapchain) !void {
-        // _ = swapchain;
-        // 1. Pipeline Layout
         self.pipeline_layout = try vk.PipelineLayout.init(self.vk_ctx, .{
             .setLayoutCount = 1,
             .pSetLayouts = &self.descriptor_set_layout,
@@ -288,7 +287,6 @@ pub const GuiRenderer = struct {
             .pPushConstantRanges = &self.push_constants.handle,
         });
 
-        // 2. Shader Modules
         var vert_mod = try vk.ShaderModule.init(self.vk_ctx.allocator, self.vk_ctx.device.handle, gui_vert_shader_code);
         defer vert_mod.deinit();
         var frag_mod = try vk.ShaderModule.init(self.vk_ctx.allocator, self.vk_ctx.device.handle, gui_frag_shader_code);
@@ -326,7 +324,6 @@ pub const GuiRenderer = struct {
             .rasterizationSamples = c.VK_SAMPLE_COUNT_1_BIT,
         };
 
-        // --- Blending and No Depth Test ---
         const color_blend_attachment = c.VkPipelineColorBlendAttachmentState{
             .colorWriteMask = c.VK_COLOR_COMPONENT_R_BIT | c.VK_COLOR_COMPONENT_G_BIT | c.VK_COLOR_COMPONENT_B_BIT | c.VK_COLOR_COMPONENT_A_BIT,
             .blendEnable = c.VK_TRUE,
@@ -346,16 +343,6 @@ pub const GuiRenderer = struct {
             .depthTestEnable = c.VK_FALSE,
             .depthWriteEnable = c.VK_FALSE,
         };
-
-        // const dynamic_states = [_]c.VkDynamicState{
-        //     c.VK_DYNAMIC_STATE_VIEWPORT,
-        //     c.VK_DYNAMIC_STATE_SCISSOR,
-        // };
-
-        // const dynamic_state_info = c.VkPipelineDynamicStateCreateInfo{
-        //     .dynamicStateCount = dynamic_states.len,
-        //     .pDynamicStates = &dynamic_states,
-        // };
 
         const viewport = c.VkViewport{
             .x = 0.0,
@@ -386,14 +373,12 @@ pub const GuiRenderer = struct {
             .pMultisampleState = &multisampling,
             .pColorBlendState = &color_blending,
             .pDepthStencilState = &depth_stencil,
-            // .pDynamicState = &dynamic_state_info,
             .pViewportState = &viewport_state,
             .layout = self.pipeline_layout.handle,
             .renderPass = render_pass.handle,
             .subpass = 0,
         };
 
-        // self.pipeline = try vk.Pipeline.init(self.vk_ctx, render_pass, self.pipeline_layout);
         try vk.vkCheck(c.vkCreateGraphicsPipelines(self.vk_ctx.device.handle, null, 1, &pipeline_info, null, &self.pipeline.handle));
     }
 
@@ -419,38 +404,20 @@ pub const GuiRenderer = struct {
         c.vkCmdBindVertexBuffers(cmd_buffer, 0, 1, &vtx_buffers, &offsets);
         c.vkCmdBindIndexBuffer(cmd_buffer, self.index_buffer.handle, 0, c.VK_INDEX_TYPE_UINT32);
 
-        // const viewport = c.VkViewport{
-        //     .x = 0,
-        //     .y = 0,
-        //     .width = window_width,
-        //     .height = window_height,
-        //     .minDepth = 0,
-        //     .maxDepth = 1,
-        // };
-        // c.vkCmdSetViewport(cmd_buffer, 0, 1, &viewport);
-
-        // const scissor = c.VkRect2D{
-        //     .offset = .{ .x = 0, .y = 0 },
-        //     .extent = .{ .width = @intFromFloat(window_width), .height = @intFromFloat(window_height) },
-        // };
-        // c.vkCmdSetScissor(cmd_buffer, 0, 1, &scissor);
-
-        // Set orthographic projection matrix via push constants
         const L: f32 = 0;
         const R = window_width;
         const T: f32 = 0; // Top is at 0
         const B = window_height; // Bottom is at window_height
         const ortho_projection = [_]f32{
-            2.0 / (R - L), 0.0, 0.0, 0.0,
-            0.0, 2.0 / (B - T), 0.0, 0.0, // Note: No longer flips Y
-            0.0,                0.0,                1.0, 0.0, // Can use 1.0 for Z since we don't use depth
+            2.0 / (R - L),      0.0,                0.0, 0.0,
+            0.0,                2.0 / (B - T),      0.0, 0.0,
+            0.0,                0.0,                1.0, 0.0,
             -(R + L) / (R - L), -(B + T) / (B - T), 0.0, 1.0,
         };
         c.vkCmdPushConstants(cmd_buffer, self.pipeline_layout.handle, c.VK_SHADER_STAGE_VERTEX_BIT, 0, @sizeOf([16]f32), &ortho_projection);
 
         c.vkCmdDrawIndexed(cmd_buffer, self.index_count, 1, 0, 0, 0);
 
-        // De-activate widget if mouse button is released
         if (!self.mouse_state.left_button_down) {
             self.active_id = 0;
         }
@@ -458,10 +425,9 @@ pub const GuiRenderer = struct {
 
     pub fn processAndDrawUi(self: *Self, app: *anyopaque, ui_to_draw: *const UI) void {
         for (ui_to_draw.widgets.items, 1..) |widget, i| {
-            const id: u32 = @intCast(i); // Use index + 1 as the ID
+            const id: u32 = @intCast(i);
             var clicked = false;
 
-            // --- Interaction Logic (same as before, but generic) ---
             const mouse_x = self.mouse_state.x;
             const mouse_y = self.mouse_state.y;
 
@@ -474,16 +440,13 @@ pub const GuiRenderer = struct {
                 }
             }
 
-            // A click is registered on mouse-up if this widget was the active one.
             if (self.hot_id == id and self.active_id == id and !self.mouse_state.left_button_down) {
                 clicked = true;
             }
 
-            // --- Rendering Logic ---
             switch (widget.data) {
                 .button => |button_data| {
-                    const text_color = [4]f32{ 1.0, 1.0, 1.0, 1.0 }; // White text
-                    // Determine state and color
+                    const text_color = [4]f32{ 1.0, 0.0, 1.0, 1.0 }; // White text
                     var color: [4]f32 = .{ 0.3, 0.3, 0.8, 1.0 }; // Normal
                     if (self.hot_id == id) {
                         color = .{ 0.4, 0.4, 0.9, 1.0 }; // Hover
@@ -492,18 +455,19 @@ pub const GuiRenderer = struct {
                         }
                     }
                     self.drawRect(widget.x, widget.y, widget.width, widget.height, color);
-                    const text_width = self.measureText(button_data.text);
-                    const text_x = widget.x + (widget.width - text_width) / 2.0;
-                    const text_y = widget.y + (widget.height - self.font.line_height) / 2.0 + self.font.base;
 
-                    self.drawText(button_data.text, text_x, text_y, text_color);
+                    const scale = if (button_data.font_size > 0) button_data.font_size / self.font.font_size else 1.0;
+                    const text_width = self.measureText(button_data.text, scale);
+                    const text_x = widget.x + (widget.width - text_width) / 2.0;
+                    const scaled_line_height = self.font.line_height * scale;
+                    const text_y = widget.y + (widget.height - scaled_line_height) / 2.0;
+
+                    self.drawText(button_data.text, text_x, text_y, text_color, scale);
                 },
             }
 
-            // --- Callback Execution ---
             if (clicked) {
                 if (widget.on_click) |callback| {
-                    // Execute the function pointer!
                     callback(app);
                 }
             }
@@ -519,7 +483,6 @@ pub const GuiRenderer = struct {
         self.mapped_indices[self.index_count + 4] = v_idx + 2;
         self.mapped_indices[self.index_count + 5] = v_idx + 3;
 
-        // Dummy UVs for solid color rects
         const uv = [2]f32{ 0.0, 0.0 };
         self.mapped_vertices[v_idx] = .{ .pos = .{ x, y }, .uv = uv, .color = color };
         self.mapped_vertices[v_idx + 1] = .{ .pos = .{ x + w, y }, .uv = uv, .color = color };
@@ -530,7 +493,7 @@ pub const GuiRenderer = struct {
         self.index_count += 6;
     }
 
-    fn drawText(self: *Self, text: []const u8, x_start: f32, y_start: f32, color: [4]f32) void {
+    fn drawText(self: *Self, text: []const u8, x_start: f32, y_start: f32, color: [4]f32, scale: f32) void {
         var current_x = x_start;
         const scale_w = self.font.scale_w;
         const scale_h = self.font.scale_h;
@@ -538,10 +501,10 @@ pub const GuiRenderer = struct {
         for (text) |char_code| {
             const glyph = self.font.glyphs.get(char_code) orelse self.font.glyphs.get('?') orelse continue;
 
-            const x0 = current_x + glyph.xoffset;
-            const y0 = y_start + glyph.yoffset;
-            const x1 = x0 + @as(f32, @floatFromInt(glyph.width));
-            const y1 = y0 + @as(f32, @floatFromInt(glyph.height));
+            const x0 = current_x + glyph.xoffset * scale;
+            const y0 = y_start + glyph.yoffset * scale;
+            const x1 = x0 + @as(f32, @floatFromInt(glyph.width)) * scale;
+            const y1 = y0 + @as(f32, @floatFromInt(glyph.height)) * scale;
 
             const _u0 = @as(f32, @floatFromInt(glyph.x)) / scale_w;
             const v0 = @as(f32, @floatFromInt(glyph.y)) / scale_h;
@@ -549,7 +512,7 @@ pub const GuiRenderer = struct {
             const v1 = v0 + (@as(f32, @floatFromInt(glyph.height)) / scale_h);
 
             const v_idx = self.vertex_count;
-            if (v_idx + 4 > MAX_VERTICES or self.index_count + 6 > MAX_INDICES) return; // Buffer full
+            if (v_idx + 4 > MAX_VERTICES or self.index_count + 6 > MAX_INDICES) return;
 
             self.mapped_indices[self.index_count + 0] = v_idx;
             self.mapped_indices[self.index_count + 1] = v_idx + 1;
@@ -566,20 +529,18 @@ pub const GuiRenderer = struct {
             self.vertex_count += 4;
             self.index_count += 6;
 
-            current_x += glyph.xadvance;
+            current_x += glyph.xadvance * scale;
         }
     }
 
-    fn measureText(self: *const Self, text: []const u8) f32 {
+    fn measureText(self: *const Self, text: []const u8, scale: f32) f32 {
         var width: f32 = 0;
         for (text) |char_code| {
             const glyph = self.font.glyphs.get(char_code) orelse self.font.glyphs.get('?') orelse continue;
-            width += glyph.xadvance;
+            width += glyph.xadvance * scale;
         }
         return width;
     }
-
-    // --- Input Handling ---
 
     pub fn handleCursorPos(self: *Self, x: f64, y: f64) void {
         self.mouse_state.x = x;
@@ -594,21 +555,21 @@ pub const GuiRenderer = struct {
     }
 };
 
-/// Parses a PNG byte slice to extract the image width and height.
-/// It only reads the header and does not validate the rest of the file.
-/// Returns an error union.
-/// Holds the final decoded PNG image data.
-/// The caller is responsible for freeing the `pixels` buffer.
-
-// PngImage and PngParseError structs remain the same...
-
-// PngImage, PngParseError, and paethPredictor are unchanged.
-// [Copy those from the previous answer]
-
-// PngImage, PngParseError, and paethPredictor are unchanged from the previous version.
-// The paethPredictor function itself IS CORRECT, it's the CALL to it that needs fixing.
 pub const PngImage = struct { width: u32, height: u32, bit_depth: u8, pixels: []u8 };
-pub const PngParseError = error{ FileTooShort, InvalidSignature, ChunkTooShort, MissingIhdr, InvalidIhdr, UnsupportedFormat, MissingIdat, MissingIend, DecompressionError, InvalidFilterType };
+
+pub const PngParseError = error{
+    FileTooShort,
+    InvalidSignature,
+    ChunkTooShort,
+    MissingIhdr,
+    InvalidIhdr,
+    UnsupportedFormat,
+    MissingIdat,
+    MissingIend,
+    DecompressionError,
+    InvalidFilterType,
+};
+
 fn paethPredictor(a: i64, b: i64, C: i64) i64 {
     const p = a + b - C;
     const pa = @abs(p - a);
@@ -622,9 +583,7 @@ fn paethPredictor(a: i64, b: i64, C: i64) i64 {
 pub fn loadPngGrayscale(
     allocator: std.mem.Allocator,
     png_data: []const u8,
-) !PngImage {
-    // [The first part of the function (chunk parsing, decompression) is unchanged]
-    // ...
+) PngParseError!PngImage {
     const png_signature = [_]u8{ 137, 80, 78, 71, 13, 10, 26, 10 };
     if (png_data.len < 8 or !std.mem.eql(u8, png_data[0..8], &png_signature)) {
         return PngParseError.InvalidSignature;
@@ -652,7 +611,7 @@ pub fn loadPngGrayscale(
             ihdr = .{ .width = width, .height = height, .bit_depth = bit_depth };
         } else if (std.mem.eql(u8, chunk_type_slice, "IDAT")) {
             if (ihdr == null) return PngParseError.MissingIhdr;
-            try idat_stream.appendSlice(chunk_data);
+            idat_stream.appendSlice(chunk_data) catch @panic("OOM");
         } else if (std.mem.eql(u8, chunk_type_slice, "IEND")) {
             break;
         }
@@ -666,7 +625,10 @@ pub fn loadPngGrayscale(
     {
         var compressed_reader = std.io.fixedBufferStream(idat_stream.items);
         var decompressor = std.compress.zlib.decompressor(compressed_reader.reader());
-        try decompressor.reader().readAllArrayList(&decompressed_buffer, std.math.maxInt(usize));
+        decompressor.reader().readAllArrayList(&decompressed_buffer, std.math.maxInt(usize)) catch |err| {
+            std.log.err("{}", .{err});
+            @panic("Decompressor failed");
+        };
     }
     const filtered_scanlines = decompressed_buffer.items;
 
@@ -674,7 +636,7 @@ pub fn loadPngGrayscale(
     const scanline_length = header.width * bytes_per_pixel;
     const expected_filtered_size = header.height * (1 + scanline_length);
     if (filtered_scanlines.len != expected_filtered_size) return PngParseError.DecompressionError;
-    var final_pixels = try allocator.alloc(u8, header.width * header.height * bytes_per_pixel);
+    var final_pixels = allocator.alloc(u8, header.width * header.height * bytes_per_pixel) catch @panic("OOM");
     var prior_scanline: []const u8 = &[_]u8{};
 
     for (0..header.height) |y| {
@@ -696,7 +658,6 @@ pub fn loadPngGrayscale(
                         1 => recon_a,
                         2 => recon_b,
                         3 => @as(u8, @intCast((@as(u16, recon_a) + @as(u16, recon_b)) / 2)),
-                        // --- FIXED: Cast the i64 result back to u8 ---
                         4 => @as(u8, @intCast(paethPredictor(@as(i64, recon_a), @as(i64, recon_b), @as(i64, recon_c)))),
                         else => return PngParseError.InvalidFilterType,
                     };
@@ -715,7 +676,6 @@ pub fn loadPngGrayscale(
                         1 => recon_a,
                         2 => recon_b,
                         3 => @as(u16, @intCast((@as(u32, recon_a) + @as(u32, recon_b)) / 2)),
-                        // --- FIXED: Cast the i64 result back to u16 ---
                         4 => @as(u16, @intCast(paethPredictor(@as(i64, recon_a), @as(i64, recon_b), @as(i64, recon_c)))),
                         else => return PngParseError.InvalidFilterType,
                     };
@@ -727,7 +687,12 @@ pub fn loadPngGrayscale(
         }
         prior_scanline = current_output;
     }
-    return PngImage{ .width = header.width, .height = header.height, .bit_depth = header.bit_depth, .pixels = final_pixels };
+    return PngImage{
+        .width = header.width,
+        .height = header.height,
+        .bit_depth = header.bit_depth,
+        .pixels = final_pixels,
+    };
 }
 pub const Glyph = struct {
     id: u32,
@@ -747,6 +712,7 @@ pub const Font = struct {
     base: f32 = 0,
     scale_w: f32 = 0,
     scale_h: f32 = 0,
+    font_size: f32 = 0,
 
     pub fn init(allocator: std.mem.Allocator) Font {
         return .{
@@ -759,12 +725,10 @@ pub const Font = struct {
         self.glyphs.deinit();
     }
 
-    // Helper function to make parsing robust
     fn parseKeyValue(part: []const u8) ?struct { key: []const u8, value: []const u8 } {
         const eq_idx = std.mem.indexOfScalar(u8, part, '=') orelse return null;
         const key = part[0..eq_idx];
         var value = part[eq_idx + 1 ..];
-        // Strip quotes if they exist
         if (value.len >= 2 and value[0] == '"' and value[value.len - 1] == '"') {
             value = value[1 .. value.len - 1];
         }
@@ -782,7 +746,14 @@ pub const Font = struct {
             var parts = std.mem.tokenizeScalar(u8, trimmed_line, ' ');
             const tag = parts.next() orelse continue;
 
-            if (std.mem.eql(u8, tag, "common")) {
+            if (std.mem.eql(u8, tag, "info")) {
+                while (parts.next()) |part| {
+                    const kv = parseKeyValue(part) orelse continue;
+                    if (std.mem.eql(u8, kv.key, "size")) {
+                        self.font_size = try std.fmt.parseFloat(f32, kv.value);
+                    }
+                }
+            } else if (std.mem.eql(u8, tag, "common")) {
                 while (parts.next()) |part| {
                     const kv = parseKeyValue(part) orelse continue;
                     if (std.mem.eql(u8, kv.key, "lineHeight")) self.line_height = try std.fmt.parseFloat(f32, kv.value);
@@ -816,7 +787,7 @@ pub const Font = struct {
                     }
                 }
 
-                if (id_parsed) { // Only put valid glyphs
+                if (id_parsed) {
                     try self.glyphs.put(glyph.id, glyph);
                 }
             }
