@@ -46,7 +46,7 @@ pub const Scene = struct {
 
     allocator: std.mem.Allocator,
     camera: Camera,
-    axis: [6]V3,
+    axis: [2]V3,
     grid: []V3,
     lines: std.ArrayList(V3),
 
@@ -57,9 +57,9 @@ pub const Scene = struct {
             .allocator = allocator,
             .axis = .{
                 // X-axis (Red)
-                .{ .pos = .{ -res_float, 0.0, 0.0 }, .color = .{ 1.0, 0.0, 0.0, 1.0 } }, .{ .pos = .{ res_float, 0.0, 0.0 }, .color = .{ 1.0, 0.0, 0.0, 1.0 } },
+                // .{ .pos = .{ -res_float, 0.0, 0.0 }, .color = .{ 1.0, 0.0, 0.0, 1.0 } }, .{ .pos = .{ res_float, 0.0, 0.0 }, .color = .{ 1.0, 0.0, 0.0, 1.0 } },
                 // Y-axis (Green)
-                .{ .pos = .{ 0.0, -res_float, 0.0 }, .color = .{ 0.0, 1.0, 0.0, 1.0 } }, .{ .pos = .{ 0.0, res_float, 0.0 }, .color = .{ 0.0, 1.0, 0.0, 1.0 } },
+                // .{ .pos = .{ 0.0, -res_float, 0.0 }, .color = .{ 0.0, 1.0, 0.0, 1.0 } }, .{ .pos = .{ 0.0, res_float, 0.0 }, .color = .{ 0.0, 1.0, 0.0, 1.0 } },
                 // Z-axis (Blue)
                 .{ .pos = .{ 0.0, 0.0, -res_float }, .color = .{ 0.0, 0.0, 1.0, 1.0 } }, .{ .pos = .{ 0.0, 0.0, res_float }, .color = .{ 0.0, 0.0, 1.0, 1.0 } },
             },

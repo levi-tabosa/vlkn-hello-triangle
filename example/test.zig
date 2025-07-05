@@ -34,6 +34,7 @@ pub fn vkCheck(result: c.VkResult) !void {
         c.VK_ERROR_SURFACE_LOST_KHR => error.VulkanSurfaceLost,
         c.VK_ERROR_NATIVE_WINDOW_IN_USE_KHR => error.NativeWindowInUse,
         c.VK_SUBOPTIMAL_KHR => error.VulkanSuboptimalKHR,
+        c.VK_ERROR_OUT_OF_POOL_MEMORY => error.VulkanPoolOutOfMemory,
         else => error.VulkanDefault,
     };
 }
@@ -1411,7 +1412,11 @@ pub const App = struct {
             .width = 150,
             .height = 30,
             .on_click = addLineCallback,
-            .data = .{ .button = .{ .text = "Add Line", .font_size = 10.0 } },
+            .data = .{
+                .button = .{
+                    .text = "Add Line",
+                },
+            },
         });
 
         try self.main_ui.addButton(.{
@@ -1420,7 +1425,11 @@ pub const App = struct {
             .width = 150,
             .height = 30,
             .on_click = clearLinesCallback,
-            .data = .{ .button = .{ .text = "Clear Lines", .font_size = 30.0 } },
+            .data = .{
+                .button = .{
+                    .text = "Clear Lines",
+                },
+            },
         });
 
         try self.main_ui.addButton(.{
@@ -1429,7 +1438,11 @@ pub const App = struct {
             .width = 150,
             .height = 30,
             .on_click = quitCallback,
-            .data = .{ .button = .{ .text = "Quit", .font_size = 10.0 } },
+            .data = .{
+                .button = .{
+                    .text = "Quit",
+                },
+            },
         });
     }
 

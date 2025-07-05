@@ -1,9 +1,8 @@
-// gui.zig
 const std = @import("std");
 const assert = std.debug.assert;
 const vk = @import("../test.zig"); // Reuse structs and helpers from main file
 const c = @import("c").c; // Reuse cImport from main file
-const font = @import("font.zig");
+const font = @import("font");
 const gui_vert_shader_code = @import("spirv").gui_vs;
 const gui_frag_shader_code = @import("spirv").gui_fs;
 
@@ -12,7 +11,9 @@ const OnClickFn = *const fn (app: *anyopaque) void;
 const WidgetData = union(enum) {
     button: struct {
         text: []const u8,
-        font_size: f32,
+        font_size: f32 = 18.0, // Default value
+        rect_color: @Vector(4, f32) = .{ 0.8, 0.8, 0.8, 1.0 }, // White rectangle,
+        text_color: @Vector(4, f32) = .{ 0.0, 0.0, 0.0, 1.0 }, // Black text,
     },
 };
 
@@ -96,34 +97,32 @@ pub const GuiRenderer = struct {
     pipeline: vk.Pipeline = undefined,
     pipeline_layout: vk.PipelineLayout = undefined,
 
+    push_constants: vk.PushConstantRange = .init([16]f32),
     descriptor_set_layout: c.VkDescriptorSetLayout = undefined,
     descriptor_pool: c.VkDescriptorPool = undefined,
     descriptor_set: c.VkDescriptorSet = undefined,
-    push_constants: vk.PushConstantRange = .init([16]f32),
 
-    font: Font = undefined,
-    font_texture: vk.Image = undefined,
-    font_texture_view: c.VkImageView = undefined,
-    font_sampler: c.VkSampler = undefined,
+    sampler: c.VkSampler = undefined,
+    texture: vk.Image = undefined,
+    texture_view: c.VkImageView = undefined,
+    dummy_pixel_uv: [2]f32 = undefined, // UV coords for the white pixel in the atlas
+
     vertex_buffer: vk.Buffer = undefined,
     index_buffer: vk.Buffer = undefined,
-
-    // Mapped pointers for the current frame's data
     mapped_vertices: [*]GuiVertex = undefined,
     mapped_indices: [*]u32 = undefined,
     vertex_count: u32 = 0,
     index_count: u32 = 0,
 
-    // Simple Input state
+    font: Font = undefined,
+
     mouse_state: MouseState = .{},
-    active_id: u32 = 0, // ID of the widget being interacted with
-    hot_id: u32 = 0, // ID of the widget being hovered over
-
-    // We'll use a simple counter for widget IDs each frame
+    active_id: u32 = 0,
+    hot_id: u32 = 0,
     last_id: u32 = 0,
-    image_handle: PngImage = undefined,
+    png_handle: PngImage = undefined,
 
-    const MAX_VERTICES = 4096;
+    const MAX_VERTICES = 8192;
     const MAX_INDICES = MAX_VERTICES * 3 / 2;
 
     pub fn init(vk_ctx: *vk.VulkanContext, render_pass: vk.RenderPass, swapchain: vk.Swapchain) !Self {
@@ -132,83 +131,80 @@ pub const GuiRenderer = struct {
             .font = .init(vk_ctx.allocator),
         };
 
-        try self.font.loadFNT();
-        try self.createFontTextureAndSampler(vk_ctx.allocator, @import("font").mikado_medium_fed68123_png);
+        try self.font.loadFNT(font.periclesW01_fnt);
+        try self.createUnifiedTextureAndSampler(vk_ctx.allocator, font.periclesW01_png);
         try self.createDescriptors();
-        // Create buffers that are permanently mapped for easy writing
-        const vtx_buffer_size = MAX_VERTICES * @sizeOf(GuiVertex);
-        self.vertex_buffer = try vk.Buffer.init(
-            vk_ctx,
-            vtx_buffer_size,
-            c.VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
-            c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-        );
-        self.mapped_vertices = try self.vertex_buffer.map(vk_ctx, GuiVertex);
-
-        const idx_buffer_size = MAX_INDICES * @sizeOf(u32);
-        self.index_buffer = try vk.Buffer.init(
-            vk_ctx,
-            idx_buffer_size,
-            c.VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
-            c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-        );
-        self.mapped_indices = try self.index_buffer.map(vk_ctx, u32);
-
+        try self.createBuffers(vk_ctx);
         try self.createPipeline(render_pass, swapchain);
         return self;
     }
 
     pub fn deinit(self: *Self) void {
-        c.vkDestroySampler(self.vk_ctx.device.handle, self.font_sampler, null);
-        c.vkDestroyImageView(self.vk_ctx.device.handle, self.font_texture_view, null);
-        self.font_texture.deinit(self.vk_ctx);
-        self.vk_ctx.allocator.free(self.image_handle.pixels);
+        c.vkDestroySampler(self.vk_ctx.device.handle, self.sampler, null);
+        c.vkDestroyImageView(self.vk_ctx.device.handle, self.texture_view, null);
+        self.texture.deinit(self.vk_ctx);
+        self.vk_ctx.allocator.free(self.png_handle.pixels);
 
         c.vkDestroyDescriptorPool(self.vk_ctx.device.handle, self.descriptor_pool, null);
         c.vkDestroyDescriptorSetLayout(self.vk_ctx.device.handle, self.descriptor_set_layout, null);
         self.font.deinit();
 
+        // Deinit unified buffers
         self.vertex_buffer.unmap(self.vk_ctx);
         self.index_buffer.unmap(self.vk_ctx);
         self.vertex_buffer.deinit(self.vk_ctx);
         self.index_buffer.deinit(self.vk_ctx);
     }
 
-    fn createFontTextureAndSampler(self: *Self, allocator: std.mem.Allocator, png_data: []const u8) !void {
+    // This function creates a single texture with the font atlas AND a 1x1 white pixel.
+    fn createUnifiedTextureAndSampler(self: *Self, allocator: std.mem.Allocator, png_data: []const u8) !void {
         const image = try loadPngGrayscale(allocator, png_data);
-        self.image_handle = image;
-        std.debug.print("{} {} {}\n", .{ image.width, image.height, image.pixels.len });
+        self.png_handle = image;
 
         const bytes_per_pixel = image.bit_depth / 8;
+        // We'll add the white pixel at the bottom, so the new height is original height + 1
+        const new_width = image.width;
+        const new_height = image.height + 1;
         const image_size: u64 = @intCast(image.width * image.height * bytes_per_pixel);
+        const total_size: u64 = @intCast(new_width * new_height * bytes_per_pixel);
 
         var staging_buffer = try vk.Buffer.init(
             self.vk_ctx,
-            image_size,
+            total_size,
             c.VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
             c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
         );
         defer staging_buffer.deinit(self.vk_ctx);
 
         const data_ptr = try staging_buffer.map(self.vk_ctx, u8);
+        // Copy original font data
         @memcpy(data_ptr[0..image_size], image.pixels[0..image_size]);
+        // Add the white pixel data at the end. For R8_UNORM, 255 is white.
+        @memset(data_ptr[image_size..total_size], 255);
         staging_buffer.unmap(self.vk_ctx);
 
-        self.font_texture = try vk.Image.create(
+        // Calculate the UV coordinates for the top-left corner of our 1x1 white pixel
+        // We add a half-pixel offset to ensure we sample from the center of the pixel, avoiding bleeding.
+        self.dummy_pixel_uv = .{
+            (0.5 / @as(f32, @floatFromInt(new_width))),
+            (@as(f32, @floatFromInt(image.height)) + 0.5) / @as(f32, @floatFromInt(new_height)),
+        };
+
+        self.texture = try vk.Image.create(
             self.vk_ctx,
-            @intCast(image.width),
-            @intCast(image.height),
+            new_width,
+            new_height,
             if (image.bit_depth == 8) c.VK_FORMAT_R8_UNORM else c.VK_FORMAT_R16_UNORM,
             c.VK_IMAGE_TILING_OPTIMAL,
             c.VK_IMAGE_USAGE_TRANSFER_DST_BIT | c.VK_IMAGE_USAGE_SAMPLED_BIT,
             c.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
         );
 
-        try self.font_texture.transitionLayout(self.vk_ctx, c.VK_IMAGE_LAYOUT_UNDEFINED, c.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-        try self.font_texture.copyFromBuffer(self.vk_ctx, staging_buffer);
-        try self.font_texture.transitionLayout(self.vk_ctx, c.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, c.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        try self.texture.transitionLayout(self.vk_ctx, c.VK_IMAGE_LAYOUT_UNDEFINED, c.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        try self.texture.copyFromBuffer(self.vk_ctx, staging_buffer);
+        try self.texture.transitionLayout(self.vk_ctx, c.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, c.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 
-        self.font_texture_view = try self.font_texture.createView(self.vk_ctx, c.VK_IMAGE_ASPECT_COLOR_BIT);
+        self.texture_view = try self.texture.createView(self.vk_ctx, c.VK_IMAGE_ASPECT_COLOR_BIT);
 
         const sampler_info = c.VkSamplerCreateInfo{
             .magFilter = c.VK_FILTER_LINEAR,
@@ -219,20 +215,7 @@ pub const GuiRenderer = struct {
             .borderColor = c.VK_BORDER_COLOR_INT_OPAQUE_BLACK,
             .unnormalizedCoordinates = c.VK_FALSE,
         };
-        try vk.vkCheck(c.vkCreateSampler(self.vk_ctx.device.handle, &sampler_info, null, &self.font_sampler));
-    }
-
-    fn createDescriptorPool(self: *Self) !void {
-        const pool_size = c.VkDescriptorPoolSize{
-            .type = c.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-            .descriptorCount = 1,
-        };
-        const pool_info = c.VkDescriptorPoolCreateInfo{
-            .maxSets = 1,
-            .poolSizeCount = 1,
-            .pPoolSizes = &pool_size,
-        };
-        try vk.vkCheck(c.vkCreateDescriptorPool(self.vk_ctx.device.handle, &pool_info, null, &self.descriptor_pool));
+        try vk.vkCheck(c.vkCreateSampler(self.vk_ctx.device.handle, &sampler_info, null, &self.sampler));
     }
 
     fn createDescriptors(self: *Self) !void {
@@ -242,7 +225,10 @@ pub const GuiRenderer = struct {
             .descriptorCount = 1,
             .stageFlags = c.VK_SHADER_STAGE_FRAGMENT_BIT,
         };
-        const layout_info = c.VkDescriptorSetLayoutCreateInfo{ .bindingCount = 1, .pBindings = &sampler_layout_binding };
+        const layout_info = c.VkDescriptorSetLayoutCreateInfo{
+            .bindingCount = 1,
+            .pBindings = &sampler_layout_binding,
+        };
         try vk.vkCheck(c.vkCreateDescriptorSetLayout(self.vk_ctx.device.handle, &layout_info, null, &self.descriptor_set_layout));
 
         const pool_size = c.VkDescriptorPoolSize{
@@ -265,8 +251,8 @@ pub const GuiRenderer = struct {
 
         const image_info = c.VkDescriptorImageInfo{
             .imageLayout = c.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-            .imageView = self.font_texture_view,
-            .sampler = self.font_sampler,
+            .imageView = self.texture_view,
+            .sampler = self.sampler,
         };
         const desc_write = c.VkWriteDescriptorSet{
             .dstSet = self.descriptor_set,
@@ -277,6 +263,26 @@ pub const GuiRenderer = struct {
             .pImageInfo = &image_info,
         };
         c.vkUpdateDescriptorSets(self.vk_ctx.device.handle, 1, &desc_write, 0, null);
+    }
+
+    fn createBuffers(self: *Self, vk_ctx: *vk.VulkanContext) !void {
+        const vtx_buffer_size = MAX_VERTICES * @sizeOf(GuiVertex);
+        self.vertex_buffer = try vk.Buffer.init(
+            vk_ctx,
+            vtx_buffer_size,
+            c.VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+            c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+        );
+        self.mapped_vertices = try self.vertex_buffer.map(vk_ctx, GuiVertex);
+
+        const idx_buffer_size = MAX_INDICES * @sizeOf(u32);
+        self.index_buffer = try vk.Buffer.init(
+            vk_ctx,
+            idx_buffer_size,
+            c.VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+            c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+        );
+        self.mapped_indices = try self.index_buffer.map(vk_ctx, u32);
     }
 
     pub fn createPipeline(self: *Self, render_pass: vk.RenderPass, swapchain: vk.Swapchain) !void {
@@ -399,15 +405,14 @@ pub const GuiRenderer = struct {
 
         c.vkCmdBindPipeline(cmd_buffer, c.VK_PIPELINE_BIND_POINT_GRAPHICS, self.pipeline.handle);
         c.vkCmdBindDescriptorSets(cmd_buffer, c.VK_PIPELINE_BIND_POINT_GRAPHICS, self.pipeline_layout.handle, 0, 1, &self.descriptor_set, 0, null);
-        const vtx_buffers = [_]c.VkBuffer{self.vertex_buffer.handle};
-        const offsets = [_]c.VkDeviceSize{0};
-        c.vkCmdBindVertexBuffers(cmd_buffer, 0, 1, &vtx_buffers, &offsets);
+        const offset: c.VkDeviceSize = 0;
+        c.vkCmdBindVertexBuffers(cmd_buffer, 0, 1, &self.vertex_buffer.handle, &offset);
         c.vkCmdBindIndexBuffer(cmd_buffer, self.index_buffer.handle, 0, c.VK_INDEX_TYPE_UINT32);
 
         const L: f32 = 0;
         const R = window_width;
-        const T: f32 = 0; // Top is at 0
-        const B = window_height; // Bottom is at window_height
+        const T: f32 = 0;
+        const B = window_height;
         const ortho_projection = [_]f32{
             2.0 / (R - L),      0.0,                0.0, 0.0,
             0.0,                2.0 / (B - T),      0.0, 0.0,
@@ -446,15 +451,14 @@ pub const GuiRenderer = struct {
 
             switch (widget.data) {
                 .button => |button_data| {
-                    const text_color = [4]f32{ 1.0, 0.0, 1.0, 1.0 }; // White text
-                    var color: [4]f32 = .{ 0.3, 0.3, 0.8, 1.0 }; // Normal
+                    var rect_color = button_data.rect_color;
                     if (self.hot_id == id) {
-                        color = .{ 0.4, 0.4, 0.9, 1.0 }; // Hover
+                        rect_color = .{ rect_color[0] + 0.1, rect_color[1] + 0.1, rect_color[2] + 0.1, rect_color[3] }; // Hover
                         if (self.active_id == id) {
-                            color = .{ 0.2, 0.2, 0.7, 1.0 }; // Active
+                            rect_color = .{ rect_color[0] - 0.1, rect_color[1] - 0.1, rect_color[2] - 0.1, rect_color[3] }; // Active
                         }
                     }
-                    self.drawRect(widget.x, widget.y, widget.width, widget.height, color);
+                    self.drawRect(widget.x, widget.y, widget.width, widget.height, rect_color);
 
                     const scale = if (button_data.font_size > 0) button_data.font_size / self.font.font_size else 1.0;
                     const text_width = self.measureText(button_data.text, scale);
@@ -462,7 +466,7 @@ pub const GuiRenderer = struct {
                     const scaled_line_height = self.font.line_height * scale;
                     const text_y = widget.y + (widget.height - scaled_line_height) / 2.0;
 
-                    self.drawText(button_data.text, text_x, text_y, text_color, scale);
+                    self.drawText(button_data.text, text_x, text_y, button_data.text_color, scale);
                 },
             }
 
@@ -475,6 +479,8 @@ pub const GuiRenderer = struct {
     }
 
     fn drawRect(self: *Self, x: f32, y: f32, w: f32, h: f32, color: [4]f32) void {
+        if (self.vertex_count + 4 > MAX_VERTICES or self.index_count + 6 > MAX_INDICES) return;
+
         const v_idx = self.vertex_count;
         self.mapped_indices[self.index_count] = v_idx;
         self.mapped_indices[self.index_count + 1] = v_idx + 1;
@@ -483,7 +489,8 @@ pub const GuiRenderer = struct {
         self.mapped_indices[self.index_count + 4] = v_idx + 2;
         self.mapped_indices[self.index_count + 5] = v_idx + 3;
 
-        const uv = [2]f32{ 0.0, 0.0 };
+        // Use the pre-calculated UV for the white pixel in our atlas
+        const uv = self.dummy_pixel_uv;
         self.mapped_vertices[v_idx] = .{ .pos = .{ x, y }, .uv = uv, .color = color };
         self.mapped_vertices[v_idx + 1] = .{ .pos = .{ x + w, y }, .uv = uv, .color = color };
         self.mapped_vertices[v_idx + 2] = .{ .pos = .{ x + w, y + h }, .uv = uv, .color = color };
@@ -496,9 +503,12 @@ pub const GuiRenderer = struct {
     pub fn drawText(self: *Self, text: []const u8, x_start: f32, y_start: f32, color: [4]f32, scale: f32) void {
         var current_x = x_start;
         const scale_w = self.font.scale_w;
+        // The texture is 1 pixel taller, but the font data itself is in the same relative position.
         const scale_h = self.font.scale_h;
 
         for (text) |char_code| {
+            if (self.vertex_count + 4 > MAX_VERTICES or self.index_count + 6 > MAX_INDICES) return;
+
             const glyph = self.font.glyphs.get(char_code) orelse self.font.glyphs.get('?') orelse continue;
 
             const x0 = current_x + glyph.xoffset * scale;
@@ -506,13 +516,13 @@ pub const GuiRenderer = struct {
             const x1 = x0 + @as(f32, @floatFromInt(glyph.width)) * scale;
             const y1 = y0 + @as(f32, @floatFromInt(glyph.height)) * scale;
 
+            // These UV calculations are correct relative to the original atlas size
             const _u0 = @as(f32, @floatFromInt(glyph.x)) / scale_w;
             const v0 = @as(f32, @floatFromInt(glyph.y)) / scale_h;
             const _u1 = _u0 + (@as(f32, @floatFromInt(glyph.width)) / scale_w);
             const v1 = v0 + (@as(f32, @floatFromInt(glyph.height)) / scale_h);
 
             const v_idx = self.vertex_count;
-            if (v_idx + 4 > MAX_VERTICES or self.index_count + 6 > MAX_INDICES) return;
 
             self.mapped_indices[self.index_count + 0] = v_idx;
             self.mapped_indices[self.index_count + 1] = v_idx + 1;
@@ -570,14 +580,14 @@ pub const PngParseError = error{
     InvalidFilterType,
 };
 
-fn paethPredictor(a: i64, b: i64, C: i64) i64 {
-    const p = a + b - C;
-    const pa = @abs(p - a);
-    const pb = @abs(p - b);
-    const pc = @abs(p - C);
-    if (pa <= pb and pa <= pc) return a;
-    if (pb <= pc) return b;
-    return C;
+fn paethPredictor(j: i64, k: i64, l: i64) i64 {
+    const p = j + k - l;
+    const pj = @abs(p - j);
+    const pk = @abs(p - k);
+    const pl = @abs(p - l);
+    if (pj <= pk and pj <= pl) return j;
+    if (pk <= pl) return k;
+    return l;
 }
 
 pub fn loadPngGrayscale(
@@ -694,6 +704,7 @@ pub fn loadPngGrayscale(
         .pixels = final_pixels,
     };
 }
+
 pub const Glyph = struct {
     id: u32,
     x: u32,
@@ -735,10 +746,8 @@ pub const Font = struct {
         return .{ .key = key, .value = value };
     }
 
-    pub fn loadFNT(self: *Font) !void {
-        const file_contents = @import("font").mikado_medium_fed68123_fnt;
-
-        var lines = std.mem.splitScalar(u8, file_contents, '\n');
+    pub fn loadFNT(self: *Font, data: []const u8) !void {
+        var lines = std.mem.splitScalar(u8, data, '\n');
         while (lines.next()) |line| {
             const trimmed_line = std.mem.trim(u8, line, " \r");
             if (trimmed_line.len == 0) continue;

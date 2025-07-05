@@ -6,6 +6,7 @@ const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const spirv = @import("spirv");
 const scene = @import("geometry");
+const fonts = @import("font");
 const c = @cImport({
     @cDefine("GLFW_INCLUDE_VULKAN", {});
     @cInclude("vulkan/vulkan.h");

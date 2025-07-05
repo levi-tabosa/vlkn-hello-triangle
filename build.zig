@@ -87,7 +87,7 @@ pub fn build(b: *std.Build) !void {
             .target = target,
         });
         exe.root_module.addAnonymousImport("font", .{
-            .root_source_file = b.path("src/fonts/fonts.zig"),
+            .root_source_file = b.path("src/fonts/font.zig"),
             .target = target,
         });
         exe.root_module.addAnonymousImport("geometry", .{
