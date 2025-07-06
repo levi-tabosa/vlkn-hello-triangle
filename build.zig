@@ -57,8 +57,15 @@ pub fn build(b: *std.Build) !void {
     const gui_vert_shader_output = "spirv/bin/gui.vert.spv";
     const gui_frag_shader_output = "spirv/bin/gui.frag.spv";
 
+    const text_vert_shader_source = "src/shaders/code/text/text.vert";
+    const text_frag_shader_source = "src/shaders/code/text/text.frag";
+    const text_vert_shader_output = "spirv/bin/text3d.vert.spv";
+    const text_frag_shader_output = "spirv/bin/text3d.frag.spv";
+
     const install_gui_vert_shader = try addShaderStep(b, gui_vert_shader_source, gui_vert_shader_output, "../src/shaders/spirv/bin/gui.vert.spv", &all_shader_steps);
     const install_gui_frag_shader = try addShaderStep(b, gui_frag_shader_source, gui_frag_shader_output, "../src/shaders/spirv/bin/gui.frag.spv", &all_shader_steps);
+    const install_text_vert_shader = try addShaderStep(b, text_vert_shader_source, text_vert_shader_output, "../src/shaders/spirv/bin/text3d.vert.spv", &all_shader_steps);
+    const install_text_frag_shader = try addShaderStep(b, text_frag_shader_source, text_frag_shader_output, "../src/shaders/spirv/bin/text3d.frag.spv", &all_shader_steps);
 
     for (executables) |exe_info| {
         const shader_code_path = "src/shaders/code/";
@@ -100,6 +107,8 @@ pub fn build(b: *std.Build) !void {
         exe.step.dependOn(install_frag_shader);
         exe.step.dependOn(install_gui_vert_shader);
         exe.step.dependOn(install_gui_frag_shader);
+        exe.step.dependOn(install_text_vert_shader);
+        exe.step.dependOn(install_text_frag_shader);
 
         linkVulkanAndGlfwLibs(exe, target);
 
