@@ -4,8 +4,8 @@ const c = @import("c").c;
 const gui = @import("../gui/gui.zig"); // To reuse Font struct
 const font = @import("font");
 
-const text3d_vert_shader_code = @import("spirv").text3d_vs;
-const text3d_frag_shader_code = @import("spirv").text3d_fs;
+const text3d_vert_shader_bin = @import("spirv").text3d_vs;
+const text3d_frag_shader_bin = @import("spirv").text3d_fs;
 
 // The new vertex definition including the model matrix
 const Text3DVertex = extern struct {
@@ -68,7 +68,7 @@ pub const Text3DRenderer = struct {
     font: gui.Font = undefined,
     png_handle: gui.PngImage = undefined,
 
-    const MAX_VERTICES = 16384; // Can be larger for 3D text
+    const MAX_VERTICES = 16384;
     const MAX_INDICES = MAX_VERTICES * 3 / 2;
 
     // We pass in the main scene's descriptor set layout to share the UBO
@@ -232,9 +232,9 @@ pub const Text3DRenderer = struct {
             .pSetLayouts = &set_layouts,
         });
 
-        var vert_mod = try vk.ShaderModule.init(self.vk_ctx.allocator, self.vk_ctx.device.handle, text3d_vert_shader_code);
+        var vert_mod = try vk.ShaderModule.init(self.vk_ctx.allocator, self.vk_ctx.device.handle, text3d_vert_shader_bin);
         defer vert_mod.deinit();
-        var frag_mod = try vk.ShaderModule.init(self.vk_ctx.allocator, self.vk_ctx.device.handle, text3d_frag_shader_code);
+        var frag_mod = try vk.ShaderModule.init(self.vk_ctx.allocator, self.vk_ctx.device.handle, text3d_frag_shader_bin);
         defer frag_mod.deinit();
 
         const shader_stages = [_]c.VkPipelineShaderStageCreateInfo{
@@ -358,27 +358,48 @@ pub const Text3DRenderer = struct {
 
     // The main drawing function
     pub fn drawText(self: *Self, text: []const u8, model_matrix: [16]f32, color: [4]f32, size_in_world_units: f32) void {
-        if (self.font.font_size == 0) return; // Avoid division by zero
+        if (self.font.font_size == 0 or self.font.line_height == 0) return;
         const scale = size_in_world_units / self.font.font_size;
 
+        // Cursors for drawing position in the text's local space
         var current_x: f32 = 0;
+        var current_y: f32 = 0;
+
+        // const half_pixel_u = 0.5 / self.font.scale_w;
+        // const half_pixel_v = 0.5 / self.font.scale_h;
 
         for (text) |char_code| {
+            // --- ADD THIS BLOCK to handle newlines ---
+            if (char_code == '\n') {
+                current_x = 0;
+                // Advance the vertical cursor downwards. We use '+' because in typical
+                // 2D text layout, the Y axis points down. The model_matrix will orient
+                // this correctly in 3D space.
+                current_y += self.font.line_height;
+                continue; // Go to the next character
+            }
+            // --- END BLOCK ---
+
             if (self.vertex_count + 4 > MAX_VERTICES or self.index_count + 6 > MAX_INDICES) return;
 
             const glyph = self.font.glyphs.get(char_code) orelse self.font.glyphs.get('?') orelse continue;
 
-            // Local coordinates for the glyph quad on the XY plane
+            // Local coordinates for the glyph quad on the XY plane.
+            // The vertical position is now relative to the current line's `current_y`.
             const x0 = (current_x + glyph.xoffset) * scale;
-            const y0 = glyph.yoffset * scale;
+            const y0 = (current_y + glyph.yoffset) * scale; // <-- This now uses current_y
             const x1 = x0 + (@as(f32, @floatFromInt(glyph.width)) * scale);
             const y1 = y0 + (@as(f32, @floatFromInt(glyph.height)) * scale);
 
-            // UV coordinates are the same as in the GUI renderer
-            const p0 = @as(f32, @floatFromInt(glyph.x)) / self.font.scale_w;
-            const v0 = @as(f32, @floatFromInt(glyph.y)) / self.font.scale_h;
-            const p1 = p0 + (@as(f32, @floatFromInt(glyph.width)) / self.font.scale_w);
-            const v1 = v0 + (@as(f32, @floatFromInt(glyph.height)) / self.font.scale_h);
+            // UV calculations (from the bleeding fix)
+            const raw_u0 = @as(f32, @floatFromInt(glyph.x)) / self.font.scale_w;
+            const raw_v0 = @as(f32, @floatFromInt(glyph.y)) / self.font.scale_h;
+            const raw_u1 = raw_u0 + (@as(f32, @floatFromInt(glyph.width)) / self.font.scale_w);
+            const raw_v1 = raw_v0 + (@as(f32, @floatFromInt(glyph.height)) / self.font.scale_h);
+            const p0 = raw_u0; // + half_pixel_u;
+            const v0 = raw_v0; // + half_pixel_v;
+            const p1 = raw_u1; // - half_pixel_u;
+            const v1 = raw_v1; // - half_pixel_v;
 
             const v_idx = self.vertex_count;
 
@@ -389,7 +410,6 @@ pub const Text3DRenderer = struct {
             self.mapped_indices[self.index_count + 4] = v_idx + 2;
             self.mapped_indices[self.index_count + 5] = v_idx + 3;
 
-            // Store the vertices with local positions and the shared model matrix
             self.mapped_vertices[v_idx + 0] = .{ .pos = .{ x0, y0, 0 }, .uv = .{ p0, v0 }, .color = color, .model = model_matrix };
             self.mapped_vertices[v_idx + 1] = .{ .pos = .{ x1, y0, 0 }, .uv = .{ p1, v0 }, .color = color, .model = model_matrix };
             self.mapped_vertices[v_idx + 2] = .{ .pos = .{ x1, y1, 0 }, .uv = .{ p1, v1 }, .color = color, .model = model_matrix };
@@ -398,6 +418,7 @@ pub const Text3DRenderer = struct {
             self.vertex_count += 4;
             self.index_count += 6;
 
+            // Advance horizontal cursor for the next character on the same line
             current_x += glyph.xadvance;
         }
     }

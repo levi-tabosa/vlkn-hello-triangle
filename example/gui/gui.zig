@@ -3,8 +3,9 @@ const assert = std.debug.assert;
 const vk = @import("../test.zig"); // Reuse structs and helpers from main file
 const c = @import("c").c; // Reuse cImport from main file
 const font = @import("font");
-const gui_vert_shader_code = @import("spirv").gui_vs;
-const gui_frag_shader_code = @import("spirv").gui_fs;
+
+const gui_vert_shader_bin = @import("spirv").gui_vs;
+const gui_frag_shader_bin = @import("spirv").gui_fs;
 
 const OnClickFn = *const fn (app: *anyopaque) void;
 
@@ -293,9 +294,9 @@ pub const GuiRenderer = struct {
             .pPushConstantRanges = &self.push_constants.handle,
         });
 
-        var vert_mod = try vk.ShaderModule.init(self.vk_ctx.allocator, self.vk_ctx.device.handle, gui_vert_shader_code);
+        var vert_mod = try vk.ShaderModule.init(self.vk_ctx.allocator, self.vk_ctx.device.handle, gui_vert_shader_bin);
         defer vert_mod.deinit();
-        var frag_mod = try vk.ShaderModule.init(self.vk_ctx.allocator, self.vk_ctx.device.handle, gui_frag_shader_code);
+        var frag_mod = try vk.ShaderModule.init(self.vk_ctx.allocator, self.vk_ctx.device.handle, gui_frag_shader_bin);
         defer frag_mod.deinit();
 
         const shader_stages = [_]c.VkPipelineShaderStageCreateInfo{

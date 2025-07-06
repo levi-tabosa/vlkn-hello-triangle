@@ -3,7 +3,6 @@ const std = @import("std");
 const assert = std.debug.assert;
 const spirv = @import("spirv");
 const scene = @import("geometry");
-const font = @import("font");
 const gui = @import("gui/gui.zig");
 const text3d = @import("text3d/text3d.zig");
 const fps_tracker = @import("fps_tracker/performance_tracker.zig");
@@ -1508,7 +1507,17 @@ pub const App = struct {
                 .position = .{ 0, 2, -5 },
                 .rotation = scene.Quat.fromAxisAngle(.{ 0, 1, 0 }, time * 0.5),
             }).toMatrix();
-            self.text_renderer.drawText("Rotating Text", transform2, .{ 0.2, 1.0, 0.8, 1.0 }, 4.0);
+            self.text_renderer.drawText(
+                \\|WMw}{(J{mNQ&KVX%})
+                \\GC\/S$!OAU@ZHDTYRPB
+                \\EL?FI24768953NQ#10jua
+                \\xvk;ohdytgczrblepfsi:
+                \\+<^>~*="´`'.
+            ,
+                transform2,
+                .{ 0.2, 1.0, 0.8, 1.0 },
+                4.0,
+            );
 
             self.gui_renderer.processAndDrawUi(self, &self.main_ui);
 
