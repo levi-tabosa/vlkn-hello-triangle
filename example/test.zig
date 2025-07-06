@@ -83,166 +83,6 @@ pub fn getVertexAttributeDescriptions() [3]c.VkVertexInputAttributeDescription {
     } };
 }
 
-pub const WorldTxtVertex = struct {
-    pos: @Vector(3, f32),
-    uv: @Vector(2, f32),
-    color: @Vector(4, f32),
-    model: @Vector(16, f32),
-    fn getBindingDescription() c.VkVertexInputBindingDescription {
-        return .{
-            .binding = 0,
-            .stride = @sizeOf(Vertex),
-            .inputRate = c.VK_VERTEX_INPUT_RATE_VERTEX,
-        };
-    }
-
-    fn getAttributeDescriptions() [3]c.VkVertexInputAttributeDescription {
-        return .{
-            .{
-                .binding = 0,
-                .location = 0,
-                .format = c.VK_FORMAT_R32G32B32_SFLOAT,
-                .offset = @offsetOf(Vertex, "pos"),
-            },
-            .{
-                .binding = 0,
-                .location = 1,
-                .format = c.VK_FORMAT_R32G32_SFLOAT,
-                .offset = @offsetOf(Vertex, "uv"),
-            },
-            .{
-                .binding = 0,
-                .location = 2,
-                .format = c.VK_FORMAT_R32G32B32A32_SFLOAT,
-                .offset = @offsetOf(Vertex, "color"),
-            },
-            // location 3,4,5,6: model (mat4) - A mat4 is 4 consecutive vec4s
-            .{ .binding = 0, .location = 3, .format = c.VK_FORMAT_R32G32B32A32_SFLOAT, .offset = @offsetOf(WorldTxtVertex, "model") + @sizeOf([4]f32) * 0 },
-            .{ .binding = 0, .location = 4, .format = c.VK_FORMAT_R32G32B32A32_SFLOAT, .offset = @offsetOf(WorldTxtVertex, "model") + @sizeOf([4]f32) * 1 },
-            .{ .binding = 0, .location = 5, .format = c.VK_FORMAT_R32G32B32A32_SFLOAT, .offset = @offsetOf(WorldTxtVertex, "model") + @sizeOf([4]f32) * 2 },
-            .{ .binding = 0, .location = 6, .format = c.VK_FORMAT_R32G32B32A32_SFLOAT, .offset = @offsetOf(WorldTxtVertex, "model") + @sizeOf([4]f32) * 3 },
-        };
-    }
-};
-
-pub const WorldTxtRenderer = struct {
-    const Self = @This();
-
-    vk_ctx: *.VulkanContext,
-    pipeline: Pipeline = undefined,
-    pipeline_layout: PipelineLayout = undefined,
-
-    descriptor_set_layout: c.VkDescriptorSetLayout = undefined,
-    descriptor_pool: c.VkDescriptorPool = undefined,
-    descriptor_set: c.VkDescriptorSet = undefined,
-    sampler: c.VkSampler = undefined,
-    texture: Image = undefined,
-    texture_view: c.VkImageView = undefined,
-    vertex_buffer: Buffer = undefined,
-    index_buffer: Buffer = undefined,
-    mapped_vertices: [*]WorldTxtVertex = undefined,
-    mapped_indices: [*]u32 = undefined,
-    vertex_count: u32 = 0,
-    index_count: u32 = 0,
-    font: gui.Font = undefined,
-
-    const MAX_VERTICES = 8192;
-    const MAX_INDICES = MAX_VERTICES * 3 / 2;
-
-    pub fn init(vk_ctx: *.VulkanContext, render_pass: RenderPass, swapchain: Swapchain) !Self {
-        var self: Self = .{
-            .vk_ctx = vk_ctx,
-            .font = .init(vk_ctx.allocator),
-        };
-
-        try self.font.loadFNT(font.periclesW01_fnt);
-        try self.createUnifiedTextureAndSampler(vk_ctx.allocator, font.periclesW01_png);
-        try self.createDescriptors();
-        try self.createBuffers(vk_ctx);
-        try self.createPipeline(render_pass, swapchain);
-        return self;
-    }
-
-    // Reuse createUnifiedTextureAndSampler, createDescriptors, createBuffers from GuiRenderer
-    // with adjustments for Text3DVertex in createBuffers
-
-    pub fn beginFrame(self: *Self) void {
-        self.vertex_count = 0;
-        self.index_count = 0;
-    }
-
-    pub fn endFrame(self: *Self, cmd_buffer: c.VkCommandBuffer, view_projection: [16]f32) void {
-        if (self.index_count == 0) return;
-
-        c.vkCmdBindPipeline(cmd_buffer, c.VK_PIPELINE_BIND_POINT_GRAPHICS, self.pipeline.handle);
-        c.vkCmdBindDescriptorSets(cmd_buffer, c.VK_PIPELINE_BIND_POINT_GRAPHICS, self.pipeline_layout.handle, 0, 1, &self.descriptor_set, 0, null);
-        const offset: c.VkDeviceSize = 0;
-        c.vkCmdBindVertexBuffers(cmd_buffer, 0, 1, &self.vertex_buffer.handle, &offset);
-        c.vkCmdBindIndexBuffer(cmd_buffer, self.index_buffer.handle, 0, c.VK_INDEX_TYPE_UINT32);
-
-        c.vkCmdPushConstants(cmd_buffer, self.pipeline_layout.handle, c.VK_SHADER_STAGE_VERTEX_BIT, 0, @sizeOf([16]f32), &view_projection);
-        c.vkCmdDrawIndexed(cmd_buffer, self.index_count, 1, 0, 0, 0);
-    }
-
-    pub fn drawText3D(self: *Self, text: []const u8, transform: [16]f32, color: [4]f32, font_scale: f32) void {
-        const M = math.matFromArray(transform); // Convert to matrix (assuming a math library)
-        var current_x: f32 = 0;
-
-        for (text) |char_code| {
-            if (self.vertex_count + 4 > MAX_VERTICES or self.index_count + 6 > MAX_INDICES) return;
-
-            const glyph = self.font.glyphs.get(char_code) orelse self.font.glyphs.get('?') orelse continue;
-
-            // Local positions with font_scale (text on XY plane)
-            const x0 = (current_x + glyph.xoffset) * font_scale;
-            const y0 = glyph.yoffset * font_scale;
-            const x1 = x0 + @as(f32, @floatFromInt(glyph.width)) * font_scale;
-            const y1 = y0 + @as(f32, @floatFromInt(glyph.height)) * font_scale;
-
-            const local_positions = [4][3]f32{
-                .{ x0, y0, 0 },
-                .{ x1, y0, 0 },
-                .{ x1, y1, 0 },
-                .{ x0, y1, 0 },
-            };
-
-            // Transform to world space
-            var world_positions: [4][3]f32 = undefined;
-            for (0..4) |i| {
-                const local_vec = math.vec4(local_positions[i][0], local_positions[i][1], local_positions[i][2], 1.0);
-                const world_vec = math.mulMat4Vec4(M, local_vec); // Matrix multiplication
-                world_positions[i] = .{ world_vec[0], world_vec[1], world_vec[2] };
-            }
-
-            // UV coordinates
-            const p0 = @as(f32, @floatFromInt(glyph.x)) / self.font.scale_w;
-            const v0 = @as(f32, @floatFromInt(glyph.y)) / self.font.scale_h;
-            const p1 = p0 + (@as(f32, @floatFromInt(glyph.width)) / self.font.scale_w);
-            const v1 = v0 + (@as(f32, @floatFromInt(glyph.height)) / self.font.scale_h);
-
-            // Add vertices
-            const v_idx = self.vertex_count;
-            self.mapped_vertices[v_idx + 0] = .{ .pos = world_positions[0], .uv = .{ p0, v0 }, .color = color };
-            self.mapped_vertices[v_idx + 1] = .{ .pos = world_positions[1], .uv = .{ p1, v0 }, .color = color };
-            self.mapped_vertices[v_idx + 2] = .{ .pos = world_positions[2], .uv = .{ p1, v1 }, .color = color };
-            self.mapped_vertices[v_idx + 3] = .{ .pos = world_positions[3], .uv = .{ u0, v1 }, .color = color };
-
-            // Indices
-            self.mapped_indices[self.index_count + 0] = v_idx;
-            self.mapped_indices[self.index_count + 1] = v_idx + 1;
-            self.mapped_indices[self.index_count + 2] = v_idx + 2;
-            self.mapped_indices[self.index_count + 3] = v_idx;
-            self.mapped_indices[self.index_count + 4] = v_idx + 2;
-            self.mapped_indices[self.index_count + 5] = v_idx + 3;
-
-            self.vertex_count += 4;
-            self.index_count += 6;
-
-            current_x += glyph.xadvance;
-        }
-    }
-};
-
 const UniformBufferObject = extern struct {
     view_matrix: [16]f32,
     perspective_matrix: [16]f32,
@@ -298,9 +138,9 @@ fn addLineCallback(ptr: *anyopaque) void {
     app.scene.addLine(
         .{ 0, 0, 0 },
         .{
-            random.float(f32) * 2.0 - 1.0,
-            random.float(f32) * 2.0 - 1.0,
-            random.float(f32) * 2.0 - 1.0,
+            (random.float(f32) * 2.0 - 1.0) * 5,
+            (random.float(f32) * 2.0 - 1.0) * 5,
+            (random.float(f32) * 2.0 - 1.0) * 5,
         },
     ) catch unreachable;
     app.updateVertexBuffer() catch unreachable;
@@ -1817,7 +1657,7 @@ pub const App = struct {
 
         const clear_values = [_]c.VkClearValue{
             // Color attachment clear value
-            .{ .color = .{ .float32 = .{ 0.1, 0.1, 0.1, 1.0 } } },
+            .{ .color = .{ .float32 = .{ 0.345, 0.239, 0.502, 1.0 } } },
             // Depth attachment clear value
             .{ .depthStencil = .{ .depth = 0.0, .stencil = 0 } },
         };
@@ -1879,10 +1719,14 @@ pub const math = struct {
         };
     }
 
-    pub fn mulMat4Vec4(m: [4][4]f32, v: @Vector(4, f32)) @Vector(4, f32) {
+    pub fn mulMat4Vec4(m: [16]f32, v: @Vector(4, f32)) @Vector(4, f32) {
         var result: @Vector(4, f32) = .{ 0, 0, 0, 0 };
         inline for (0..4) |i| {
-            result[i] = m[i][0] * v[0] + m[i][1] * v[1] + m[i][2] * v[2] + m[i][3] * v[3];
+            result[i] =
+                m[i * 4 + 0] * v[0] +
+                m[i * 4 + 1] * v[1] +
+                m[i * 4 + 2] * v[2] +
+                m[i * 4 + 3] * v[3];
         }
         return result;
     }
