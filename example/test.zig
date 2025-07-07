@@ -1451,10 +1451,10 @@ pub const App = struct {
             .y = 10,
             .width = 150,
             .height = 30,
-            .on_click = addLineCallback,
             .data = .{
                 .button = .{
-                    .text = "Add Line",
+                    .text = try self.allocator.dupe(u8, "Add Line"),
+                    .on_click = addLineCallback,
                 },
             },
         });
@@ -1464,10 +1464,10 @@ pub const App = struct {
             .y = 50,
             .width = 150,
             .height = 30,
-            .on_click = clearLinesCallback,
             .data = .{
                 .button = .{
-                    .text = "Clear Lines",
+                    .text = try self.allocator.dupe(u8, "Clear Lines"),
+                    .on_click = clearLinesCallback,
                 },
             },
         });
@@ -1477,10 +1477,25 @@ pub const App = struct {
             .y = 550,
             .width = 150,
             .height = 30,
-            .on_click = quitCallback,
             .data = .{
                 .button = .{
-                    .text = "Quit",
+                    .text = try self.allocator.dupe(u8, "Quit"),
+                    .on_click = quitCallback,
+                },
+            },
+        });
+
+        try self.main_ui.addPainText(.{
+            .x = 10.0,
+            .y = @as(f32, @floatFromInt(self.window.size.y)) - 120.0,
+            .width = 150,
+            .height = 30,
+
+            .data = .{
+                .plain_text = .{
+                    .text = try self.allocator.dupe(u8, "fps:#########"), //TODO: change this hack
+                    .font_size = 24.0,
+                    .text_color = .{ 1, 0, 0.8, 1 },
                 },
             },
         });
@@ -1490,7 +1505,7 @@ pub const App = struct {
         // Wait for device to be idle before cleaning up
         _ = c.vkDeviceWaitIdle(self.vk_ctx.device.handle);
 
-        self.main_ui.deinit();
+        self.main_ui.deinit(self.allocator);
         self.gui_renderer.deinit();
         self.text_renderer.deinit();
         self.cleanupSwapchain();
@@ -1517,8 +1532,9 @@ pub const App = struct {
     }
 
     pub fn run(self: *Self) !void {
+        self.perf.setPtr(self.main_ui.widgets.getLast().data.plain_text.text);
         while (c.glfwWindowShouldClose(self.window.handle) == 0) {
-            // self.perf.beginFrame();
+            self.perf.beginFrame();
             self.gui_renderer.beginFrame();
             self.text_renderer.beginFrame();
             self.wd_ctx.beginFrame();
@@ -1533,90 +1549,69 @@ pub const App = struct {
                 c.glfwWaitEvents();
                 continue;
             }
+            // Example 1: Static text (original)
+            const transform1 = scene.Transform.new(.{ .position = .{ -5, 5, 0 } }).toMatrix();
+            self.text_renderer.drawText("Hello 3D World!", transform1, .{ 1.0, 0.8, 0.2, 1.0 }, 1.0);
 
-            // const transform1 = scene.Transform.new(.{ .position = .{ -5, 5, 0 } }).toMatrix();
-            // self.text_renderer.drawText(
-            //     \\awzwsxsedrfvtbyghnujmiecdrfvctgbhnujmi,ko
-            //     \\GC\/S$!OAU@ZHDTYRPB
-            // , transform1, .{ 1.0, 0.8, 0.2, 1.0 }, 1.0);
-
-            // Example 2: Text rotating around the Y axis
-
+            // Example 2: Text rotating around the Z axis (original)
             const time = @as(f32, @floatFromInt(@mod(std.time.milliTimestamp(), 10000))) / 1000.0;
-            // const transform2 = scene.Transform.new(.{
-            //     .position = .{ 0, 0, 5 },
-            //     .rotation = scene.Quat.fromAxisAngle(.{ 0, 0, 1 }, time * 0.5),
-            // }).toMatrix();
-            // self.text_renderer.drawText(
-            //     "rotation z",
-            //     transform2,
-            //     .{ 0.2, 1.0, 0.8, 1.0 },
-            //     1.0,
-            // );
-
-            // self.text_renderer.drawText(
-            //     "rotation z",
-            //     scene.Transform.new(.{
-            //         .position = .{ 0, 0, -5 },
-            //         .rotation = scene.Quat.fromAxisAngle(.{ 0, 0, 1 }, time * 0.5),
-            //     }).toMatrix(),
-            //     .{ 0.2, 1.0, 0.8, 1.0 },
-            //     1.0,
-            // );
-            // self.text_renderer.drawText(
-            //     "rotation z",
-            //     scene.Transform.new(.{
-            //         .position = .{ 0, 5, 5 },
-            //         .rotation = scene.Quat.fromAxisAngle(.{ 0, 0, 1 }, time * 0.5),
-            //     }).toMatrix(),
-            //     .{ 0.2, 1.0, 0.8, 1.0 },
-            //     1.0,
-            // );
-            // self.text_renderer.drawText(
-            //     "Zig Vulkan Demo",
-            //     scene.Transform.new(.{
-            //         .position = .{ 5, -5, 0 },
-            //         .rotation = scene.Quat.fromAxisAngle(.{ 0, 1, 0 }, time),
-            //         .scale = .{ 1.5, 1.5, 1.5 },
-            //     }).toMatrix(),
-            //     .{ 0.8, 0.3, 1.0, 1.0 },
-            //     1.2,
-            // );
-
+            const transform2 = scene.Transform.new(.{
+                .position = .{ 0, 0, -5 },
+                .rotation = scene.Quat.fromAxisAngle(.{ 0, 0, 1 }, time * 0.5),
+            }).toMatrix();
             self.text_renderer.drawText(
-                "Rotate Me!",
-                scene.Transform.new(.{
-                    .position = .{ 0, 3, 1 },
-                    .rotation = scene.Quat.fromAxisAngle(.{ 1, 0, 0 }, time * 2.0),
-                    .scale = .{ 0.8, 0.8, 0.8 },
-                }).toMatrix(),
-                .{ 0.2, 0.6, 1.0, 1.0 },
-                0.9,
+                \\ABCDEFGHIJKLMNOPQRSTUVWXYZ
+                \\1234567890 !@#$%^&*()_+-=
+            ,
+                transform2,
+                .{ 0.2, 1.0, 0.8, 1.0 },
+                1.0,
             );
 
+            // NEW Example 3: Tumbling text, rotating on multiple axes
+            const rot_x = scene.Quat.fromAxisAngle(.{ 1, 0, 0 }, time * 0.3);
+            const rot_y = scene.Quat.fromAxisAngle(.{ 0, 1, 0 }, time * 0.5);
+            const tumbling_transform = scene.Transform.new(.{
+                .position = .{ 7, 3, -4 },
+                .rotation = rot_x.mul(rot_y), // Combine rotations
+            }).toMatrix();
+            self.text_renderer.drawText("Tumbling Test 123", tumbling_transform, .{ 1.0, 0.3, 0.3, 1.0 }, 1.5);
+
+            // NEW Example 4: Text orbiting in a circle on the XZ plane
+            const orbit_radius: f32 = 8.0;
+            const orbit_transform = scene.Transform.new(.{
+                .position = .{
+                    orbit_radius * @cos(time * 0.8),
+                    2.0, // Fixed height
+                    orbit_radius * @sin(time * 0.8),
+                },
+                // Make it "roll" along the orbit path by rotating on its own Y axis
+                .rotation = scene.Quat.fromAxisAngle(.{ 0, 1, 0 }, -time),
+            }).toMatrix();
             self.text_renderer.drawText(
-                "ScalingText",
-                scene.Transform.new(.{
-                    .position = .{ -3, -3, 1 },
-                    .scale = .{ 1.0 + 0.5 * @sin(time), 1.0 + 0.5 * @sin(time), 1.0 },
-                }).toMatrix(),
-                .{ 1.0, 0.0, 0.0, 1.0 },
-                10.0,
+                \\The quick brown fox
+                \\jumps over the lazy dog.
+            ,
+                orbit_transform,
+                .{ 0.5, 0.5, 1.0, 1.0 },
+                0.8,
             );
+
+            // NEW Example 5: Text moving up and down on a sine wave
+            const wave_transform = scene.Transform.new(.{
+                .position = .{
+                    -10.0,
+                    @sin(time * 2.0) * 3.0, // Moves up and down
+                    -6.0,
+                },
+                // Make it face the camera a bit
+                .rotation = scene.Quat.fromAxisAngle(.{ 0, 1, 0 }, 0.5),
+            }).toMatrix();
+            self.text_renderer.drawText("Sine Wave Motion!", wave_transform, .{ 1.0, 1.0, 0.0, 1.0 }, 0.7);
 
             self.gui_renderer.processAndDrawUi(self, &self.main_ui);
 
-            // self.perf.endFrame();
-            // const fps = std.fmt.allocPrint(self.vk_ctx.allocator, "fps: {d:1}", .{self.perf.avg_fps}) catch unreachable;
-            // defer self.vk_ctx.allocator.free(fps);
-
-            // self.gui_renderer.drawText(
-            //     fps,
-            //     10.0,
-            //     @as(f32, @floatFromInt(self.window.size.y)) - 80.0,
-            //     .{ 1.0, 0.0, 0.5, 1.0 },
-            //     0.8,
-            // );
+            self.perf.endFrame();
 
             try self.draw();
         }
@@ -1751,7 +1746,8 @@ pub const App = struct {
 
         const clear_values = [_]c.VkClearValue{
             // Color attachment clear value
-            .{ .color = .{ .float32 = .{ 0.345, 0.239, 0.502, 1.0 } } },
+            // .{ .color = .{ .float32 = .{ 0.345, 0.239, 0.502, 1.0 } } },
+            .{ .color = .{ .float32 = .{ 0, 0, 0, 1.0 } } },
             // Depth attachment clear value
             .{ .depthStencil = .{ .depth = 0.0, .stencil = 0 } },
         };
@@ -1799,29 +1795,3 @@ pub fn main() !void {
 
     try app.run();
 }
-pub const math = struct {
-    pub fn vec4(x: f32, y: f32, z: f32, w: f32) @Vector(4, f32) {
-        return .{ x, y, z, w };
-    }
-
-    pub fn matFromArray(arr: [16]f32) [4][4]f32 {
-        return .{
-            .{ arr[0], arr[1], arr[2], arr[3] },
-            .{ arr[4], arr[5], arr[6], arr[7] },
-            .{ arr[8], arr[9], arr[10], arr[11] },
-            .{ arr[12], arr[13], arr[14], arr[15] },
-        };
-    }
-
-    pub fn mulMat4Vec4(m: [16]f32, v: @Vector(4, f32)) @Vector(4, f32) {
-        var result: @Vector(4, f32) = .{ 0, 0, 0, 0 };
-        inline for (0..4) |i| {
-            result[i] =
-                m[i * 4 + 0] * v[0] +
-                m[i * 4 + 1] * v[1] +
-                m[i * 4 + 2] * v[2] +
-                m[i * 4 + 3] * v[3];
-        }
-        return result;
-    }
-};

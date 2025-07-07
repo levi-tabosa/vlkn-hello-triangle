@@ -11,5 +11,8 @@ layout(location = 0) out vec4 outColor;
 
 void main() {
     float alpha = texture(fontSampler, fragUV).r;
+    if(alpha < 0.1) {
+        discard;
+    }
     outColor = vec4(fragColor.rgb, fragColor.a * alpha);
 }

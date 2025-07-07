@@ -220,10 +220,10 @@ pub const Scene = struct {
         while (i < upperLimit) : (i += 1) {
             const idx: f32 = @as(f32, @floatFromInt(i));
             const index = @as(usize, @intCast((i + j) * 4));
-            grid[index] = V3{ .pos = .{ idx, fixed, 0.0 }, .color = .{ idx, fixed, 0.0, 1.0 } };
-            grid[index + 1] = V3{ .pos = .{ idx, -fixed, 0.0 }, .color = .{ idx, -fixed, 0.0, 1.0 } };
-            grid[index + 2] = V3{ .pos = .{ fixed, idx, 0.0 }, .color = .{ fixed, idx, 0.0, 1.0 } };
-            grid[index + 3] = V3{ .pos = .{ -fixed, idx, 0.0 }, .color = .{ -fixed, idx, 0.0, 1.0 } };
+            grid[index] = V3{ .pos = .{ idx, fixed, 0.0 }, .color = .{ 1, 0.5, 0.0, 1.0 } };
+            grid[index + 1] = V3{ .pos = .{ idx, -fixed, 0.0 }, .color = .{ 1, 0.5, 0.0, 1.0 } };
+            grid[index + 2] = V3{ .pos = .{ fixed, idx, 0.0 }, .color = .{ 1, 0.5, 0.0, 1.0 } };
+            grid[index + 3] = V3{ .pos = .{ -fixed, idx, 0.0 }, .color = .{ 1, 0.5, 0.0, 1.0 } };
         }
 
         return grid;

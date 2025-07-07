@@ -11,10 +11,17 @@ const OnClickFn = *const fn (app: *anyopaque) void;
 
 const WidgetData = union(enum) {
     button: struct {
-        text: []const u8,
+        text: []u8 = undefined,
         font_size: f32 = 18.0, // Default value
         rect_color: @Vector(4, f32) = .{ 0.8, 0.8, 0.8, 1.0 }, // White rectangle,
         text_color: @Vector(4, f32) = .{ 0.0, 0.0, 0.0, 1.0 }, // Black text,
+        on_click: ?OnClickFn = null,
+    },
+    plain_text: struct {
+        text: []u8 = undefined,
+        font_size: f32 = 18.0, // Default value
+        text_color: @Vector(4, f32) = .{ 0.12, 0.12, 0.12, 1.0 }, // Black text,
+
     },
 };
 
@@ -23,7 +30,6 @@ pub const Widget = struct {
     y: f32,
     width: f32,
     height: f32,
-    on_click: ?OnClickFn = null,
     data: WidgetData,
 };
 
@@ -34,16 +40,27 @@ pub const UI = struct {
 
     pub fn init(allocator: std.mem.Allocator) Self {
         return .{
-            .widgets = std.ArrayList(Widget).init(allocator),
+            .widgets = .init(allocator),
         };
     }
 
-    pub fn deinit(self: *Self) void {
+    pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
+        for (self.widgets.items) |w| {
+            switch (w.data) {
+                .button => |data| allocator.free(data.text),
+                .plain_text => |data| allocator.free(data.text),
+            }
+        }
         self.widgets.deinit();
     }
 
     pub fn addButton(self: *Self, widget: Widget) !void {
         assert(widget.data == .button); // Ensure it's a button
+        try self.widgets.append(widget);
+    }
+
+    pub fn addPainText(self: *Self, widget: Widget) !void {
+        assert(widget.data == .plain_text);
         try self.widgets.append(widget);
     }
 };
@@ -451,8 +468,8 @@ pub const GuiRenderer = struct {
             }
 
             switch (widget.data) {
-                .button => |button_data| {
-                    var rect_color = button_data.rect_color;
+                .button => |data| {
+                    var rect_color = data.rect_color;
                     if (self.hot_id == id) {
                         rect_color = .{ rect_color[0] + 0.1, rect_color[1] + 0.1, rect_color[2] + 0.1, rect_color[3] }; // Hover
                         if (self.active_id == id) {
@@ -461,20 +478,27 @@ pub const GuiRenderer = struct {
                     }
                     self.drawRect(widget.x, widget.y, widget.width, widget.height, rect_color);
 
-                    const scale = if (button_data.font_size > 0) button_data.font_size / self.font.font_size else 1.0;
-                    const text_width = self.measureText(button_data.text, scale);
+                    const scale = if (data.font_size > 0) data.font_size / self.font.font_size else 1.0;
+                    const text_width = self.measureText(data.text, scale);
                     const text_x = widget.x + (widget.width - text_width) / 2.0;
                     const scaled_line_height = self.font.line_height * scale;
                     const text_y = widget.y + (widget.height - scaled_line_height) / 2.0;
 
-                    self.drawText(button_data.text, text_x, text_y, button_data.text_color, scale);
+                    self.drawText(data.text, text_x, text_y, data.text_color, scale);
+                    if (widget.data.button.on_click) |callback| {
+                        if (!clicked) continue;
+                        callback(app);
+                    }
                 },
-            }
+                .plain_text => |data| {
+                    const scale = if (data.font_size > 0) data.font_size / self.font.font_size else 1.0;
+                    const text_width = self.measureText(data.text, scale);
+                    const text_x = widget.x + (widget.width - text_width) / 2.0;
+                    const scaled_line_height = self.font.line_height * scale;
+                    const text_y = widget.y + (widget.height - scaled_line_height) / 2.0;
 
-            if (clicked) {
-                if (widget.on_click) |callback| {
-                    callback(app);
-                }
+                    self.drawText(data.text, text_x, text_y, data.text_color, scale);
+                },
             }
         }
     }

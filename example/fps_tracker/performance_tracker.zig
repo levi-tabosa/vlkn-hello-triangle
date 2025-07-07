@@ -17,11 +17,16 @@ pub const PerformanceTracker = struct {
     avg_fps: f32 = 0,
     min_fps: f32 = 0,
     max_fps: f32 = 0,
+    a: ?[]u8 = null,
 
     pub fn init() Self {
         return .{
             .last_frame_time = std.time.nanoTimestamp(),
         };
+    }
+
+    pub fn setPtr(self: *Self, ptr: []u8) void {
+        self.a = ptr[4..];
     }
 
     /// Call this at the very beginning of your main loop.
@@ -64,5 +69,10 @@ pub const PerformanceTracker = struct {
         self.avg_fps = 1000.0 / avg_time_ms;
         self.min_fps = 1000.0 / max_time_ms;
         self.max_fps = 1000.0 / min_time_ms;
+
+        // self.a.?[0] = 'a';
+        // const b = self.a.?[0..4];
+        _ = std.fmt.bufPrint(self.a.?, "{d}", .{self.avg_fps}) catch unreachable;
+        // std.debug.print("{s}", .{std.fmt.bufPrint(self.a.?[0..4], "{d}", .{self.avg_fps}) catch @panic("peinus")});
     }
 };
