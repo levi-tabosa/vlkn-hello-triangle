@@ -7,12 +7,11 @@ const font = @import("font");
 const text3d_vert_shader_bin = @import("spirv").text3d_vs;
 const text3d_frag_shader_bin = @import("spirv").text3d_fs;
 
-// The new vertex definition including the model matrix
+// CHANGED: The vertex definition no longer includes the model matrix
 const Text3DVertex = extern struct {
     pos: [3]f32,
     uv: [2]f32,
     color: [4]f32,
-    model: [16]f32, // mat4
 
     pub fn getBindingDescription() c.VkVertexInputBindingDescription {
         return .{
@@ -22,8 +21,8 @@ const Text3DVertex = extern struct {
         };
     }
 
-    // A mat4 is treated as 4 vec4s in vertex attributes
-    pub fn getAttributeDescriptions() [7]c.VkVertexInputAttributeDescription {
+    // CHANGED: Reduced attribute descriptions
+    pub fn getAttributeDescriptions() [3]c.VkVertexInputAttributeDescription {
         return .{
             // location 0: in_pos (vec3)
             .{ .binding = 0, .location = 0, .format = c.VK_FORMAT_R32G32B32_SFLOAT, .offset = @offsetOf(Text3DVertex, "pos") },
@@ -31,21 +30,13 @@ const Text3DVertex = extern struct {
             .{ .binding = 0, .location = 1, .format = c.VK_FORMAT_R32G32_SFLOAT, .offset = @offsetOf(Text3DVertex, "uv") },
             // location 2: in_color (vec4)
             .{ .binding = 0, .location = 2, .format = c.VK_FORMAT_R32G32B32A32_SFLOAT, .offset = @offsetOf(Text3DVertex, "color") },
-            // location 3,4,5,6: in_model (mat4)
-            .{ .binding = 0, .location = 3, .format = c.VK_FORMAT_R32G32B32A32_SFLOAT, .offset = @offsetOf(Text3DVertex, "model") + @sizeOf([4]f32) * 0 },
-            .{ .binding = 0, .location = 4, .format = c.VK_FORMAT_R32G32B32A32_SFLOAT, .offset = @offsetOf(Text3DVertex, "model") + @sizeOf([4]f32) * 1 },
-            .{ .binding = 0, .location = 5, .format = c.VK_FORMAT_R32G32B32A32_SFLOAT, .offset = @offsetOf(Text3DVertex, "model") + @sizeOf([4]f32) * 2 },
-            .{ .binding = 0, .location = 6, .format = c.VK_FORMAT_R32G32B32A32_SFLOAT, .offset = @offsetOf(Text3DVertex, "model") + @sizeOf([4]f32) * 3 },
         };
     }
 };
 
-const DrawInfo = extern struct {
-    base_instance_offset: u32,
-    // Add some padding to respect SSBO alignment rules if needed
-    _p1: u32,
-    _p2: u32,
-    _p3: u32,
+// NEW: This struct will be stored in an SSBO. Each instance corresponds to one drawText call.
+const DrawData = extern struct {
+    model: [16]f32, // mat4
 };
 
 // We will build this buffer on the CPU every frame
@@ -58,38 +49,46 @@ pub const Text3DRenderer = struct {
     pipeline: vk.Pipeline = undefined,
     pipeline_layout: vk.PipelineLayout = undefined,
 
-    // This renderer will REUSE the descriptor set from the main scene,
-    // as it needs the same UBO (view/projection).
-    // It will also need its own descriptor set for the font sampler.
+    // --- Font Texture Descriptors (Set 1) ---
     font_descriptor_set_layout: c.VkDescriptorSetLayout = undefined,
-    font_descriptor_pool: c.VkDescriptorPool = undefined,
+    font_descriptor_pool: c.VkDescriptorPool = undefined, // This pool will now hold two sets
     font_descriptor_set: c.VkDescriptorSet = undefined,
+
+    // NEW: Draw Data Descriptors (Set 2) for the SSBO
+    draw_data_descriptor_set_layout: c.VkDescriptorSetLayout = undefined,
+    draw_data_descriptor_set: c.VkDescriptorSet = undefined,
 
     sampler: c.VkSampler = undefined,
     texture: vk.Image = undefined,
     texture_view: c.VkImageView = undefined,
 
+    // --- Buffers ---
+    // NEW: Buffer for indirect draw commands
     indirect_command_buffer: vk.Buffer = undefined,
     mapped_indirect_commands: [*]IndirectCommand = undefined,
 
-    // Buffer for the draw info (one per unique string)
-    draw_info_buffer: vk.Buffer = undefined,
-    mapped_draw_infos: [*]DrawInfo = undefined,
+    // NEW: Buffer for draw data (model matrices) SSBO
+    draw_data_buffer: vk.Buffer = undefined,
+    mapped_draw_data: [*]DrawData = undefined,
+
+    // Main geometry buffers
     vertex_buffer: vk.Buffer = undefined,
     index_buffer: vk.Buffer = undefined,
     mapped_vertices: [*]Text3DVertex = undefined,
     mapped_indices: [*]u32 = undefined,
+
+    // Frame-specific counters
     vertex_count: u32 = 0,
     index_count: u32 = 0,
+    draw_count: u32 = 0, // NEW: Counter for indirect draw calls
 
     font: gui.Font = undefined,
     png_handle: gui.PngImage = undefined,
 
     const MAX_VERTICES = 16384;
     const MAX_INDICES = MAX_VERTICES * 3 / 2;
-    const MAX_DRAW_CALLS = 256;
+    const MAX_DRAW_CALLS = 256; // This is now the max number of unique strings per frame
 
-    // We pass in the main scene's descriptor set layout to share the UBO
     pub fn init(vk_ctx: *vk.VulkanContext, render_pass: vk.RenderPass, main_scene_ds_layout: vk.DescriptorSetLayout, swapchain: vk.Swapchain) !Self {
         var self: Self = .{
             .vk_ctx = vk_ctx,
@@ -97,10 +96,11 @@ pub const Text3DRenderer = struct {
         };
 
         try self.font.loadFNT(font.periclesW01_fnt);
-        // We only need the font atlas part, no need for the white pixel
         try self.createFontTextureAndSampler(vk_ctx.allocator, font.periclesW01_png);
-        try self.createFontDescriptors();
+        // CHANGED: Descriptor creation now handles both font and SSBO
+        try self.createDescriptors();
         try self.createBuffers(vk_ctx);
+        // CHANGED: Pipeline creation now takes the new SSBO descriptor layout
         try self.createPipeline(render_pass, main_scene_ds_layout, swapchain);
         return self;
     }
@@ -113,6 +113,8 @@ pub const Text3DRenderer = struct {
 
         c.vkDestroyDescriptorPool(self.vk_ctx.device.handle, self.font_descriptor_pool, null);
         c.vkDestroyDescriptorSetLayout(self.vk_ctx.device.handle, self.font_descriptor_set_layout, null);
+        // NEW: deinit draw data layout
+        c.vkDestroyDescriptorSetLayout(self.vk_ctx.device.handle, self.draw_data_descriptor_set_layout, null);
 
         self.pipeline.deinit(self.vk_ctx);
         self.pipeline_layout.deinit(self.vk_ctx);
@@ -120,11 +122,17 @@ pub const Text3DRenderer = struct {
         self.font.deinit();
         self.vertex_buffer.unmap(self.vk_ctx);
         self.index_buffer.unmap(self.vk_ctx);
+        // NEW: unmap new buffers
+        self.indirect_command_buffer.unmap(self.vk_ctx);
+        self.draw_data_buffer.unmap(self.vk_ctx);
+
         self.vertex_buffer.deinit(self.vk_ctx);
         self.index_buffer.deinit(self.vk_ctx);
+        // NEW: deinit new buffers
+        self.indirect_command_buffer.deinit(self.vk_ctx);
+        self.draw_data_buffer.deinit(self.vk_ctx);
     }
 
-    // Simplified version without the white pixel
     fn createFontTextureAndSampler(self: *Self, allocator: std.mem.Allocator, png_data: []const u8) !void {
         const image = try gui.loadPngGrayscale(allocator, png_data);
         self.png_handle = image;
@@ -171,55 +179,76 @@ pub const Text3DRenderer = struct {
         try vk.vkCheck(c.vkCreateSampler(self.vk_ctx.device.handle, &sampler_info, null, &self.sampler));
     }
 
-    fn createFontDescriptors(self: *Self) !void {
-        // This layout is for the font sampler at binding 1
+    // CHANGED: Renamed and expanded to create all descriptor sets for this renderer
+    fn createDescriptors(self: *Self) !void {
+        // --- Layouts ---
+        // Layout for Font Sampler (Set 1)
         const sampler_layout_binding = c.VkDescriptorSetLayoutBinding{
-            .binding = 0, // Use binding 0 for the font sampler
+            .binding = 0,
             .descriptorType = c.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
             .descriptorCount = 1,
             .stageFlags = c.VK_SHADER_STAGE_FRAGMENT_BIT,
         };
-        const layout_info = c.VkDescriptorSetLayoutCreateInfo{
-            .bindingCount = 1,
-            .pBindings = &sampler_layout_binding,
-        };
-        try vk.vkCheck(c.vkCreateDescriptorSetLayout(self.vk_ctx.device.handle, &layout_info, null, &self.font_descriptor_set_layout));
+        const font_layout_info = c.VkDescriptorSetLayoutCreateInfo{ .bindingCount = 1, .pBindings = &sampler_layout_binding };
+        try vk.vkCheck(c.vkCreateDescriptorSetLayout(self.vk_ctx.device.handle, &font_layout_info, null, &self.font_descriptor_set_layout));
 
-        const pool_size = c.VkDescriptorPoolSize{
-            .type = c.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+        // NEW: Layout for Draw Data SSBO (Set 2)
+        const ssbo_layout_binding = c.VkDescriptorSetLayoutBinding{
+            .binding = 0,
+            .descriptorType = c.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
             .descriptorCount = 1,
+            .stageFlags = c.VK_SHADER_STAGE_VERTEX_BIT, // Used in vertex shader
+        };
+        const draw_data_layout_info = c.VkDescriptorSetLayoutCreateInfo{ .bindingCount = 1, .pBindings = &ssbo_layout_binding };
+        try vk.vkCheck(c.vkCreateDescriptorSetLayout(self.vk_ctx.device.handle, &draw_data_layout_info, null, &self.draw_data_descriptor_set_layout));
+
+        // --- Pool ---
+        // NEW: Pool needs to accommodate both descriptor types
+        const pool_sizes = [_]c.VkDescriptorPoolSize{
+            .{ .type = c.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 1 },
+            .{ .type = c.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1 },
         };
         const pool_info = c.VkDescriptorPoolCreateInfo{
-            .poolSizeCount = 1,
-            .pPoolSizes = &pool_size,
-            .maxSets = 1,
+            .poolSizeCount = pool_sizes.len,
+            .pPoolSizes = &pool_sizes,
+            .maxSets = 2, // We are allocating two sets from this pool
         };
         try vk.vkCheck(c.vkCreateDescriptorPool(self.vk_ctx.device.handle, &pool_info, null, &self.font_descriptor_pool));
 
+        // --- Allocation & Updates ---
+        // Allocate Set 1 (Font Sampler)
+        const set_layouts = [_]c.VkDescriptorSetLayout{ self.font_descriptor_set_layout, self.draw_data_descriptor_set_layout };
+        var allocated_sets: [2]c.VkDescriptorSet = undefined;
         const set_alloc_info = c.VkDescriptorSetAllocateInfo{
             .descriptorPool = self.font_descriptor_pool,
-            .descriptorSetCount = 1,
-            .pSetLayouts = &self.font_descriptor_set_layout,
+            .descriptorSetCount = set_layouts.len,
+            .pSetLayouts = &set_layouts,
         };
-        try vk.vkCheck(c.vkAllocateDescriptorSets(self.vk_ctx.device.handle, &set_alloc_info, &self.font_descriptor_set));
+        try vk.vkCheck(c.vkAllocateDescriptorSets(self.vk_ctx.device.handle, &set_alloc_info, &allocated_sets));
+        self.font_descriptor_set = allocated_sets[0];
+        self.draw_data_descriptor_set = allocated_sets[1];
 
+        // Update Set 1 (Font Sampler)
         const image_info = c.VkDescriptorImageInfo{
             .imageLayout = c.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
             .imageView = self.texture_view,
             .sampler = self.sampler,
         };
-        const desc_write = c.VkWriteDescriptorSet{
+        const font_desc_write = c.VkWriteDescriptorSet{
             .dstSet = self.font_descriptor_set,
-            .dstBinding = 0, // Write to binding 0
+            .dstBinding = 0,
             .dstArrayElement = 0,
             .descriptorType = c.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
             .descriptorCount = 1,
             .pImageInfo = &image_info,
         };
-        c.vkUpdateDescriptorSets(self.vk_ctx.device.handle, 1, &desc_write, 0, null);
+        c.vkUpdateDescriptorSets(self.vk_ctx.device.handle, 1, &font_desc_write, 0, null);
+
+        // Update Set 2 (Draw Data SSBO) - We'll do this after creating the buffer in createBuffers()
     }
 
     fn createBuffers(self: *Self, vk_ctx: *vk.VulkanContext) !void {
+        // Vertex Buffer
         const vtx_buffer_size = MAX_VERTICES * @sizeOf(Text3DVertex);
         self.vertex_buffer = try vk.Buffer.init(
             vk_ctx,
@@ -229,6 +258,7 @@ pub const Text3DRenderer = struct {
         );
         self.mapped_vertices = try self.vertex_buffer.map(vk_ctx, Text3DVertex);
 
+        // Index Buffer
         const idx_buffer_size = MAX_INDICES * @sizeOf(u32);
         self.index_buffer = try vk.Buffer.init(
             vk_ctx,
@@ -237,12 +267,50 @@ pub const Text3DRenderer = struct {
             c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
         );
         self.mapped_indices = try self.index_buffer.map(vk_ctx, u32);
+
+        // NEW: Indirect Command Buffer
+        const indirect_buffer_size = MAX_DRAW_CALLS * @sizeOf(IndirectCommand);
+        self.indirect_command_buffer = try vk.Buffer.init(
+            vk_ctx,
+            indirect_buffer_size,
+            c.VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT,
+            c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+        );
+        self.mapped_indirect_commands = try self.indirect_command_buffer.map(vk_ctx, IndirectCommand);
+
+        // NEW: Draw Data SSBO
+        const draw_data_buffer_size = MAX_DRAW_CALLS * @sizeOf(DrawData);
+        self.draw_data_buffer = try vk.Buffer.init(
+            vk_ctx,
+            draw_data_buffer_size,
+            c.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+            c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+        );
+        self.mapped_draw_data = try self.draw_data_buffer.map(vk_ctx, DrawData);
+
+        // NEW: Now that the SSBO exists, update its descriptor set
+        const buffer_info = c.VkDescriptorBufferInfo{
+            .buffer = self.draw_data_buffer.handle,
+            .offset = 0,
+            .range = c.VK_WHOLE_SIZE,
+        };
+        const ssbo_desc_write = c.VkWriteDescriptorSet{
+            .dstSet = self.draw_data_descriptor_set,
+            .dstBinding = 0,
+            .dstArrayElement = 0,
+            .descriptorType = c.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            .descriptorCount = 1,
+            .pBufferInfo = &buffer_info,
+        };
+        c.vkUpdateDescriptorSets(self.vk_ctx.device.handle, 1, &ssbo_desc_write, 0, null);
     }
 
     pub fn createPipeline(self: *Self, render_pass: vk.RenderPass, main_scene_ds_layout: vk.DescriptorSetLayout, swapchain: vk.Swapchain) !void {
+        // CHANGED: Now three descriptor set layouts
         const set_layouts = [_]c.VkDescriptorSetLayout{
             main_scene_ds_layout.handle,
             self.font_descriptor_set_layout,
+            self.draw_data_descriptor_set_layout, // NEW
         };
 
         self.pipeline_layout = try vk.PipelineLayout.init(self.vk_ctx, .{
@@ -250,6 +318,7 @@ pub const Text3DRenderer = struct {
             .pSetLayouts = &set_layouts,
         });
 
+        // The rest of the pipeline creation is almost identical, just using the updated vertex definition
         var vert_mod = try vk.ShaderModule.init(self.vk_ctx.allocator, self.vk_ctx.device.handle, text3d_vert_shader_bin);
         defer vert_mod.deinit();
         var frag_mod = try vk.ShaderModule.init(self.vk_ctx.allocator, self.vk_ctx.device.handle, text3d_frag_shader_bin);
@@ -261,14 +330,13 @@ pub const Text3DRenderer = struct {
         };
 
         const binding_desc = Text3DVertex.getBindingDescription();
-        const attrib_desc = Text3DVertex.getAttributeDescriptions();
+        const attrib_desc = Text3DVertex.getAttributeDescriptions(); // CHANGED: This is now smaller
         const vertex_input_info = c.VkPipelineVertexInputStateCreateInfo{
             .vertexBindingDescriptionCount = 1,
             .pVertexBindingDescriptions = &binding_desc,
             .vertexAttributeDescriptionCount = attrib_desc.len,
             .pVertexAttributeDescriptions = &attrib_desc,
         };
-
         const input_assembly = c.VkPipelineInputAssemblyStateCreateInfo{
             .topology = c.VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
         };
@@ -351,19 +419,20 @@ pub const Text3DRenderer = struct {
     pub fn beginFrame(self: *Self) void {
         self.vertex_count = 0;
         self.index_count = 0;
+        self.draw_count = 0; // NEW: Reset draw counter
     }
 
+    // CHANGED: endFrame now uses vkCmdDrawIndexedIndirect
     pub fn endFrame(self: *Self, cmd_buffer: c.VkCommandBuffer, main_descriptor_set: vk.DescriptorSet) void {
-        if (self.index_count == 0) return;
+        if (self.draw_count == 0) return;
 
         c.vkCmdBindPipeline(cmd_buffer, c.VK_PIPELINE_BIND_POINT_GRAPHICS, self.pipeline.handle);
 
-        // Bind descriptor sets:
-        // Set 0: Main scene UBO (for view/projection)
-        // Set 1: Font sampler
+        // CHANGED: Bind all three descriptor sets
         const d_sets = [_]c.VkDescriptorSet{
-            main_descriptor_set.handle,
-            self.font_descriptor_set,
+            main_descriptor_set.handle, // Set 0: Scene UBO
+            self.font_descriptor_set, // Set 1: Font Sampler
+            self.draw_data_descriptor_set, // Set 2: Draw Data SSBO
         };
         c.vkCmdBindDescriptorSets(cmd_buffer, c.VK_PIPELINE_BIND_POINT_GRAPHICS, self.pipeline_layout.handle, 0, d_sets.len, &d_sets, 0, null);
 
@@ -371,19 +440,32 @@ pub const Text3DRenderer = struct {
         c.vkCmdBindVertexBuffers(cmd_buffer, 0, 1, &self.vertex_buffer.handle, &offset);
         c.vkCmdBindIndexBuffer(cmd_buffer, self.index_buffer.handle, 0, c.VK_INDEX_TYPE_UINT32);
 
-        c.vkCmdDrawIndexed(cmd_buffer, self.index_count, 1, 0, 0, 1);
+        // CHANGED: The single draw call is now indirect
+        c.vkCmdDrawIndexedIndirect(cmd_buffer, self.indirect_command_buffer.handle, // The buffer containing the draw commands
+            0, // Offset into the buffer
+            self.draw_count, // The number of draws to execute
+            @sizeOf(IndirectCommand) // The stride between commands
+        );
     }
 
-    // The main drawing function
+    // CHANGED: drawText now populates the indirect and SSBO buffers
     pub fn drawText(self: *Self, text: []const u8, model_matrix: [16]f32, color: [4]f32, size_in_world_units: f32) void {
+        const char_count = text.len;
+        // Check if we have space for the new draw call, its vertices, and its indices
+        if (self.draw_count >= MAX_DRAW_CALLS or
+            self.vertex_count + (char_count * 4) > MAX_VERTICES or
+            self.index_count + (char_count * 6) > MAX_INDICES) return;
+
         if (self.font.font_size == 0 or self.font.line_height == 0) return;
         const scale = size_in_world_units / self.font.font_size;
 
+        // Remember where this string's geometry starts
+        const base_vertex = self.vertex_count;
+        const base_index = self.index_count;
+        var indices_added: u32 = 0;
+
         var current_x: f32 = 0;
         var current_y: f32 = 0;
-
-        // const half_pixel_u = 0.5 / self.font.scale_w;
-        // const half_pixel_v = 0.5 / self.font.scale_h;
 
         for (text) |char_code| {
             if (char_code == '\n') {
@@ -422,16 +504,35 @@ pub const Text3DRenderer = struct {
             self.mapped_indices[self.index_count + 4] = v_idx + 2;
             self.mapped_indices[self.index_count + 5] = v_idx + 3;
 
-            self.mapped_vertices[v_idx + 0] = .{ .pos = .{ x0, y0, 0 }, .uv = .{ @"u0", v0 }, .color = color, .model = model_matrix };
-            self.mapped_vertices[v_idx + 1] = .{ .pos = .{ x1, y0, 0 }, .uv = .{ @"u1", v0 }, .color = color, .model = model_matrix };
-            self.mapped_vertices[v_idx + 2] = .{ .pos = .{ x1, y1, 0 }, .uv = .{ @"u1", v1 }, .color = color, .model = model_matrix };
-            self.mapped_vertices[v_idx + 3] = .{ .pos = .{ x0, y1, 0 }, .uv = .{ @"u0", v1 }, .color = color, .model = model_matrix };
+            self.mapped_vertices[v_idx + 0] = .{ .pos = .{ x0, y0, 0 }, .uv = .{ @"u0", v0 }, .color = color };
+            self.mapped_vertices[v_idx + 1] = .{ .pos = .{ x1, y0, 0 }, .uv = .{ @"u1", v0 }, .color = color };
+            self.mapped_vertices[v_idx + 2] = .{ .pos = .{ x1, y1, 0 }, .uv = .{ @"u1", v1 }, .color = color };
+            self.mapped_vertices[v_idx + 3] = .{ .pos = .{ x0, y1, 0 }, .uv = .{ @"u0", v1 }, .color = color };
 
             self.vertex_count += 4;
             self.index_count += 6;
+            indices_added += 6;
 
             // Advance horizontal cursor for the next character on the same line
             current_x += glyph.xadvance;
+        }
+
+        // If we actually added any geometry for this string
+        if (indices_added > 0) {
+            // Populate the Draw Data SSBO for this draw
+            self.mapped_draw_data[self.draw_count].model = model_matrix;
+
+            // Populate the Indirect Command for this draw
+            self.mapped_indirect_commands[self.draw_count] = .{
+                .indexCount = indices_added,
+                .instanceCount = 1,
+                .firstIndex = base_index,
+                .vertexOffset = @intCast(base_vertex),
+                .firstInstance = self.draw_count, // This becomes gl_InstanceIndex in the shader!
+            };
+
+            // Increment the number of draws for this frame
+            self.draw_count += 1;
         }
     }
 };

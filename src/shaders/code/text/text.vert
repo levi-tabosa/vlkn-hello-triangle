@@ -1,30 +1,35 @@
-// text3d.vert
+// text3d.vet
 #version 450
 
-// The same UBO you're likely using for other 3D objects
-layout(binding = 0) uniform UniformBufferObject {
+// Set 0: Scene UBO (same as before)
+layout(set = 0, binding = 0) uniform UniformBufferObject {
     mat4 view;
     mat4 projection;
 } ubo;
 
-// --- Vertex Attributes ---
-// Local position of the character quad's vertex (e.g., top-left corner is at (0,0,0))
-layout(location = 0) in vec3 in_local_pos; 
-// UV coordinate in the font atlas
+// NEW: Set 2: SSBO with an array of model matrices
+layout(set = 2, binding = 0) readonly buffer DrawDataTable {
+    mat4 models[];
+} drawData;
+
+// --- Vertex Attributes (model matrix is gone) ---
+layout(location = 0) in vec3 in_local_pos;
 layout(location = 1) in vec2 in_uv;
-// Color for the text
 layout(location = 2) in vec4 in_color;
-// The model matrix for this entire string, passed per-vertex
-layout(location = 3) in mat4 in_model;
 
 // --- Outputs to Fragment Shader ---
 layout(location = 0) out vec2 frag_uv;
 layout(location = 1) out vec4 frag_color;
 
 void main() {
-    // Transform the local vertex position by the string's model matrix, then by view and projection
-    gl_Position = ubo.projection * ubo.view * in_model * vec4(in_local_pos, 1.0);
-    
+    // Get the model matrix for this specific draw call using gl_InstanceIndex.
+    // gl_InstanceIndex gets its value from the `firstInstance` field in the
+    // VkDrawIndexedIndirectCommand struct.
+    mat4 model = drawData.models[gl_InstanceIndex];
+
+    // Transform the local vertex position by the looked-up model matrix
+    gl_Position = ubo.projection * ubo.view * model * vec4(in_local_pos, 1.0);
+
     frag_uv = in_uv;
     frag_color = in_color;
 }
