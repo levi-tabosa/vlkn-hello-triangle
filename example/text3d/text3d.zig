@@ -49,12 +49,12 @@ pub const Text3DRenderer = struct {
     pipeline: vk.Pipeline = undefined,
     pipeline_layout: vk.PipelineLayout = undefined,
 
-    // --- Font Texture Descriptors (Set 1) ---
+    // Font Texture Descriptors (Set 1)
     font_descriptor_set_layout: c.VkDescriptorSetLayout = undefined,
     font_descriptor_pool: c.VkDescriptorPool = undefined, // This pool will now hold two sets
     font_descriptor_set: c.VkDescriptorSet = undefined,
 
-    // NEW: Draw Data Descriptors (Set 2) for the SSBO
+    // Draw Data Descriptors (Set 2) for the SSBO
     draw_data_descriptor_set_layout: c.VkDescriptorSetLayout = undefined,
     draw_data_descriptor_set: c.VkDescriptorSet = undefined,
 
@@ -449,51 +449,54 @@ pub const Text3DRenderer = struct {
     }
 
     // CHANGED: drawText now populates the indirect and SSBO buffers
+    // The main drawing function
     pub fn drawText(self: *Self, text: []const u8, model_matrix: [16]f32, color: [4]f32, size_in_world_units: f32) void {
         const char_count = text.len;
         // Check if we have space for the new draw call, its vertices, and its indices
         if (self.draw_count >= MAX_DRAW_CALLS or
             self.vertex_count + (char_count * 4) > MAX_VERTICES or
-            self.index_count + (char_count * 6) > MAX_INDICES) return;
+            self.index_count + (char_count * 6) > MAX_INDICES)
+        {
+            std.log.info("limit reached\n {} {} {}", .{ MAX_VERTICES, MAX_INDICES, MAX_DRAW_CALLS });
+            return;
+        }
 
         if (self.font.font_size == 0 or self.font.line_height == 0) return;
-        const scale = size_in_world_units / self.font.font_size;
+        const scale = size_in_world_units / @as(f32, self.font.font_size);
 
         // Remember where this string's geometry starts
-        const base_vertex = self.vertex_count;
-        const base_index = self.index_count;
-        var indices_added: u32 = 0;
+        const base_vertex_offset = self.vertex_count;
+        const base_index_offset = self.index_count;
+        var local_index_count: u32 = 0;
 
         var current_x: f32 = 0;
-        var current_y: f32 = 0;
+        var current_y: f32 = 0; // This now represents the Z-axis cursor
 
         for (text) |char_code| {
             if (char_code == '\n') {
                 current_x = 0;
-                current_y += self.font.line_height;
-                continue; // Go to the next character
+                current_y -= @as(f32, self.font.line_height); // Go "down" for the next line
+                continue;
             }
-
-            if (self.vertex_count + 4 > MAX_VERTICES or self.index_count + 6 > MAX_INDICES) return;
 
             const glyph = self.font.glyphs.get(char_code) orelse self.font.glyphs.get('?') orelse continue;
 
-            // Local coordinates for the glyph quad on the XY plane.
-            // The vertical position is now relative to the current line's `current_y`.
+            // Local coordinates for the glyph quad.
+            // X remains horizontal.
+            // Y from the font file now becomes Z in 3D space.
             const x0 = (current_x + glyph.xoffset) * scale;
-            const y0 = (current_y + glyph.yoffset) * scale; // <-- This now uses current_y
             const x1 = x0 + (@as(f32, @floatFromInt(glyph.width)) * scale);
-            const y1 = y0 + (@as(f32, @floatFromInt(glyph.height)) * scale);
 
-            // UV calculations (from the bleeding fix)
+            // We subtract here because in many font formats, the Y-axis points downwards from the baseline.
+            // This makes the text "stand up" along the positive Z-axis.
+            const z0 = -(current_y + glyph.yoffset) * scale;
+            const z1 = z0 - (@as(f32, @floatFromInt(glyph.height)) * scale);
+
+            // UV calculations remain the same
             const raw_u0 = @as(f32, @floatFromInt(glyph.x)) / self.font.scale_w;
             const raw_v0 = @as(f32, @floatFromInt(glyph.y)) / self.font.scale_h;
             const raw_u1 = raw_u0 + (@as(f32, @floatFromInt(glyph.width)) / self.font.scale_w);
             const raw_v1 = raw_v0 + (@as(f32, @floatFromInt(glyph.height)) / self.font.scale_h);
-            const @"u0" = raw_u0; // + half_pixel_u;
-            const v0 = raw_v0; // + half_pixel_v;
-            const @"u1" = raw_u1; // - half_pixel_u;
-            const v1 = raw_v1; // - half_pixel_v;
 
             const v_idx = self.vertex_count;
 
@@ -504,31 +507,36 @@ pub const Text3DRenderer = struct {
             self.mapped_indices[self.index_count + 4] = v_idx + 2;
             self.mapped_indices[self.index_count + 5] = v_idx + 3;
 
-            self.mapped_vertices[v_idx + 0] = .{ .pos = .{ x0, y0, 0 }, .uv = .{ @"u0", v0 }, .color = color };
-            self.mapped_vertices[v_idx + 1] = .{ .pos = .{ x1, y0, 0 }, .uv = .{ @"u1", v0 }, .color = color };
-            self.mapped_vertices[v_idx + 2] = .{ .pos = .{ x1, y1, 0 }, .uv = .{ @"u1", v1 }, .color = color };
-            self.mapped_vertices[v_idx + 3] = .{ .pos = .{ x0, y1, 0 }, .uv = .{ @"u0", v1 }, .color = color };
+            // --- THE KEY CHANGE IS HERE ---
+            // We are mapping the 2D (x, y) coordinates to the 3D (x, 0, z) plane.
+            self.mapped_vertices[v_idx + 0] = .{ .pos = .{ x0, 0, z0 }, .uv = .{ raw_u0, raw_v0 }, .color = color };
+            self.mapped_vertices[v_idx + 1] = .{ .pos = .{ x1, 0, z0 }, .uv = .{ raw_u1, raw_v0 }, .color = color };
+            self.mapped_vertices[v_idx + 2] = .{ .pos = .{ x1, 0, z1 }, .uv = .{ raw_u1, raw_v1 }, .color = color };
+            self.mapped_vertices[v_idx + 3] = .{ .pos = .{ x0, 0, z1 }, .uv = .{ raw_u0, raw_v1 }, .color = color };
+            // -----------------------------
 
             self.vertex_count += 4;
             self.index_count += 6;
-            indices_added += 6;
+            local_index_count += 6;
 
             // Advance horizontal cursor for the next character on the same line
             current_x += glyph.xadvance;
         }
 
+        // std.debug.print("Vertex count: {}\n", .{self.vertex_count});
+
         // If we actually added any geometry for this string
-        if (indices_added > 0) {
+        if (local_index_count > 0) {
             // Populate the Draw Data SSBO for this draw
             self.mapped_draw_data[self.draw_count].model = model_matrix;
 
             // Populate the Indirect Command for this draw
             self.mapped_indirect_commands[self.draw_count] = .{
-                .indexCount = indices_added,
+                .indexCount = local_index_count,
                 .instanceCount = 1,
-                .firstIndex = base_index,
-                .vertexOffset = @intCast(base_vertex),
-                .firstInstance = self.draw_count, // This becomes gl_InstanceIndex in the shader!
+                .firstIndex = base_index_offset,
+                .vertexOffset = @intCast(base_vertex_offset),
+                .firstInstance = self.draw_count,
             };
 
             // Increment the number of draws for this frame

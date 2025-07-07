@@ -1518,7 +1518,7 @@ pub const App = struct {
 
     pub fn run(self: *Self) !void {
         while (c.glfwWindowShouldClose(self.window.handle) == 0) {
-            self.perf.beginFrame();
+            // self.perf.beginFrame();
             self.gui_renderer.beginFrame();
             self.text_renderer.beginFrame();
             self.wd_ctx.beginFrame();
@@ -1534,41 +1534,89 @@ pub const App = struct {
                 continue;
             }
 
-            const transform1 = scene.Transform.new(.{ .position = .{ -5, 5, 0 } }).toMatrix();
-            self.text_renderer.drawText("Hello 3D World!", transform1, .{ 1.0, 0.8, 0.2, 1.0 }, 1.0);
+            // const transform1 = scene.Transform.new(.{ .position = .{ -5, 5, 0 } }).toMatrix();
+            // self.text_renderer.drawText(
+            //     \\awzwsxsedrfvtbyghnujmiecdrfvctgbhnujmi,ko
+            //     \\GC\/S$!OAU@ZHDTYRPB
+            // , transform1, .{ 1.0, 0.8, 0.2, 1.0 }, 1.0);
 
             // Example 2: Text rotating around the Y axis
 
             const time = @as(f32, @floatFromInt(@mod(std.time.milliTimestamp(), 10000))) / 1000.0;
-            const transform2 = scene.Transform.new(.{
-                .position = .{ 0, 2, -5 },
-                .rotation = scene.Quat.fromAxisAngle(.{ 0, 1, 0 }, time * 0.5),
-            }).toMatrix();
+            // const transform2 = scene.Transform.new(.{
+            //     .position = .{ 0, 0, 5 },
+            //     .rotation = scene.Quat.fromAxisAngle(.{ 0, 0, 1 }, time * 0.5),
+            // }).toMatrix();
+            // self.text_renderer.drawText(
+            //     "rotation z",
+            //     transform2,
+            //     .{ 0.2, 1.0, 0.8, 1.0 },
+            //     1.0,
+            // );
+
+            // self.text_renderer.drawText(
+            //     "rotation z",
+            //     scene.Transform.new(.{
+            //         .position = .{ 0, 0, -5 },
+            //         .rotation = scene.Quat.fromAxisAngle(.{ 0, 0, 1 }, time * 0.5),
+            //     }).toMatrix(),
+            //     .{ 0.2, 1.0, 0.8, 1.0 },
+            //     1.0,
+            // );
+            // self.text_renderer.drawText(
+            //     "rotation z",
+            //     scene.Transform.new(.{
+            //         .position = .{ 0, 5, 5 },
+            //         .rotation = scene.Quat.fromAxisAngle(.{ 0, 0, 1 }, time * 0.5),
+            //     }).toMatrix(),
+            //     .{ 0.2, 1.0, 0.8, 1.0 },
+            //     1.0,
+            // );
+            // self.text_renderer.drawText(
+            //     "Zig Vulkan Demo",
+            //     scene.Transform.new(.{
+            //         .position = .{ 5, -5, 0 },
+            //         .rotation = scene.Quat.fromAxisAngle(.{ 0, 1, 0 }, time),
+            //         .scale = .{ 1.5, 1.5, 1.5 },
+            //     }).toMatrix(),
+            //     .{ 0.8, 0.3, 1.0, 1.0 },
+            //     1.2,
+            // );
+
             self.text_renderer.drawText(
-                \\|WMw}{(J{mNQ&KVX%})
-                \\GC\/S$!OAU@ZHDTYRPB
-                \\EL?FI24768953NQ#10jua
-                \\xvk;ohdytgczrblepfsi:
-                \\+<^>~*="´`'.
-            ,
-                transform2,
-                .{ 0.2, 1.0, 0.8, 1.0 },
-                4.0,
+                "Rotate Me!",
+                scene.Transform.new(.{
+                    .position = .{ 0, 3, 1 },
+                    .rotation = scene.Quat.fromAxisAngle(.{ 1, 0, 0 }, time * 2.0),
+                    .scale = .{ 0.8, 0.8, 0.8 },
+                }).toMatrix(),
+                .{ 0.2, 0.6, 1.0, 1.0 },
+                0.9,
+            );
+
+            self.text_renderer.drawText(
+                "ScalingText",
+                scene.Transform.new(.{
+                    .position = .{ -3, -3, 1 },
+                    .scale = .{ 1.0 + 0.5 * @sin(time), 1.0 + 0.5 * @sin(time), 1.0 },
+                }).toMatrix(),
+                .{ 1.0, 0.0, 0.0, 1.0 },
+                10.0,
             );
 
             self.gui_renderer.processAndDrawUi(self, &self.main_ui);
 
-            self.perf.endFrame();
-            const fps = std.fmt.allocPrint(self.vk_ctx.allocator, "fps: {d:1}", .{self.perf.avg_fps}) catch unreachable;
-            defer self.vk_ctx.allocator.free(fps);
+            // self.perf.endFrame();
+            // const fps = std.fmt.allocPrint(self.vk_ctx.allocator, "fps: {d:1}", .{self.perf.avg_fps}) catch unreachable;
+            // defer self.vk_ctx.allocator.free(fps);
 
-            self.gui_renderer.drawText(
-                fps,
-                10.0,
-                @as(f32, @floatFromInt(self.window.size.y)) - 80.0,
-                .{ 1.0, 0.0, 0.5, 1.0 },
-                0.8,
-            );
+            // self.gui_renderer.drawText(
+            //     fps,
+            //     10.0,
+            //     @as(f32, @floatFromInt(self.window.size.y)) - 80.0,
+            //     .{ 1.0, 0.0, 0.5, 1.0 },
+            //     0.8,
+            // );
 
             try self.draw();
         }

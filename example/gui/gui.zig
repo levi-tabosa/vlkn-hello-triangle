@@ -707,14 +707,14 @@ pub fn loadPngGrayscale(
 }
 
 pub const Glyph = struct {
-    id: u32,
-    x: u32,
-    y: u32,
-    width: u32,
-    height: u32,
-    xoffset: f32,
-    yoffset: f32,
-    xadvance: f32,
+    id: u32 = 0,
+    x: u32 = 0,
+    y: u32 = 0,
+    width: u32 = 0,
+    height: u32 = 0,
+    xoffset: f32 = 0,
+    yoffset: f32 = 0,
+    xadvance: f32 = 0,
 };
 
 pub const Font = struct {
@@ -758,25 +758,34 @@ pub const Font = struct {
 
             if (std.mem.eql(u8, tag, "info")) {
                 while (parts.next()) |part| {
-                    const kv = parseKeyValue(part) orelse continue;
+                    const kv = parseKeyValue(part) orelse {
+                        std.log.warn("if ... info\tparseKeyValue returned null for part: {s}", .{part});
+                        continue;
+                    };
                     if (std.mem.eql(u8, kv.key, "size")) {
                         self.font_size = try std.fmt.parseFloat(f32, kv.value);
                     }
                 }
             } else if (std.mem.eql(u8, tag, "common")) {
                 while (parts.next()) |part| {
-                    const kv = parseKeyValue(part) orelse continue;
+                    const kv = parseKeyValue(part) orelse {
+                        std.log.warn("if ... common\tparseKeyValue returned null for part: {s}", .{part});
+                        continue;
+                    };
                     if (std.mem.eql(u8, kv.key, "lineHeight")) self.line_height = try std.fmt.parseFloat(f32, kv.value);
                     if (std.mem.eql(u8, kv.key, "base")) self.base = try std.fmt.parseFloat(f32, kv.value);
                     if (std.mem.eql(u8, kv.key, "scaleW")) self.scale_w = try std.fmt.parseFloat(f32, kv.value);
                     if (std.mem.eql(u8, kv.key, "scaleH")) self.scale_h = try std.fmt.parseFloat(f32, kv.value);
                 }
             } else if (std.mem.eql(u8, tag, "char")) {
-                var glyph = Glyph{ .id = 0, .x = 0, .y = 0, .width = 0, .height = 0, .xoffset = 0, .yoffset = 0, .xadvance = 0 };
+                var glyph = Glyph{};
                 var id_parsed = false;
 
                 while (parts.next()) |part| {
-                    const kv = parseKeyValue(part) orelse continue;
+                    const kv = parseKeyValue(part) orelse {
+                        std.log.warn("if ... char\tparseKeyValue returned null for part: {s}", .{part});
+                        continue;
+                    };
                     if (std.mem.eql(u8, kv.key, "id")) {
                         glyph.id = try std.fmt.parseInt(u32, kv.value, 10);
                         id_parsed = true;
