@@ -40,6 +40,17 @@ const Text3DVertex = extern struct {
     }
 };
 
+const DrawInfo = extern struct {
+    base_instance_offset: u32,
+    // Add some padding to respect SSBO alignment rules if needed
+    _p1: u32,
+    _p2: u32,
+    _p3: u32,
+};
+
+// We will build this buffer on the CPU every frame
+const IndirectCommand = c.VkDrawIndexedIndirectCommand;
+
 pub const Text3DRenderer = struct {
     const Self = @This();
 
@@ -58,6 +69,12 @@ pub const Text3DRenderer = struct {
     texture: vk.Image = undefined,
     texture_view: c.VkImageView = undefined,
 
+    indirect_command_buffer: vk.Buffer = undefined,
+    mapped_indirect_commands: [*]IndirectCommand = undefined,
+
+    // Buffer for the draw info (one per unique string)
+    draw_info_buffer: vk.Buffer = undefined,
+    mapped_draw_infos: [*]DrawInfo = undefined,
     vertex_buffer: vk.Buffer = undefined,
     index_buffer: vk.Buffer = undefined,
     mapped_vertices: [*]Text3DVertex = undefined,
@@ -70,6 +87,7 @@ pub const Text3DRenderer = struct {
 
     const MAX_VERTICES = 16384;
     const MAX_INDICES = MAX_VERTICES * 3 / 2;
+    const MAX_DRAW_CALLS = 256;
 
     // We pass in the main scene's descriptor set layout to share the UBO
     pub fn init(vk_ctx: *vk.VulkanContext, render_pass: vk.RenderPass, main_scene_ds_layout: vk.DescriptorSetLayout, swapchain: vk.Swapchain) !Self {
@@ -335,7 +353,7 @@ pub const Text3DRenderer = struct {
         self.index_count = 0;
     }
 
-    pub fn endFrame(self: *Self, cmd_buffer: c.VkCommandBuffer, main_scene_descriptor_set: c.VkDescriptorSet) void {
+    pub fn endFrame(self: *Self, cmd_buffer: c.VkCommandBuffer, main_descriptor_set: vk.DescriptorSet) void {
         if (self.index_count == 0) return;
 
         c.vkCmdBindPipeline(cmd_buffer, c.VK_PIPELINE_BIND_POINT_GRAPHICS, self.pipeline.handle);
@@ -344,7 +362,7 @@ pub const Text3DRenderer = struct {
         // Set 0: Main scene UBO (for view/projection)
         // Set 1: Font sampler
         const d_sets = [_]c.VkDescriptorSet{
-            main_scene_descriptor_set,
+            main_descriptor_set.handle,
             self.font_descriptor_set,
         };
         c.vkCmdBindDescriptorSets(cmd_buffer, c.VK_PIPELINE_BIND_POINT_GRAPHICS, self.pipeline_layout.handle, 0, d_sets.len, &d_sets, 0, null);
@@ -353,7 +371,7 @@ pub const Text3DRenderer = struct {
         c.vkCmdBindVertexBuffers(cmd_buffer, 0, 1, &self.vertex_buffer.handle, &offset);
         c.vkCmdBindIndexBuffer(cmd_buffer, self.index_buffer.handle, 0, c.VK_INDEX_TYPE_UINT32);
 
-        c.vkCmdDrawIndexed(cmd_buffer, self.index_count, 1, 0, 0, 0);
+        c.vkCmdDrawIndexed(cmd_buffer, self.index_count, 1, 0, 0, 1);
     }
 
     // The main drawing function
@@ -361,7 +379,6 @@ pub const Text3DRenderer = struct {
         if (self.font.font_size == 0 or self.font.line_height == 0) return;
         const scale = size_in_world_units / self.font.font_size;
 
-        // Cursors for drawing position in the text's local space
         var current_x: f32 = 0;
         var current_y: f32 = 0;
 
@@ -369,16 +386,11 @@ pub const Text3DRenderer = struct {
         // const half_pixel_v = 0.5 / self.font.scale_h;
 
         for (text) |char_code| {
-            // --- ADD THIS BLOCK to handle newlines ---
             if (char_code == '\n') {
                 current_x = 0;
-                // Advance the vertical cursor downwards. We use '+' because in typical
-                // 2D text layout, the Y axis points down. The model_matrix will orient
-                // this correctly in 3D space.
                 current_y += self.font.line_height;
                 continue; // Go to the next character
             }
-            // --- END BLOCK ---
 
             if (self.vertex_count + 4 > MAX_VERTICES or self.index_count + 6 > MAX_INDICES) return;
 
@@ -396,9 +408,9 @@ pub const Text3DRenderer = struct {
             const raw_v0 = @as(f32, @floatFromInt(glyph.y)) / self.font.scale_h;
             const raw_u1 = raw_u0 + (@as(f32, @floatFromInt(glyph.width)) / self.font.scale_w);
             const raw_v1 = raw_v0 + (@as(f32, @floatFromInt(glyph.height)) / self.font.scale_h);
-            const p0 = raw_u0; // + half_pixel_u;
+            const @"u0" = raw_u0; // + half_pixel_u;
             const v0 = raw_v0; // + half_pixel_v;
-            const p1 = raw_u1; // - half_pixel_u;
+            const @"u1" = raw_u1; // - half_pixel_u;
             const v1 = raw_v1; // - half_pixel_v;
 
             const v_idx = self.vertex_count;
@@ -410,10 +422,10 @@ pub const Text3DRenderer = struct {
             self.mapped_indices[self.index_count + 4] = v_idx + 2;
             self.mapped_indices[self.index_count + 5] = v_idx + 3;
 
-            self.mapped_vertices[v_idx + 0] = .{ .pos = .{ x0, y0, 0 }, .uv = .{ p0, v0 }, .color = color, .model = model_matrix };
-            self.mapped_vertices[v_idx + 1] = .{ .pos = .{ x1, y0, 0 }, .uv = .{ p1, v0 }, .color = color, .model = model_matrix };
-            self.mapped_vertices[v_idx + 2] = .{ .pos = .{ x1, y1, 0 }, .uv = .{ p1, v1 }, .color = color, .model = model_matrix };
-            self.mapped_vertices[v_idx + 3] = .{ .pos = .{ x0, y1, 0 }, .uv = .{ p0, v1 }, .color = color, .model = model_matrix };
+            self.mapped_vertices[v_idx + 0] = .{ .pos = .{ x0, y0, 0 }, .uv = .{ @"u0", v0 }, .color = color, .model = model_matrix };
+            self.mapped_vertices[v_idx + 1] = .{ .pos = .{ x1, y0, 0 }, .uv = .{ @"u1", v0 }, .color = color, .model = model_matrix };
+            self.mapped_vertices[v_idx + 2] = .{ .pos = .{ x1, y1, 0 }, .uv = .{ @"u1", v1 }, .color = color, .model = model_matrix };
+            self.mapped_vertices[v_idx + 3] = .{ .pos = .{ x0, y1, 0 }, .uv = .{ @"u0", v1 }, .color = color, .model = model_matrix };
 
             self.vertex_count += 4;
             self.index_count += 6;

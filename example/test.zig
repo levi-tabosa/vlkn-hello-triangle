@@ -990,7 +990,9 @@ pub const Buffer = struct {
     size: u64,
 
     pub fn init(vk_ctx: *VulkanContext, size: u64, usage: c.VkBufferUsageFlags, properties: c.VkMemoryPropertyFlags) !Self {
-        var self = Self{ .size = size };
+        var self = Self{
+            .size = size,
+        };
         var buffer_info = c.VkBufferCreateInfo{
             .size = size,
             .usage = usage,
@@ -1073,32 +1075,75 @@ pub const PushConstantRange = struct {
 const DescriptorType = enum(u8) {
     Uniform,
     CombinedImageSampler,
+    Storage,
     pub fn getVkType(@"type": DescriptorType) c_uint {
         return switch (@"type") {
             .Uniform => c.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
             .CombinedImageSampler => c.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            .Storage => c.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
         };
     }
 };
 
 pub const DescriptorSetLayout = struct {
     const Self = @This();
+
     handle: c.VkDescriptorSetLayout = undefined,
 
-    pub fn init(vk_ctx: *VulkanContext, @"type": DescriptorType) !Self {
+    pub fn init(vk_ctx: *VulkanContext, types: []const DescriptorType) !Self {
         var self = Self{};
-        var ubo_layout_binding = c.VkDescriptorSetLayoutBinding{
-            .binding = 0,
-            .descriptorType = @"type".getVkType(),
-            .descriptorCount = 1,
-            .stageFlags = c.VK_SHADER_STAGE_VERTEX_BIT | c.VK_SHADER_STAGE_FRAGMENT_BIT,
+        const bindings = try vk_ctx.allocator.alloc(c.VkDescriptorSetLayoutBinding, types.len);
+        defer vk_ctx.allocator.free(bindings);
+
+        for (types, 0..) |t, i| {
+            bindings[i] = .{
+                .binding = @intCast(i),
+                .descriptorType = t.getVkType(),
+                .descriptorCount = 1,
+                // TODO: pass in stage bit
+                .stageFlags = c.VK_SHADER_STAGE_VERTEX_BIT,
+            };
+        }
+
+        var layout_info = c.VkDescriptorSetLayoutCreateInfo{
+            .bindingCount = @intCast(bindings.len),
+            .pBindings = bindings.ptr,
         };
-        var layout_info = c.VkDescriptorSetLayoutCreateInfo{ .bindingCount = 1, .pBindings = &ubo_layout_binding };
         try vkCheck(c.vkCreateDescriptorSetLayout(vk_ctx.device.handle, &layout_info, null, &self.handle));
         return self;
     }
     pub fn deinit(self: *Self, vk_ctx: *VulkanContext) void {
         c.vkDestroyDescriptorSetLayout(vk_ctx.device.handle, self.handle, null);
+    }
+};
+
+pub const DescriptorSet = struct {
+    handle: c.VkDescriptorSet = undefined,
+
+    pub fn update(
+        self: *const DescriptorSet,
+        vk_ctx: *VulkanContext,
+        args: []const struct { buff: Buffer, desc_type: DescriptorType, range: u64 },
+    ) !void {
+        const desc_writes = try vk_ctx.allocator.alloc(c.VkWriteDescriptorSet, args.len);
+        defer vk_ctx.allocator.free(desc_writes);
+        for (args, 0..) |arg, i| {
+            var desc_buffer_info = c.VkDescriptorBufferInfo{
+                .buffer = arg.buff.handle,
+                .offset = 0,
+                .range = arg.range,
+            };
+
+            desc_writes[i] = c.VkWriteDescriptorSet{
+                .dstSet = self.handle,
+                .dstBinding = @intCast(i),
+                .descriptorType = arg.desc_type.getVkType(),
+                .descriptorCount = 1,
+                .pBufferInfo = &desc_buffer_info,
+            };
+        }
+
+        c.vkUpdateDescriptorSets(vk_ctx.device.handle, @intCast(desc_writes.len), desc_writes.ptr, 0, null);
     }
 };
 
@@ -1121,7 +1166,7 @@ pub const DescriptorPool = struct {
         c.vkDestroyDescriptorPool(vk_ctx.device.handle, self.handle, null);
     }
 
-    pub fn allocateSet(self: Self, vk_ctx: *VulkanContext, layout: DescriptorSetLayout) !c.VkDescriptorSet {
+    pub fn allocateSet(self: Self, vk_ctx: *VulkanContext, layout: DescriptorSetLayout) !DescriptorSet {
         var set_alloc_info = c.VkDescriptorSetAllocateInfo{
             .descriptorPool = self.handle,
             .descriptorSetCount = 1,
@@ -1129,20 +1174,9 @@ pub const DescriptorPool = struct {
         };
         var set: c.VkDescriptorSet = undefined;
         try vkCheck(c.vkAllocateDescriptorSets(vk_ctx.device.handle, &set_alloc_info, &set));
-        return set;
-    }
-
-    pub fn updateSet(_: Self, vk_ctx: *VulkanContext, set: c.VkDescriptorSet, buffer: Buffer, ubo_type: type) void {
-        var desc_buffer_info = c.VkDescriptorBufferInfo{ .buffer = buffer.handle, .offset = 0, .range = @sizeOf(ubo_type) };
-        var desc_write = c.VkWriteDescriptorSet{
-            .dstSet = set,
-            .dstBinding = 0,
-            .dstArrayElement = 0,
-            .descriptorType = DescriptorType.Uniform.getVkType(),
-            .descriptorCount = 1,
-            .pBufferInfo = &desc_buffer_info,
+        return .{
+            .handle = set,
         };
-        c.vkUpdateDescriptorSets(vk_ctx.device.handle, 1, &desc_write, 0, null);
     }
 };
 
@@ -1350,7 +1384,7 @@ pub const App = struct {
     vertex_buffer: Buffer,
     uniform_buffer: Buffer,
     descriptor_pool: DescriptorPool,
-    descriptor_set: c.VkDescriptorSet,
+    descriptor_set: DescriptorSet,
     command_buffer: CommandBuffer,
     sync: SyncObjects,
 
@@ -1383,8 +1417,9 @@ pub const App = struct {
     fn initVulkanResources(self: *Self) !void {
         self.swapchain = try Swapchain.init(self.vk_ctx);
         self.depth_buffer = try DepthBuffer.init(self.vk_ctx, self.swapchain.extent.width, self.swapchain.extent.height);
-        self.descriptor_layout = try DescriptorSetLayout.init(self.vk_ctx, .Uniform);
+        self.descriptor_layout = try DescriptorSetLayout.init(self.vk_ctx, &.{.Uniform});
         self.descriptor_pool = try DescriptorPool.init(self.vk_ctx, .Uniform);
+
         self.descriptor_set = try self.descriptor_pool.allocateSet(self.vk_ctx, self.descriptor_layout);
         self.command_buffer = try CommandBuffer.allocate(self.vk_ctx, true);
         self.sync = try SyncObjects.init(self.vk_ctx);
@@ -1392,7 +1427,9 @@ pub const App = struct {
         try self.initVertexBuffer();
         try self.initUniformBuffer();
 
-        self.descriptor_pool.updateSet(self.vk_ctx, self.descriptor_set, self.uniform_buffer, UniformBufferObject);
+        try self.descriptor_set.update(self.vk_ctx, &.{
+            .{ .buff = self.uniform_buffer, .desc_type = .Uniform, .range = @sizeOf(UniformBufferObject) },
+        });
 
         self.render_pass = try RenderPass.init(self.vk_ctx, &self.swapchain);
         try self.render_pass.initFrameBuffer(self.vk_ctx, &self.swapchain, self.depth_buffer.view);
@@ -1687,7 +1724,7 @@ pub const App = struct {
         const vertex_buffers = [_]c.VkBuffer{self.vertex_buffer.handle};
         const offsets = [_]c.VkDeviceSize{0};
         c.vkCmdBindVertexBuffers(self.command_buffer.handle, 0, 1, &vertex_buffers, &offsets);
-        c.vkCmdBindDescriptorSets(self.command_buffer.handle, c.VK_PIPELINE_BIND_POINT_GRAPHICS, self.pipeline_layout.handle, 0, 1, &self.descriptor_set, 0, null);
+        c.vkCmdBindDescriptorSets(self.command_buffer.handle, c.VK_PIPELINE_BIND_POINT_GRAPHICS, self.pipeline_layout.handle, 0, 1, &self.descriptor_set.handle, 0, null);
         c.vkCmdDraw(self.command_buffer.handle, @intCast(self.scene.getTotalVertexCount()), 1, 0, 0);
         self.text_renderer.endFrame(self.command_buffer.handle, self.descriptor_set);
         self.gui_renderer.endFrame(
