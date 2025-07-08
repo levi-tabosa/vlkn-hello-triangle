@@ -3,6 +3,7 @@ const assert = std.debug.assert;
 const vk = @import("../test.zig"); // Reuse structs and helpers from main file
 const c = @import("c").c; // Reuse cImport from main file
 const font = @import("font");
+const util = @import("util");
 
 const gui_vert_shader_bin = @import("spirv").gui_vs;
 const gui_frag_shader_bin = @import("spirv").gui_fs;
@@ -11,57 +12,93 @@ const OnClickFn = *const fn (app: *anyopaque) void;
 
 const WidgetData = union(enum) {
     button: struct {
-        text: []u8 = undefined,
+        text: []u8,
         font_size: f32 = 18.0, // Default value
-        rect_color: @Vector(4, f32) = .{ 0.8, 0.8, 0.8, 1.0 }, // White rectangle,
-        text_color: @Vector(4, f32) = .{ 0.0, 0.0, 0.0, 1.0 }, // Black text,
         on_click: ?OnClickFn = null,
     },
     plain_text: struct {
-        text: []u8 = undefined,
+        text: []u8,
         font_size: f32 = 18.0, // Default value
-        text_color: @Vector(4, f32) = .{ 0.12, 0.12, 0.12, 1.0 }, // Black text,
-
     },
 };
 
-pub const Widget = struct {
+const Rect = struct {
     x: f32,
     y: f32,
     width: f32,
     height: f32,
-    data: WidgetData,
+};
+
+pub const Widget = struct {
+    rect: Rect,
+    background: @Vector(4, f32) = .{ 0, 0, 0, 1 },
+    foreground: @Vector(4, f32) = .{ 1, 1, 1, 1 },
+    data: WidgetData = undefined,
 };
 
 pub const UI = struct {
     const Self = @This();
 
     widgets: std.ArrayList(Widget),
+    string_pool: util.Pool([256]u8),
 
     pub fn init(allocator: std.mem.Allocator) Self {
         return .{
             .widgets = .init(allocator),
+            .string_pool = .init(allocator),
         };
     }
 
-    pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
-        for (self.widgets.items) |w| {
-            switch (w.data) {
-                .button => |data| allocator.free(data.text),
-                .plain_text => |data| allocator.free(data.text),
-            }
-        }
+    pub fn deinit(self: *Self) void {
+        self.string_pool.deinit();
         self.widgets.deinit();
     }
 
-    pub fn addButton(self: *Self, widget: Widget) !void {
-        assert(widget.data == .button); // Ensure it's a button
-        try self.widgets.append(widget);
+    pub fn addButton(
+        self: *Self,
+        rect: Rect,
+        text: []const u8,
+        background: @Vector(4, f32),
+        foreground: @Vector(4, f32),
+        on_click: ?OnClickFn,
+    ) !void {
+        const t = try self.string_pool.new();
+        @memcpy(t[0..text.len], text);
+        const data = WidgetData{
+            .button = .{
+                .text = t,
+                .on_click = on_click,
+            },
+        };
+        try self.widgets.append(.{
+            .rect = rect,
+            .background = background,
+            .foreground = foreground,
+            .data = data,
+        });
     }
 
-    pub fn addPainText(self: *Self, widget: Widget) !void {
-        assert(widget.data == .plain_text);
-        try self.widgets.append(widget);
+    pub fn addPainText(
+        self: *Self,
+        rect: Rect,
+        text: []const u8,
+        background: @Vector(4, f32),
+        foreground: @Vector(4, f32),
+    ) !void {
+        const dynamic_txt = try self.string_pool.new();
+        @memcpy(dynamic_txt[0..text.len], text);
+
+        const data = WidgetData{
+            .plain_text = .{
+                .text = dynamic_txt,
+            },
+        };
+        try self.widgets.append(.{
+            .rect = rect,
+            .data = data,
+            .background = background,
+            .foreground = foreground,
+        });
     }
 };
 
@@ -165,13 +202,14 @@ pub const GuiRenderer = struct {
 
         c.vkDestroyDescriptorPool(self.vk_ctx.device.handle, self.descriptor_pool, null);
         c.vkDestroyDescriptorSetLayout(self.vk_ctx.device.handle, self.descriptor_set_layout, null);
-        self.font.deinit();
+        self.destroyPipeline();
 
         // Deinit unified buffers
         self.vertex_buffer.unmap(self.vk_ctx);
         self.index_buffer.unmap(self.vk_ctx);
         self.vertex_buffer.deinit(self.vk_ctx);
         self.index_buffer.deinit(self.vk_ctx);
+        self.font.deinit();
     }
 
     // This function creates a single texture with the font atlas AND a 1x1 white pixel.
@@ -454,8 +492,8 @@ pub const GuiRenderer = struct {
             const mouse_x = self.mouse_state.x;
             const mouse_y = self.mouse_state.y;
 
-            if (mouse_x >= widget.x and mouse_x <= widget.x + widget.width and
-                mouse_y >= widget.y and mouse_y <= widget.y + widget.height)
+            if (mouse_x >= widget.rect.x and mouse_x <= widget.rect.x + widget.rect.width and
+                mouse_y >= widget.rect.y and mouse_y <= widget.rect.y + widget.rect.height)
             {
                 self.hot_id = id;
                 if (self.mouse_state.left_button_down) {
@@ -469,22 +507,22 @@ pub const GuiRenderer = struct {
 
             switch (widget.data) {
                 .button => |data| {
-                    var rect_color = data.rect_color;
+                    var rect_color = widget.background;
                     if (self.hot_id == id) {
                         rect_color = .{ rect_color[0] + 0.1, rect_color[1] + 0.1, rect_color[2] + 0.1, rect_color[3] }; // Hover
                         if (self.active_id == id) {
                             rect_color = .{ rect_color[0] - 0.1, rect_color[1] - 0.1, rect_color[2] - 0.1, rect_color[3] }; // Active
                         }
                     }
-                    self.drawRect(widget.x, widget.y, widget.width, widget.height, rect_color);
+                    self.drawRect(widget.rect.x, widget.rect.y, widget.rect.width, widget.rect.height, rect_color);
 
                     const scale = if (data.font_size > 0) data.font_size / self.font.font_size else 1.0;
                     const text_width = self.measureText(data.text, scale);
-                    const text_x = widget.x + (widget.width - text_width) / 2.0;
+                    const text_x = widget.rect.x + (widget.rect.width - text_width) / 2.0;
                     const scaled_line_height = self.font.line_height * scale;
-                    const text_y = widget.y + (widget.height - scaled_line_height) / 2.0;
+                    const text_y = widget.rect.y + (widget.rect.height - scaled_line_height) / 2.0;
 
-                    self.drawText(data.text, text_x, text_y, data.text_color, scale);
+                    self.drawText(data.text, text_x, text_y, widget.foreground, scale);
                     if (widget.data.button.on_click) |callback| {
                         if (!clicked) continue;
                         callback(app);
@@ -493,11 +531,11 @@ pub const GuiRenderer = struct {
                 .plain_text => |data| {
                     const scale = if (data.font_size > 0) data.font_size / self.font.font_size else 1.0;
                     const text_width = self.measureText(data.text, scale);
-                    const text_x = widget.x + (widget.width - text_width) / 2.0;
+                    const text_x = widget.rect.x + (widget.rect.width - text_width) / 2.0;
                     const scaled_line_height = self.font.line_height * scale;
-                    const text_y = widget.y + (widget.height - scaled_line_height) / 2.0;
+                    const text_y = widget.rect.y + (widget.rect.height - scaled_line_height) / 2.0;
 
-                    self.drawText(data.text, text_x, text_y, data.text_color, scale);
+                    self.drawText(data.text, text_x, text_y, widget.foreground, scale);
                 },
             }
         }
@@ -526,25 +564,37 @@ pub const GuiRenderer = struct {
     }
 
     pub fn drawText(self: *Self, text: []const u8, x_start: f32, y_start: f32, color: [4]f32, scale: f32) void {
-        var current_x = x_start;
         const scale_w = self.font.scale_w;
         // The texture is 1 pixel taller, but the font data itself is in the same relative position.
         const scale_h = self.font.scale_h;
+        if (self.vertex_count + 4 > MAX_VERTICES or self.index_count + 6 > MAX_INDICES) {
+            std.log.warn("IN DRAW TXT2D: limit reached {} {}", .{ self.vertex_count, self.index_count });
+            return;
+        }
+
+        var current_x = x_start;
+        var current_y = y_start;
 
         for (text) |char_code| {
-            if (self.vertex_count + 4 > MAX_VERTICES or self.index_count + 6 > MAX_INDICES) return;
-
+            if (char_code == 170) { //End of string
+                break;
+            }
+            if (char_code == '\n') {
+                current_x = x_start;
+                current_y += self.font.line_height;
+                continue;
+            }
             const glyph = self.font.glyphs.get(char_code) orelse self.font.glyphs.get('?') orelse continue;
 
             const x0 = current_x + glyph.xoffset * scale;
-            const y0 = y_start + glyph.yoffset * scale;
+            const y0 = current_y + glyph.yoffset * scale;
             const x1 = x0 + @as(f32, @floatFromInt(glyph.width)) * scale;
             const y1 = y0 + @as(f32, @floatFromInt(glyph.height)) * scale;
 
             // These UV calculations are correct relative to the original atlas size
-            const _u0 = @as(f32, @floatFromInt(glyph.x)) / scale_w;
+            const @"u0" = @as(f32, @floatFromInt(glyph.x)) / scale_w;
             const v0 = @as(f32, @floatFromInt(glyph.y)) / scale_h;
-            const _u1 = _u0 + (@as(f32, @floatFromInt(glyph.width)) / scale_w);
+            const @"u1" = @"u0" + (@as(f32, @floatFromInt(glyph.width)) / scale_w);
             const v1 = v0 + (@as(f32, @floatFromInt(glyph.height)) / scale_h);
 
             const v_idx = self.vertex_count;
@@ -556,10 +606,10 @@ pub const GuiRenderer = struct {
             self.mapped_indices[self.index_count + 4] = v_idx + 2;
             self.mapped_indices[self.index_count + 5] = v_idx + 3;
 
-            self.mapped_vertices[v_idx + 0] = .{ .pos = .{ x0, y0 }, .uv = .{ _u0, v0 }, .color = color };
-            self.mapped_vertices[v_idx + 1] = .{ .pos = .{ x1, y0 }, .uv = .{ _u1, v0 }, .color = color };
-            self.mapped_vertices[v_idx + 2] = .{ .pos = .{ x1, y1 }, .uv = .{ _u1, v1 }, .color = color };
-            self.mapped_vertices[v_idx + 3] = .{ .pos = .{ x0, y1 }, .uv = .{ _u0, v1 }, .color = color };
+            self.mapped_vertices[v_idx + 0] = .{ .pos = .{ x0, y0 }, .uv = .{ @"u0", v0 }, .color = color };
+            self.mapped_vertices[v_idx + 1] = .{ .pos = .{ x1, y0 }, .uv = .{ @"u1", v0 }, .color = color };
+            self.mapped_vertices[v_idx + 2] = .{ .pos = .{ x1, y1 }, .uv = .{ @"u1", v1 }, .color = color };
+            self.mapped_vertices[v_idx + 3] = .{ .pos = .{ x0, y1 }, .uv = .{ @"u0", v1 }, .color = color };
 
             self.vertex_count += 4;
             self.index_count += 6;
@@ -571,6 +621,9 @@ pub const GuiRenderer = struct {
     fn measureText(self: *const Self, text: []const u8, scale: f32) f32 {
         var width: f32 = 0;
         for (text) |char_code| {
+            if (char_code == 170) {
+                break;
+            }
             const glyph = self.font.glyphs.get(char_code) orelse self.font.glyphs.get('?') orelse continue;
             width += glyph.xadvance * scale;
         }

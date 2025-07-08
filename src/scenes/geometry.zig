@@ -182,14 +182,7 @@ pub const Scene = struct {
 
         return .{
             .allocator = allocator,
-            .axis = .{
-                // X-axis (Red)
-                .{ .pos = .{ -res_float, 0.0, 0.0 }, .color = .{ 1.0, 0.0, 0.0, 1.0 } }, .{ .pos = .{ res_float, 0.0, 0.0 }, .color = .{ 1.0, 0.0, 0.0, 1.0 } },
-                // Y-axis (Green)
-                .{ .pos = .{ 0.0, -res_float, 0.0 }, .color = .{ 0.0, 1.0, 0.0, 1.0 } }, .{ .pos = .{ 0.0, res_float, 0.0 }, .color = .{ 0.0, 1.0, 0.0, 1.0 } },
-                // Z-axis (Blue)
-                .{ .pos = .{ 0.0, 0.0, -res_float }, .color = .{ 0.0, 0.0, 1.0, 1.0 } }, .{ .pos = .{ 0.0, 0.0, res_float }, .color = .{ 0.0, 0.0, 1.0, 1.0 } },
-            },
+            .axis = createAxis(resolution),
             .grid = try createGrid(allocator, resolution),
             .lines = std.ArrayList(V3).init(allocator),
             .camera = Camera.init(.{ .pos = .{ res_float, res_float, res_float } }, 20.0),
@@ -208,6 +201,16 @@ pub const Scene = struct {
     pub fn setGridResolution(self: *Self, new_resolution: u32) !void {
         self.allocator.free(self.grid);
         self.grid = try createGrid(self.allocator, new_resolution);
+        self.axis = createAxis(new_resolution);
+    }
+
+    fn createAxis(resolution: u32) [6]V3 {
+        const r: f32 = @floatFromInt(resolution);
+        return .{
+            .{ .pos = .{ -r, 0.0, 0.0 }, .color = .{ 1.0, 0.0, 0.0, 1.0 } }, .{ .pos = .{ r, 0.0, 0.0 }, .color = .{ 1.0, 0.0, 0.0, 1.0 } },
+            .{ .pos = .{ 0.0, -r, 0.0 }, .color = .{ 0.0, 1.0, 0.0, 1.0 } }, .{ .pos = .{ 0.0, r, 0.0 }, .color = .{ 0.0, 1.0, 0.0, 1.0 } },
+            .{ .pos = .{ 0.0, 0.0, -r }, .color = .{ 0.0, 0.0, 1.0, 1.0 } }, .{ .pos = .{ 0.0, 0.0, r }, .color = .{ 0.0, 0.0, 1.0, 1.0 } },
+        };
     }
 
     fn createGrid(allocator: std.mem.Allocator, resolution: u32) ![]V3 {
@@ -294,7 +297,7 @@ const Camera = struct {
         }
     }
 
-    pub fn viewMatrix(self: *Self) [16]f32 {
+    pub fn view(self: *Self) [16]f32 {
         if (self.radius) |r| {
             self.pos = .{ .pos = .{
                 r * @cos(self.yaw) * @cos(self.pitch),
@@ -323,7 +326,7 @@ const Camera = struct {
         };
     }
 
-    pub fn projectionMatrix(self: Self, aspect_ratio: f32) [16]f32 {
+    pub fn projection(self: Self, aspect_ratio: f32) [16]f32 {
         const fovy = std.math.degreesToRadians(self.fov_degrees);
         const f = 1.0 / std.math.tan(fovy / 2.0);
         const near = self.near_plane; // Use the dynamic near plane

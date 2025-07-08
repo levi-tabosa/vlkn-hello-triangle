@@ -4,7 +4,7 @@ const assert = std.debug.assert;
 const spirv = @import("spirv");
 const scene = @import("geometry");
 const gui = @import("gui/gui.zig");
-const text3d = @import("text3d/text3d.zig");
+const text = @import("text3d/text3d.zig");
 const fps_tracker = @import("fps_tracker/performance_tracker.zig");
 //TODO: remove
 const rand = std.Random;
@@ -93,7 +93,6 @@ const Callbacks = struct {
     fn cbCursorPos(wd: ?*c.GLFWwindow, xpos: f64, ypos: f64) callconv(.C) void {
         const app: *App = @alignCast(@ptrCast(c.glfwGetWindowUserPointer(wd orelse return) orelse return));
         app.gui_renderer.handleCursorPos(xpos, ypos);
-        // NEW: Forward to the input context as well
         app.wd_ctx.handleCursorPos(xpos, ypos);
     }
 
@@ -132,16 +131,38 @@ const Callbacks = struct {
 fn addLineCallback(ptr: *anyopaque) void {
     const app: *App = @alignCast(@ptrCast(ptr));
     std.log.info("Button clicked: Adding a new line...", .{});
+
     var prng = rand.DefaultPrng.init(@intCast(std.time.milliTimestamp()));
     const random = prng.random();
-    app.scene.addLine(
-        .{ 0, 0, 0 },
-        .{
-            (random.float(f32) * 2.0 - 1.0) * 5,
-            (random.float(f32) * 2.0 - 1.0) * 5,
-            (random.float(f32) * 2.0 - 1.0) * 5,
-        },
+
+    const end_pos = .{
+        (random.float(f32) * 2.0 - 1.0) * 5,
+        (random.float(f32) * 2.0 - 1.0) * 5,
+        (random.float(f32) * 2.0 - 1.0) * 5,
+    };
+
+    app.scene.addLine(.{ 0, 0, 0 }, end_pos) catch unreachable;
+
+    const tmp = std.fmt.allocPrint(app.allocator, "({d:.1},{d:.1},{d:.1})", .{ end_pos[0], end_pos[1], end_pos[2] }) catch unreachable;
+    defer app.allocator.free(tmp);
+    app.text_scene.addBillboardText(
+        tmp,
+        end_pos,
+        .{ 1.0, 1.0, 1.0, 1.0 }, // white color
+        0.65, // font scale
     ) catch unreachable;
+    // TODO: remove static text addition
+    const time = @as(f32, @floatFromInt(@mod(std.time.milliTimestamp(), 10000))) / 1000.0;
+
+    const rot_x = scene.Quat.fromAxisAngle(.{ 1, 0, 0 }, time * 0.3);
+    const rot_y = scene.Quat.fromAxisAngle(.{ 0, 1, 0 }, time * 0.5);
+    const tumbling_transform = scene.Transform.new(.{
+        .position = .{ 7, 3, -4 },
+        .rotation = rot_x.mul(rot_y), // Combine rotations
+    }).toMatrix();
+
+    app.text_scene.addText("Tumbling Test 123", tumbling_transform, .{ 1.0, 0.3, 0.3, 1.0 }, 1.5) catch unreachable;
+
     app.updateVertexBuffer() catch unreachable;
 }
 
@@ -149,6 +170,7 @@ fn clearLinesCallback(ptr: *anyopaque) void {
     const app: *App = @alignCast(@ptrCast(ptr));
     std.log.info("Button clicked: Clearing lines.", .{});
     app.scene.clear();
+    app.text_scene.clearText();
 }
 
 fn quitCallback(ptr: *anyopaque) void {
@@ -216,22 +238,23 @@ pub const WindowContext = struct {
     /// Processes camera movement based on its state.
     /// Returns true if the camera was updated.
     /// TODO: Improve
-    pub fn processCameraInput(self: Self, s: *Scene) bool {
+    pub fn processCameraInput(self: Self, main_scene: *Scene, text_scene: *text.Text3DScene) bool {
         var updated = false;
 
         if (self.ctrl_down) {
             const fov_change = @as(f32, @floatCast(self.scroll_dy)) * 4;
-            s.camera.adjustFov(fov_change);
+            main_scene.camera.adjustFov(fov_change);
             updated = true;
         } else if (self.scroll_changed) {
-            s.camera.adjustRadius(@as(f32, @floatCast(self.scroll_dy)) * 2);
+            main_scene.camera.adjustRadius(@as(f32, @floatCast(self.scroll_dy)) * 2);
             updated = true;
         }
         if (self.left_mouse_down) {
             // Scale mouse delta to a reasonable radian value.
             const pitch_change = @as(f32, @floatCast(self.cursor_dy)) * 0.005;
             const yaw_change = @as(f32, @floatCast(self.cursor_dx)) * 0.005;
-            s.camera.adjustPitchYaw(pitch_change, yaw_change);
+            main_scene.camera.adjustPitchYaw(pitch_change, yaw_change);
+            text_scene.updateCameraViewMatrix(main_scene.camera.view());
             updated = true;
         }
 
@@ -1368,8 +1391,9 @@ pub const App = struct {
     window: Window,
     vk_ctx: *VulkanContext,
     gui_renderer: gui.GuiRenderer,
-    text_renderer: text3d.Text3DRenderer,
     main_ui: gui.UI,
+    text_renderer: text.Text3DRenderer,
+    text_scene: text.Text3DScene,
     wd_ctx: WindowContext,
 
     // Vulkan objects that depend on the swapchain (and are recreated)
@@ -1404,6 +1428,7 @@ pub const App = struct {
         app.scene = try Scene.init(allocator, 20);
         app.wd_ctx = .{};
         app.main_ui = gui.UI.init(allocator);
+        app.text_scene = text.Text3DScene.init(allocator);
         app.perf = fps_tracker.PerformanceTracker.init();
         try app.initUi();
 
@@ -1441,74 +1466,53 @@ pub const App = struct {
 
         // Initialize GUI at the end
         self.gui_renderer = try gui.GuiRenderer.init(self.vk_ctx, self.render_pass, self.swapchain);
-        self.text_renderer = try text3d.Text3DRenderer.init(self.vk_ctx, self.render_pass, self.descriptor_layout, self.swapchain);
+        self.text_renderer = try text.Text3DRenderer.init(self.vk_ctx, self.render_pass, self.descriptor_layout, self.swapchain);
     }
 
-    ///
     pub fn initUi(self: *Self) !void {
         try self.main_ui.addButton(.{
             .x = 10,
             .y = 10,
             .width = 150,
             .height = 30,
-            .data = .{
-                .button = .{
-                    .text = try self.allocator.dupe(u8, "Add Line"),
-                    .on_click = addLineCallback,
-                },
-            },
-        });
+        }, "Add Line", .{ 0, 0, 1, 1 }, .{ 1, 1, 1, 1 }, addLineCallback);
 
         try self.main_ui.addButton(.{
             .x = 10,
             .y = 50,
             .width = 150,
             .height = 30,
-            .data = .{
-                .button = .{
-                    .text = try self.allocator.dupe(u8, "Clear Lines"),
-                    .on_click = clearLinesCallback,
-                },
-            },
-        });
+        }, "Clear Lines", .{ 0, 0, 1, 1 }, .{ 1, 1, 1, 1 }, clearLinesCallback);
 
         try self.main_ui.addButton(.{
             .x = 10,
             .y = 550,
             .width = 150,
             .height = 30,
-            .data = .{
-                .button = .{
-                    .text = try self.allocator.dupe(u8, "Quit"),
-                    .on_click = quitCallback,
-                },
-            },
-        });
+        }, "Quit", .{ 0, 0, 1, 1 }, .{ 1, 1, 1, 1 }, quitCallback);
 
         try self.main_ui.addPainText(.{
             .x = 10.0,
             .y = @as(f32, @floatFromInt(self.window.size.y)) - 120.0,
             .width = 150,
             .height = 30,
-
-            .data = .{
-                .plain_text = .{
-                    .text = try self.allocator.dupe(u8, "fps:#########"), //TODO: change this hack
-                    .font_size = 24.0,
-                    .text_color = .{ 1, 0, 0.8, 1 },
-                },
-            },
-        });
+        }, "", .{ 0, 0, 1, 1 }, .{ 1, 1, 1, 1 });
     }
 
     pub fn deinit(self: *Self) void {
         // Wait for device to be idle before cleaning up
         _ = c.vkDeviceWaitIdle(self.vk_ctx.device.handle);
 
-        self.main_ui.deinit(self.allocator);
+        self.main_ui.deinit();
+        self.text_scene.deinit();
         self.gui_renderer.deinit();
         self.text_renderer.deinit();
-        self.cleanupSwapchain();
+
+        self.pipeline.deinit(self.vk_ctx);
+        self.pipeline_layout.deinit(self.vk_ctx);
+        self.render_pass.deinit(self.vk_ctx);
+        self.depth_buffer.deinit(self.vk_ctx);
+        self.swapchain.deinit(self.vk_ctx);
 
         self.sync.deinit(self.vk_ctx);
         self.vertex_buffer.deinit(self.vk_ctx);
@@ -1523,6 +1527,7 @@ pub const App = struct {
     }
 
     fn cleanupSwapchain(self: *Self) void {
+        self.text_renderer.destroyPipeline();
         self.gui_renderer.destroyPipeline();
         self.pipeline.deinit(self.vk_ctx);
         self.pipeline_layout.deinit(self.vk_ctx);
@@ -1532,7 +1537,7 @@ pub const App = struct {
     }
 
     pub fn run(self: *Self) !void {
-        self.perf.setPtr(self.main_ui.widgets.getLast().data.plain_text.text);
+        self.perf.setPtr(self.main_ui.widgets.getLast().data.plain_text.text); //TODO: change this hack
         while (c.glfwWindowShouldClose(self.window.handle) == 0) {
             self.perf.beginFrame();
             self.gui_renderer.beginFrame();
@@ -1541,7 +1546,7 @@ pub const App = struct {
 
             c.glfwPollEvents();
 
-            if (self.wd_ctx.processCameraInput(&self.scene)) {
+            if (self.wd_ctx.processCameraInput(&self.scene, &self.text_scene)) {
                 try self.updateUniformBuffer();
             }
 
@@ -1549,6 +1554,7 @@ pub const App = struct {
                 c.glfwWaitEvents();
                 continue;
             }
+
             // Example 1: Static text (original)
             const transform1 = scene.Transform.new(.{ .position = .{ -5, 5, 0 } }).toMatrix();
             self.text_renderer.drawText("Hello 3D World!", transform1, .{ 1.0, 0.8, 0.2, 1.0 }, 1.0);
@@ -1568,7 +1574,7 @@ pub const App = struct {
                 1.0,
             );
 
-            // NEW Example 3: Tumbling text, rotating on multiple axes
+            // Example 3: Tumbling text, rotating on multiple axes
             const rot_x = scene.Quat.fromAxisAngle(.{ 1, 0, 0 }, time * 0.3);
             const rot_y = scene.Quat.fromAxisAngle(.{ 0, 1, 0 }, time * 0.5);
             const tumbling_transform = scene.Transform.new(.{
@@ -1577,7 +1583,7 @@ pub const App = struct {
             }).toMatrix();
             self.text_renderer.drawText("Tumbling Test 123", tumbling_transform, .{ 1.0, 0.3, 0.3, 1.0 }, 1.5);
 
-            // NEW Example 4: Text orbiting in a circle on the XZ plane
+            // Example 4: Text orbiting in a circle on the XZ plane
             const orbit_radius: f32 = 8.0;
             const orbit_transform = scene.Transform.new(.{
                 .position = .{
@@ -1597,7 +1603,7 @@ pub const App = struct {
                 0.8,
             );
 
-            // NEW Example 5: Text moving up and down on a sine wave
+            // Example 5: Text moving up and down on a sine wave
             const wave_transform = scene.Transform.new(.{
                 .position = .{
                     -10.0,
@@ -1609,7 +1615,11 @@ pub const App = struct {
             }).toMatrix();
             self.text_renderer.drawText("Sine Wave Motion!", wave_transform, .{ 1.0, 1.0, 0.0, 1.0 }, 0.7);
 
+            // const billboard_pos = [_]f32{ 7, 3, 0 };
+            // try self.text_scene.addBillboardText("I ALWAYS FACE YOU", billboard_pos, .{ 1.0, 0.2, 1.0, 1.0 }, 1.2);
+
             self.gui_renderer.processAndDrawUi(self, &self.main_ui);
+            self.text_renderer.processAndDrawTextScene(&self.text_scene);
 
             self.perf.endFrame();
 
@@ -1661,6 +1671,7 @@ pub const App = struct {
         if (present_result == c.VK_ERROR_OUT_OF_DATE_KHR or present_result == c.VK_SUBOPTIMAL_KHR or self.framebuffer_resized) {
             self.framebuffer_resized = false;
             try self.recreateSwapchain();
+            try self.updateUniformBuffer();
         } else {
             try vkCheck(present_result);
         }
@@ -1715,8 +1726,8 @@ pub const App = struct {
     fn updateUniformBuffer(self: *Self) !void {
         const aspect_ratio = @as(f32, @floatFromInt(self.window.size.x)) / @as(f32, @floatFromInt(self.window.size.y));
         const ubo = UniformBufferObject{
-            .view_matrix = self.scene.camera.viewMatrix(),
-            .perspective_matrix = self.scene.camera.projectionMatrix(aspect_ratio),
+            .view_matrix = self.scene.camera.view(),
+            .perspective_matrix = self.scene.camera.projection(aspect_ratio),
         };
 
         const data_ptr = try self.uniform_buffer.map(self.vk_ctx, UniformBufferObject);
@@ -1738,6 +1749,7 @@ pub const App = struct {
         });
         self.pipeline = try Pipeline.init(self.vk_ctx, self.render_pass, self.pipeline_layout, self.swapchain);
         try self.gui_renderer.createPipeline(self.render_pass, self.swapchain);
+        try self.text_renderer.createPipeline(self.render_pass, self.descriptor_layout, self.swapchain);
     }
 
     pub fn recordCommandBuffer(self: *Self, image_index: u32) !void {

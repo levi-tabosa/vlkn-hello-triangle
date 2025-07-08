@@ -1,8 +1,10 @@
+// text3d.zig
 const std = @import("std");
 const vk = @import("../test.zig");
 const c = @import("c").c;
 const gui = @import("../gui/gui.zig"); // To reuse Font struct
 const font = @import("font");
+const util = @import("util");
 
 const text3d_vert_shader_bin = @import("spirv").text3d_vs;
 const text3d_frag_shader_bin = @import("spirv").text3d_fs;
@@ -29,21 +31,95 @@ const Text3DVertex = extern struct {
     }
 };
 
-const DynamicText = struct {
-    text: []const u8,
-    model: [16]f32,
-    color: [4]f32,
-    size: f32,
+const TransformData = union(enum) {
+    static: [16]f32,
+    billboard: struct {
+        position: [3]f32,
+    },
 };
 
-const Text3DScene = struct {
-    const Self = @This();
-    list: std.ArrayList(DynamicText),
+const DynamicText = struct {
+    text: []u8,
+    transform: TransformData,
+    color: [4]f32,
+    font_size: f32,
+};
 
-    pub fn init(allocator: std.mem.Allocator) !Self {
-        return .{ .list = .init(allocator) };
+pub const Text3DScene = struct {
+    const Self = @This();
+
+    list: std.ArrayList(DynamicText),
+    string_pool: util.Pool([256]u8),
+    last_cam_matrix: [16]f32 = undefined,
+
+    pub fn init(allocator: std.mem.Allocator) Self {
+        return .{
+            .list = .init(allocator),
+            .string_pool = .init(allocator),
+        };
+    }
+
+    pub fn deinit(self: *Self) void {
+        self.string_pool.deinit();
+        self.list.deinit();
+    }
+
+    pub fn addText(self: *Self, text: []const u8, modal: [16]f32, color: ?[4]f32, font_size: ?f32) !void {
+        const t = (try self.string_pool.new())[0..text.len];
+        @memcpy(t, text);
+
+        try self.list.append(.{
+            .text = t,
+            .transform = .{ .static = modal },
+            .color = color orelse .{ 0.5, 0.5, 0.5, 1.0 },
+            .font_size = font_size orelse 1.0,
+        });
+    }
+
+    pub fn addBillboardText(self: *Self, text: []const u8, position: [3]f32, color: ?[4]f32, font_size: ?f32) !void {
+        const t = (try self.string_pool.new())[0..text.len];
+        @memcpy(t, text);
+
+        try self.list.append(.{
+            .text = t,
+            .transform = .{ .billboard = .{ .position = position } },
+            .color = color orelse .{ 0.5, 0.5, 0.5, 1.0 },
+            .font_size = font_size orelse 1.0,
+        });
+    }
+
+    pub fn clearText(self: *Self) void {
+        for (self.list.items) |*d_text| {
+            self.string_pool.delete(d_text.text.ptr);
+        }
+        self.list.clearAndFree();
+    }
+
+    pub fn updateCameraViewMatrix(self: *Self, matrix: [16]f32) void {
+        self.last_cam_matrix = matrix;
     }
 };
+
+fn createBillboardMatrix(camera_view_matrix: [16]f32, position: [3]f32, scale: f32) [16]f32 {
+    var model: [16]f32 = .{0} ** 16;
+    model[0] = camera_view_matrix[0];
+    model[1] = camera_view_matrix[4];
+    model[2] = camera_view_matrix[8];
+    model[8] = camera_view_matrix[1];
+    model[9] = camera_view_matrix[5];
+    model[10] = camera_view_matrix[9];
+    var i: u32 = 0;
+    while (i < 3) : (i += 1) {
+        model[i * 4 + 0] *= scale;
+        model[i * 4 + 1] *= scale;
+        model[i * 4 + 2] *= scale;
+    }
+    model[12] = position[0];
+    model[13] = position[1];
+    model[14] = position[2];
+    model[15] = 1.0;
+    return model;
+}
 
 // This struct will be stored in an SSBO. Each instance corresponds to one drawText call.
 const DrawData = extern struct {
@@ -93,6 +169,7 @@ pub const Text3DRenderer = struct {
 
     font: gui.Font = undefined,
     png_handle: gui.PngImage = undefined,
+    last_cam_matrix: [16]f32 = undefined,
 
     // const MAX_VERTICES = 32768;
     const MAX_VERTICES = 0xF000;
@@ -200,7 +277,7 @@ pub const Text3DRenderer = struct {
         };
         try vk.vkCheck(c.vkCreateDescriptorSetLayout(self.vk_ctx.device.handle, &font_layout_info, null, &self.font_descriptor_set_layout));
 
-        // NEW: Layout for Draw Data SSBO (Set 2)
+        // Layout for Draw Data SSBO (Set 2)
         const ssbo_layout_binding = c.VkDescriptorSetLayoutBinding{
             .binding = 0,
             .descriptorType = c.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
@@ -319,7 +396,7 @@ pub const Text3DRenderer = struct {
         const set_layouts = [_]c.VkDescriptorSetLayout{
             main_scene_ds_layout.handle,
             self.font_descriptor_set_layout,
-            self.draw_data_descriptor_set_layout, // NEW
+            self.draw_data_descriptor_set_layout,
         };
 
         self.pipeline_layout = try vk.PipelineLayout.init(self.vk_ctx, .{
@@ -339,7 +416,7 @@ pub const Text3DRenderer = struct {
         };
 
         const binding_desc = Text3DVertex.getBindingDescription();
-        const attrib_desc = Text3DVertex.getAttributeDescriptions(); // CHANGED: This is now smaller
+        const attrib_desc = Text3DVertex.getAttributeDescriptions();
         const vertex_input_info = c.VkPipelineVertexInputStateCreateInfo{
             .vertexBindingDescriptionCount = 1,
             .pVertexBindingDescriptions = &binding_desc,
@@ -425,10 +502,15 @@ pub const Text3DRenderer = struct {
         try vk.vkCheck(c.vkCreateGraphicsPipelines(self.vk_ctx.device.handle, null, 1, &pipeline_info, null, &self.pipeline.handle));
     }
 
+    pub fn destroyPipeline(self: *Self) void {
+        self.pipeline_layout.deinit(self.vk_ctx);
+        self.pipeline.deinit(self.vk_ctx);
+    }
+
     pub fn beginFrame(self: *Self) void {
         self.vertex_count = 0;
         self.index_count = 0;
-        self.draw_count = 0; // NEW: Reset draw counter
+        self.draw_count = 0; // Reset draw counter
     }
 
     pub fn endFrame(self: *Self, cmd_buffer: c.VkCommandBuffer, main_descriptor_set: vk.DescriptorSet) void {
@@ -451,6 +533,18 @@ pub const Text3DRenderer = struct {
         c.vkCmdDrawIndexedIndirect(cmd_buffer, self.indirect_cmd_buffer.handle, 0, self.draw_count, @sizeOf(IndirectCommand));
     }
 
+    pub fn processAndDrawTextScene(self: *Self, scene: *const Text3DScene) void {
+        for (scene.list.items) |d_text| {
+            const model_matrix = switch (d_text.transform) {
+                .static => |mat| mat,
+                .billboard => |b| createBillboardMatrix(scene.last_cam_matrix, b.position, d_text.font_size),
+            };
+
+            // Delegate the actual buffer population to a private helper.
+            self.drawText(d_text.text, model_matrix, d_text.color, d_text.font_size);
+        }
+    }
+
     // Populates the indirect and SSBO buffers
     pub fn drawText(self: *Self, text: []const u8, model_matrix: [16]f32, color: [4]f32, size_in_world_units: f32) void {
         const estimated_chars = text.len;
@@ -459,8 +553,8 @@ pub const Text3DRenderer = struct {
             self.vertex_count + (estimated_chars * 4) > MAX_VERTICES or
             self.index_count + (estimated_chars * 6) > MAX_INDICES)
         {
-            std.log.err("limit reached {} {} {}", .{ self.vertex_count, self.index_count, self.draw_count });
-            @panic("aa");
+            std.log.warn("IN DRAW TXT3D: limit reached {} {} {}", .{ self.vertex_count, self.index_count, self.draw_count });
+            return;
         }
 
         if (self.font.font_size == 0 or self.font.line_height == 0) return;
@@ -476,9 +570,12 @@ pub const Text3DRenderer = struct {
         var current_y: f32 = 0;
 
         for (text) |char_code| {
+            if (char_code == 170) { //End of string
+                break;
+            }
             if (char_code == '\n') {
                 current_x = 0;
-                current_y -= self.font.line_height;
+                current_y += self.font.line_height;
                 continue;
             }
 

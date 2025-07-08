@@ -17,7 +17,7 @@ pub const PerformanceTracker = struct {
     avg_fps: f32 = 0,
     min_fps: f32 = 0,
     max_fps: f32 = 0,
-    a: ?[]u8 = null,
+    mapped_string: ?[]u8 = null,
 
     pub fn init() Self {
         return .{
@@ -26,10 +26,9 @@ pub const PerformanceTracker = struct {
     }
 
     pub fn setPtr(self: *Self, ptr: []u8) void {
-        self.a = ptr[4..];
+        self.mapped_string = ptr;
     }
 
-    /// Call this at the very beginning of your main loop.
     pub fn beginFrame(self: *Self) void {
         const current_time = std.time.nanoTimestamp();
         const elapsed_nanos = current_time - self.last_frame_time;
@@ -47,7 +46,6 @@ pub const PerformanceTracker = struct {
         }
     }
 
-    /// Call this at the end of your main loop, before presenting.
     pub fn endFrame(self: *Self) void {
         if (self.frames_recorded == 0) return;
 
@@ -70,9 +68,6 @@ pub const PerformanceTracker = struct {
         self.min_fps = 1000.0 / max_time_ms;
         self.max_fps = 1000.0 / min_time_ms;
 
-        // self.a.?[0] = 'a';
-        // const b = self.a.?[0..4];
-        _ = std.fmt.bufPrint(self.a.?, "{d}", .{self.avg_fps}) catch unreachable;
-        // std.debug.print("{s}", .{std.fmt.bufPrint(self.a.?[0..4], "{d}", .{self.avg_fps}) catch @panic("peinus")});
+        _ = std.fmt.bufPrint(self.mapped_string.?, "fps:{d:.2}", .{self.avg_fps}) catch unreachable;
     }
 };

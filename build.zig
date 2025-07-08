@@ -101,6 +101,10 @@ pub fn build(b: *std.Build) !void {
             .root_source_file = b.path("src/scenes/geometry.zig"),
             .target = target,
         });
+        exe.root_module.addAnonymousImport("util", .{
+            .root_source_file = b.path("src/util/util.zig"),
+            .target = target,
+        });
 
         // The executable's compile step must depend on its shaders being cached or recompiled.
         exe.step.dependOn(install_vert_shader);
