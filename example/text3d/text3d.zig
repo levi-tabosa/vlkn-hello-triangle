@@ -176,7 +176,7 @@ pub const Text3DRenderer = struct {
     const MAX_INDICES = MAX_VERTICES * 3 / 2;
     const MAX_DRAW_CALLS = MAX_VERTICES / 2; // Max number of unique strings per frame
 
-    pub fn init(vk_ctx: *vk.VulkanContext, render_pass: vk.RenderPass, main_scene_ds_layout: vk.DescriptorSetLayout, swapchain: vk.Swapchain) !Self {
+    pub fn init(vk_ctx: *vk.VulkanContext, render_pass: vk.RenderPass, main_scene_ds_layout: vk.DescriptorSetLayout) !Self {
         var self: Self = .{
             .vk_ctx = vk_ctx,
             .font = gui.Font.init(vk_ctx.allocator),
@@ -186,7 +186,7 @@ pub const Text3DRenderer = struct {
         try self.createFontTextureAndSampler(vk_ctx.allocator, font.periclesW01_png);
         try self.createDescriptors();
         try self.createBuffers(vk_ctx);
-        try self.createPipeline(render_pass, main_scene_ds_layout, swapchain);
+        try self.createPipeline(render_pass, main_scene_ds_layout);
         return self;
     }
 
@@ -392,7 +392,7 @@ pub const Text3DRenderer = struct {
         c.vkUpdateDescriptorSets(self.vk_ctx.device.handle, 1, &ssbo_desc_write, 0, null);
     }
 
-    pub fn createPipeline(self: *Self, render_pass: vk.RenderPass, main_scene_ds_layout: vk.DescriptorSetLayout, swapchain: vk.Swapchain) !void {
+    pub fn createPipeline(self: *Self, render_pass: vk.RenderPass, main_scene_ds_layout: vk.DescriptorSetLayout) !void {
         const set_layouts = [_]c.VkDescriptorSetLayout{
             main_scene_ds_layout.handle,
             self.font_descriptor_set_layout,
@@ -464,25 +464,6 @@ pub const Text3DRenderer = struct {
             .sampleShadingEnable = c.VK_FALSE,
             .rasterizationSamples = c.VK_SAMPLE_COUNT_1_BIT,
         };
-        const viewport = c.VkViewport{
-            .x = 0.0,
-            .y = 0.0,
-            .width = @floatFromInt(swapchain.extent.width),
-            .height = @floatFromInt(swapchain.extent.height),
-            .minDepth = 0.0,
-            .maxDepth = 1.0,
-        };
-        const scissor = c.VkRect2D{
-            .offset = .{ .x = 0, .y = 0 },
-            .extent = swapchain.extent,
-        };
-
-        const viewport_state = c.VkPipelineViewportStateCreateInfo{
-            .viewportCount = 1,
-            .pViewports = &viewport,
-            .scissorCount = 1,
-            .pScissors = &scissor,
-        };
 
         const pipeline_info = c.VkGraphicsPipelineCreateInfo{
             .stageCount = shader_stages.len,
@@ -493,7 +474,6 @@ pub const Text3DRenderer = struct {
             .pMultisampleState = &multisampling,
             .pColorBlendState = &color_blending,
             .pDepthStencilState = &depth_stencil,
-            .pViewportState = &viewport_state,
             .layout = self.pipeline_layout.handle,
             .renderPass = render_pass.handle,
             .subpass = 0,

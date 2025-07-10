@@ -180,7 +180,7 @@ pub const GuiRenderer = struct {
     const MAX_VERTICES = 8192;
     const MAX_INDICES = MAX_VERTICES * 3 / 2;
 
-    pub fn init(vk_ctx: *vk.VulkanContext, render_pass: vk.RenderPass, swapchain: vk.Swapchain) !Self {
+    pub fn init(vk_ctx: *vk.VulkanContext, render_pass: vk.RenderPass) !Self {
         var self: Self = .{
             .vk_ctx = vk_ctx,
             .font = .init(vk_ctx.allocator),
@@ -190,7 +190,7 @@ pub const GuiRenderer = struct {
         try self.createUnifiedTextureAndSampler(vk_ctx.allocator, font.periclesW01_png);
         try self.createDescriptors();
         try self.createBuffers(vk_ctx);
-        try self.createPipeline(render_pass, swapchain);
+        try self.createPipeline(render_pass);
         return self;
     }
 
@@ -341,7 +341,7 @@ pub const GuiRenderer = struct {
         self.mapped_indices = try self.index_buffer.map(vk_ctx, u32);
     }
 
-    pub fn createPipeline(self: *Self, render_pass: vk.RenderPass, swapchain: vk.Swapchain) !void {
+    pub fn createPipeline(self: *Self, render_pass: vk.RenderPass) !void {
         self.pipeline_layout = try vk.PipelineLayout.init(self.vk_ctx, .{
             .setLayoutCount = 1,
             .pSetLayouts = &self.descriptor_set_layout,
@@ -401,30 +401,6 @@ pub const GuiRenderer = struct {
             .attachmentCount = 1,
             .pAttachments = &color_blend_attachment,
         };
-        const depth_stencil = c.VkPipelineDepthStencilStateCreateInfo{
-            .depthTestEnable = c.VK_FALSE,
-            .depthWriteEnable = c.VK_FALSE,
-        };
-
-        const viewport = c.VkViewport{
-            .x = 0.0,
-            .y = 0.0,
-            .width = @floatFromInt(swapchain.extent.width),
-            .height = @floatFromInt(swapchain.extent.height),
-            .minDepth = 0.0,
-            .maxDepth = 1.0,
-        };
-        const scissor = c.VkRect2D{
-            .offset = .{ .x = 0, .y = 0 },
-            .extent = swapchain.extent,
-        };
-
-        const viewport_state = c.VkPipelineViewportStateCreateInfo{
-            .viewportCount = 1,
-            .pViewports = &viewport,
-            .scissorCount = 1,
-            .pScissors = &scissor,
-        };
 
         const pipeline_info = c.VkGraphicsPipelineCreateInfo{
             .stageCount = shader_stages.len,
@@ -434,8 +410,6 @@ pub const GuiRenderer = struct {
             .pRasterizationState = &rasterizer,
             .pMultisampleState = &multisampling,
             .pColorBlendState = &color_blending,
-            .pDepthStencilState = &depth_stencil,
-            .pViewportState = &viewport_state,
             .layout = self.pipeline_layout.handle,
             .renderPass = render_pass.handle,
             .subpass = 0,

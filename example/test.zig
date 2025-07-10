@@ -1245,7 +1245,7 @@ pub const Pipeline = struct {
 
     handle: c.VkPipeline = undefined,
 
-    pub fn init(vk_ctx: *VulkanContext, render_pass: RenderPass, layout: PipelineLayout, swapchain: Swapchain) !Self {
+    pub fn init(vk_ctx: *VulkanContext, render_pass: RenderPass, layout: PipelineLayout) !Self {
         var self = Self{};
 
         var vert_shader_module = try ShaderModule.init(vk_ctx.allocator, vk_ctx.device.handle, vert_shader_bin);
@@ -1269,24 +1269,7 @@ pub const Pipeline = struct {
             .topology = c.VK_PRIMITIVE_TOPOLOGY_LINE_LIST,
             .primitiveRestartEnable = c.VK_FALSE,
         };
-        const viewport = c.VkViewport{
-            .x = 0.0,
-            .y = 0.0,
-            .width = @floatFromInt(swapchain.extent.width),
-            .height = @floatFromInt(swapchain.extent.height),
-            .minDepth = 0.0,
-            .maxDepth = 1.0,
-        };
-        const scissor = c.VkRect2D{
-            .offset = .{ .x = 0, .y = 0 },
-            .extent = swapchain.extent,
-        };
-        var viewport_state = c.VkPipelineViewportStateCreateInfo{
-            .viewportCount = 1,
-            .pViewports = &viewport,
-            .scissorCount = 1,
-            .pScissors = &scissor,
-        };
+
         var rasterizer = c.VkPipelineRasterizationStateCreateInfo{
             .depthClampEnable = c.VK_FALSE,
             .rasterizerDiscardEnable = c.VK_FALSE,
@@ -1318,12 +1301,28 @@ pub const Pipeline = struct {
             .stencilTestEnable = c.VK_FALSE,
         };
 
+        var viewport_state = c.VkPipelineViewportStateCreateInfo{
+            .viewportCount = 1,
+            .scissorCount = 1,
+        };
+
+        const dynamic_states = [_]c.VkDynamicState{
+            c.VK_DYNAMIC_STATE_VIEWPORT,
+            c.VK_DYNAMIC_STATE_SCISSOR,
+        };
+
+        const dynamic_states_create_info = c.VkPipelineDynamicStateCreateInfo{
+            .dynamicStateCount = dynamic_states.len,
+            .pDynamicStates = &dynamic_states,
+        };
+
         var pipeline_info = c.VkGraphicsPipelineCreateInfo{
             .stageCount = shader_stages.len,
             .pStages = &shader_stages,
             .pVertexInputState = &vertex_input_info,
             .pInputAssemblyState = &input_assembly,
             .pViewportState = &viewport_state,
+            .pDynamicState = &dynamic_states_create_info,
             .pRasterizationState = &rasterizer,
             .pMultisampleState = &multisampling,
             .pColorBlendState = &color_blending,
@@ -1462,11 +1461,11 @@ pub const App = struct {
             .pSetLayouts = &[_]c.VkDescriptorSetLayout{self.descriptor_layout.handle},
             .setLayoutCount = 1,
         });
-        self.pipeline = try Pipeline.init(self.vk_ctx, self.render_pass, self.pipeline_layout, self.swapchain);
+        self.pipeline = try Pipeline.init(self.vk_ctx, self.render_pass, self.pipeline_layout);
 
         // Initialize GUI at the end
-        self.gui_renderer = try gui.GuiRenderer.init(self.vk_ctx, self.render_pass, self.swapchain);
-        self.text_renderer = try text.Text3DRenderer.init(self.vk_ctx, self.render_pass, self.descriptor_layout, self.swapchain);
+        self.gui_renderer = try gui.GuiRenderer.init(self.vk_ctx, self.render_pass);
+        self.text_renderer = try text.Text3DRenderer.init(self.vk_ctx, self.render_pass, self.descriptor_layout);
     }
 
     pub fn initUi(self: *Self) !void {
@@ -1639,7 +1638,6 @@ pub const App = struct {
         } else if (acquire_result != c.VK_SUCCESS and acquire_result != c.VK_SUBOPTIMAL_KHR) {
             try vkCheck(acquire_result);
         }
-
         try vkCheck(c.vkResetFences(self.vk_ctx.device.handle, 1, &self.sync.in_flight_fence.handle));
         try vkCheck(c.vkResetCommandBuffer(self.command_buffer.handle, 0));
         try self.recordCommandBuffer(image_index);
@@ -1747,9 +1745,9 @@ pub const App = struct {
             .pSetLayouts = &self.descriptor_layout.handle,
             .setLayoutCount = 1,
         });
-        self.pipeline = try Pipeline.init(self.vk_ctx, self.render_pass, self.pipeline_layout, self.swapchain);
-        try self.gui_renderer.createPipeline(self.render_pass, self.swapchain);
-        try self.text_renderer.createPipeline(self.render_pass, self.descriptor_layout, self.swapchain);
+        self.pipeline = try Pipeline.init(self.vk_ctx, self.render_pass, self.pipeline_layout);
+        try self.gui_renderer.createPipeline(self.render_pass);
+        try self.text_renderer.createPipeline(self.render_pass, self.descriptor_layout);
     }
 
     pub fn recordCommandBuffer(self: *Self, image_index: u32) !void {
@@ -1758,8 +1756,8 @@ pub const App = struct {
 
         const clear_values = [_]c.VkClearValue{
             // Color attachment clear value
-            // .{ .color = .{ .float32 = .{ 0.345, 0.239, 0.502, 1.0 } } },
-            .{ .color = .{ .float32 = .{ 0, 0, 0, 1.0 } } },
+            .{ .color = .{ .float32 = .{ 0.392, 0.584, 0.929, 1.0 } } }, // Cornflower Blue
+            // .{ .color = .{ .float32 = .{ 0, 0, 0, 1.0 } } },
             // Depth attachment clear value
             .{ .depthStencil = .{ .depth = 0.0, .stencil = 0 } },
         };
@@ -1777,6 +1775,23 @@ pub const App = struct {
 
         c.vkCmdBeginRenderPass(self.command_buffer.handle, &render_pass_info, c.VK_SUBPASS_CONTENTS_INLINE);
         c.vkCmdBindPipeline(self.command_buffer.handle, c.VK_PIPELINE_BIND_POINT_GRAPHICS, self.pipeline.handle);
+
+        var viewport = c.VkViewport{
+            .height = @floatFromInt(self.window.size.y),
+            .width = @floatFromInt(self.window.size.x),
+        };
+
+        var scissor = c.VkRect2D{
+            .extent = .{
+                .height = @intCast(self.window.size.y),
+                .width = @intCast(self.window.size.x),
+            },
+            .offset = .{},
+        };
+
+        c.vkCmdSetViewport(self.command_buffer.handle, 0, 1, &viewport);
+        c.vkCmdSetScissor(self.command_buffer.handle, 0, 1, &scissor);
+
         const vertex_buffers = [_]c.VkBuffer{self.vertex_buffer.handle};
         const offsets = [_]c.VkDeviceSize{0};
         c.vkCmdBindVertexBuffers(self.command_buffer.handle, 0, 1, &vertex_buffers, &offsets);
