@@ -95,6 +95,7 @@ pub const Text3DScene = struct {
         self.list.clearAndFree();
     }
 
+    /// Takes a camera matrix to manage the billboard text
     pub fn updateCameraViewMatrix(self: *Self, matrix: [16]f32) void {
         self.last_cam_matrix = matrix;
     }

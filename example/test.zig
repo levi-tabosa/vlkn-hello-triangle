@@ -214,8 +214,7 @@ const Window = struct {
 
 pub const WindowContext = struct {
     const Self = @This();
-
-    // Raw State from GLFW
+    // Raw state from GLFW (unchanged):
     last_cursor_x: f64 = -1.0,
     last_cursor_y: f64 = -1.0,
     cursor_dx: f64 = 0,
@@ -225,9 +224,13 @@ pub const WindowContext = struct {
     left_mouse_down: bool = false,
     ctrl_down: bool = false,
 
-    // --- Public API for App ---
+    // ─── Fields for fling/inertia ─────────────────────────────────────
+    fling_dx: f64 = 0, // current horizontal fling velocity
+    fling_dy: f64 = 0, // current vertical   fling velocity
+    flinging: bool = false, // are we currently in a fling?
+    friction: f64 = 0.98, // per-frame decay factor (0.0–1.0)
 
-    /// Call this at the start of each frame to reset per-frame state.
+    /// Reset per-frame state
     pub fn beginFrame(self: *Self) void {
         self.cursor_dx = 0;
         self.cursor_dy = 0;
@@ -235,50 +238,68 @@ pub const WindowContext = struct {
         self.scroll_changed = false;
     }
 
-    /// Processes camera movement based on its state.
-    /// Returns true if the camera was updated.
-    /// TODO: Improve
-    pub fn processCameraInput(self: Self, main_scene: *Scene, text_scene: *text.Text3DScene) bool {
+    /// Called every frame; applies both drag and fling to the camera.
+    /// Returns true if camera was changed
+    pub fn processCameraInput(self: *Self, main_scene: *Scene, text_scene: *text.Text3DScene) bool {
         var updated = false;
 
-        if (self.ctrl_down) {
-            const fov_change = @as(f32, @floatCast(self.scroll_dy)) * 4;
-            main_scene.camera.adjustFov(fov_change);
+        // Use scroll for zoom/fov as before
+        if (self.ctrl_down and self.scroll_changed) {
+            main_scene.camera.adjustFov(@as(f32, @floatCast(self.scroll_dy)) * 4);
             updated = true;
         } else if (self.scroll_changed) {
             main_scene.camera.adjustRadius(@as(f32, @floatCast(self.scroll_dy)) * 2);
             updated = true;
         }
+
+        // Drag and fling logic
         if (self.left_mouse_down) {
-            // Scale mouse delta to a reasonable radian value.
             const pitch_change = @as(f32, @floatCast(self.cursor_dy)) * 0.005;
             const yaw_change = @as(f32, @floatCast(self.cursor_dx)) * 0.005;
             main_scene.camera.adjustPitchYaw(pitch_change, yaw_change);
             text_scene.updateCameraViewMatrix(main_scene.camera.view());
             updated = true;
+
+            self.fling_dx = 0;
+            self.fling_dy = 0;
+            self.flinging = false;
+        } else if (self.flinging) {
+            const pitch_change = @as(f32, @floatCast(self.fling_dy)) * 0.005;
+            const yaw_change = @as(f32, @floatCast(self.fling_dx)) * 0.005;
+            main_scene.camera.adjustPitchYaw(pitch_change, yaw_change);
+            text_scene.updateCameraViewMatrix(main_scene.camera.view());
+            updated = true;
+
+            self.fling_dx *= self.friction;
+            self.fling_dy *= self.friction;
+
+            if (@abs(self.fling_dx) < 0.1 and @abs(self.fling_dy) < 0.1) {
+                self.flinging = false;
+            }
         }
 
         return updated;
     }
 
-    // --- Callback Handlers (called by GLFW callbacks) ---
     pub fn handleCursorPos(self: *Self, x: f64, y: f64) void {
-        // On first event, just store position to avoid a large jump.
         if (self.last_cursor_x == -1.0) {
             self.last_cursor_x = x;
             self.last_cursor_y = y;
             return;
         }
-
         self.cursor_dx = x - self.last_cursor_x;
         self.cursor_dy = y - self.last_cursor_y;
-
         self.last_cursor_x = x;
         self.last_cursor_y = y;
     }
 
     pub fn handleMouseButton(self: *Self, button: c_int, action: c_int) void {
         if (button == c.GLFW_MOUSE_BUTTON_LEFT) {
+            if (action == c.GLFW_RELEASE and self.left_mouse_down) {
+                self.fling_dx = self.cursor_dx;
+                self.fling_dy = self.cursor_dy;
+                self.flinging = true;
+            }
             self.left_mouse_down = (action == c.GLFW_PRESS);
         }
     }
@@ -297,7 +318,7 @@ pub const WindowContext = struct {
 };
 
 // --- Core Vulkan Component Structs ---
-
+// Abstrarion as needed and vocabulary types
 const Instance = struct {
     const Self = @This();
 
@@ -348,37 +369,115 @@ const PhysicalDevice = struct {
     const Self = @This();
 
     handle: c.VkPhysicalDevice = undefined,
-    q_family_idx: u32 = undefined,
+    graphics_q_family: u32 = undefined,
+    present_q_family: u32 = undefined,
+    transfer_q_family: u32 = undefined,
 
     pub fn init(allocator: Allocator, instance: Instance, surface: Surface) !Self {
         assert(instance.handle != null and surface.handle != null);
         var self = Self{};
+
+        // Enumerate physical devices
         var physical_device_count: u32 = 0;
         try vkCheck(c.vkEnumeratePhysicalDevices(instance.handle, &physical_device_count, null));
+        if (physical_device_count == 0) return error.NoPhysicalDevicesFound;
         const physical_devices = try allocator.alloc(c.VkPhysicalDevice, physical_device_count);
         defer allocator.free(physical_devices);
         try vkCheck(c.vkEnumeratePhysicalDevices(instance.handle, &physical_device_count, physical_devices.ptr));
 
-        // TODO: A more robust device selection mechanism
-        self.handle = physical_devices[0];
+        // Select the best physical device based on a scoring system
+        var best_device: ?c.VkPhysicalDevice = null;
+        var best_score: i32 = -1;
 
+        for (physical_devices) |device| {
+            var properties: c.VkPhysicalDeviceProperties = undefined;
+            c.vkGetPhysicalDeviceProperties(device, &properties);
+            var q_count: u32 = 0;
+            c.vkGetPhysicalDeviceQueueFamilyProperties(device, &q_count, null);
+            if (q_count == 0) return error.NoQueueFamiliesAvailable;
+            const q_family_props = try allocator.alloc(c.VkQueueFamilyProperties, q_count);
+            defer allocator.free(q_family_props);
+            c.vkGetPhysicalDeviceQueueFamilyProperties(device, &q_count, q_family_props.ptr);
+
+            std.debug.print("{any}\n", .{q_family_props});
+
+            // Score devices: prefer discrete GPUs, then integrated, etc.
+            var score: i32 = 0;
+            switch (properties.deviceType) {
+                c.VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU => score += 1000,
+                c.VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU => score += 500,
+                else => score += 100, // Other types (e.g., virtual, CPU) get lower priority
+            }
+
+            // Add more criteria here if needed (e.g., required features, memory size)
+
+            if (score > best_score) {
+                best_device = device;
+                best_score = score;
+            }
+        }
+
+        if (best_device == null) return error.NoSuitablePhysicalDevice;
+        self.handle = best_device.?;
+
+        // Get queue family properties
         var q_count: u32 = 0;
         c.vkGetPhysicalDeviceQueueFamilyProperties(self.handle, &q_count, null);
         const q_family_props = try allocator.alloc(c.VkQueueFamilyProperties, q_count);
         defer allocator.free(q_family_props);
         c.vkGetPhysicalDeviceQueueFamilyProperties(self.handle, &q_count, q_family_props.ptr);
 
+        // --- NEW QUEUE FINDING LOGIC ---
+        var graphics_idx: ?u32 = null;
+        var present_idx: ?u32 = null;
+        var transfer_idx: ?u32 = null;
+
+        // First pass: find a dedicated transfer queue (transfer bit ON, graphics bit OFF)
         for (q_family_props, 0..) |prop, i| {
-            if (prop.queueFlags & c.VK_QUEUE_GRAPHICS_BIT != 0) {
-                var support: c.VkBool32 = c.VK_FALSE;
-                try vkCheck(c.vkGetPhysicalDeviceSurfaceSupportKHR(self.handle, @intCast(i), surface.handle, &support));
-                if (support == c.VK_TRUE) {
-                    self.q_family_idx = @intCast(i);
-                    return self;
-                }
+            const idx: u32 = @intCast(i);
+            if ((prop.queueFlags & c.VK_QUEUE_TRANSFER_BIT != 0) and (prop.queueFlags & c.VK_QUEUE_GRAPHICS_BIT == 0)) {
+                transfer_idx = idx;
+                break; // Found the ideal one, stop searching
             }
         }
-        return error.NoSuitableQueueFamily;
+
+        // Second pass: find graphics, present, and a fallback transfer queue
+        for (q_family_props, 0..) |prop, i| {
+            const idx: u32 = @intCast(i);
+
+            // Find a graphics queue
+            if (prop.queueFlags & c.VK_QUEUE_GRAPHICS_BIT != 0) {
+                if (graphics_idx == null) graphics_idx = idx;
+            }
+
+            // Find a present queue (must check for surface support)
+            var support: c.VkBool32 = c.VK_FALSE;
+            try vkCheck(c.vkGetPhysicalDeviceSurfaceSupportKHR(self.handle, idx, surface.handle, &support));
+            if (support == c.VK_TRUE) {
+                if (present_idx == null) present_idx = idx;
+            }
+
+            // If we didn't find a dedicated transfer queue, use any queue that supports transfer
+            if (transfer_idx == null and (prop.queueFlags & c.VK_QUEUE_TRANSFER_BIT != 0)) {
+                transfer_idx = idx;
+            }
+
+            if (graphics_idx != null and present_idx != null and transfer_idx != null) {
+                break;
+            }
+        }
+
+        if (graphics_idx == null) return error.NoGraphicsQueueFamily;
+        if (present_idx == null) return error.NoPresentQueueFamily;
+        if (transfer_idx == null) return error.NoTransferQueueFamily;
+
+        self.graphics_q_family = graphics_idx.?;
+        self.present_q_family = present_idx.?;
+        self.transfer_q_family = transfer_idx.?;
+
+        std.log.info("Queue Families Found: Graphics={d}, Present={d}, Transfer={d}", .{ self.graphics_q_family, self.present_q_family, self.transfer_q_family });
+
+        return self;
     }
 
     pub fn findMemoryType(self: Self, type_filter: u32, properties: c.VkMemoryPropertyFlags) !u32 {
@@ -430,20 +529,37 @@ const Device = struct {
     handle: c.VkDevice = undefined,
     physical: PhysicalDevice,
 
-    pub fn init(physical_device: PhysicalDevice) !Self {
+    pub fn init(allocator: Allocator, physical_device: PhysicalDevice) !Self { // Pass allocator
         var self = Self{ .physical = physical_device };
         const queue_priority: f32 = 1.0;
-        const queue_create_info = c.VkDeviceQueueCreateInfo{
-            .queueFamilyIndex = physical_device.q_family_idx,
-            .queueCount = 1,
-            .pQueuePriorities = &queue_priority,
-        };
+
+        // Use a BitSet to find the unique queue family indices
+        var unique_queue_families: std.bit_set.StaticBitSet(3) = .initEmpty();
+        unique_queue_families.set(physical_device.graphics_q_family);
+        unique_queue_families.set(physical_device.present_q_family);
+        unique_queue_families.set(physical_device.transfer_q_family);
+
+        // Create a VkDeviceQueueCreateInfo for each unique family
+        var queue_create_infos = try std.ArrayList(c.VkDeviceQueueCreateInfo).initCapacity(allocator, unique_queue_families.count());
+        defer queue_create_infos.deinit();
+
+        std.debug.print("{}\n", .{unique_queue_families.count()});
+
+        var it = unique_queue_families.iterator(.{});
+        while (it.next()) |family_index| {
+            try queue_create_infos.append(.{
+                .queueFamilyIndex = @intCast(family_index),
+                .queueCount = 1,
+                .pQueuePriorities = &queue_priority,
+            });
+        }
+
         var device_features = c.VkPhysicalDeviceFeatures{};
         const device_extensions = [_][*:0]const u8{c.VK_KHR_SWAPCHAIN_EXTENSION_NAME};
         const create_info = c.VkDeviceCreateInfo{
             .pEnabledFeatures = &device_features,
-            .pQueueCreateInfos = &queue_create_info,
-            .queueCreateInfoCount = 1,
+            .pQueueCreateInfos = queue_create_infos.items.ptr,
+            .queueCreateInfoCount = @intCast(queue_create_infos.items.len),
             .ppEnabledExtensionNames = &device_extensions,
             .enabledExtensionCount = device_extensions.len,
         };
@@ -460,15 +576,25 @@ const Queue = struct {
 
     handle: c.VkQueue = undefined,
 
-    pub fn init(device: Device) !Self {
+    /// The real queue is managed by the Api so no need for deinit call
+    pub fn init(device: Device, family_index: u32) !Self {
         var self = Self{};
-        c.vkGetDeviceQueue(device.handle, device.physical.q_family_idx, 0, &self.handle);
+        c.vkGetDeviceQueue(device.handle, family_index, 0, &self.handle);
         return self;
     }
 
-    pub fn deinit(_: *Self) void {} // TODO: remove
+    pub fn submit(self: *const Self, command_buffer: CommandBuffer, fence: c.VkFence) !void {
+        const submit_info = c.VkSubmitInfo{
+            .commandBufferCount = 1,
+            .pCommandBuffers = &command_buffer.handle,
+        };
 
-    // pub fn submit(self: *Self, ) // TODO: create
+        try vkCheck(c.vkQueueSubmit(self.handle, 1, &submit_info, fence));
+    }
+
+    pub fn waitIdle(self: Self) !void {
+        try vkCheck(c.vkQueueWaitIdle(self.handle));
+    }
 };
 
 // TODO: Improve this abstraction to be used in the UI render logic
@@ -476,15 +602,19 @@ const CommandBuffer = struct {
     const Self = @This();
     handle: c.VkCommandBuffer = undefined,
 
-    pub fn allocate(vk_ctx: *VulkanContext, is_primary: bool) !Self {
+    pub fn allocate(vk_ctx: *VulkanContext, command_pool: CommandPool, is_primary: bool) !Self {
         var self = Self{};
         const alloc_info = c.VkCommandBufferAllocateInfo{
-            .commandPool = vk_ctx.command_pool.handle,
+            .commandPool = command_pool.handle,
             .level = if (is_primary) c.VK_COMMAND_BUFFER_LEVEL_PRIMARY else c.VK_COMMAND_BUFFER_LEVEL_SECONDARY,
             .commandBufferCount = 1,
         };
         try vkCheck(c.vkAllocateCommandBuffers(vk_ctx.device.handle, &alloc_info, &self.handle));
         return self;
+    }
+
+    pub fn free(self: *const Self, vk_ctx: *VulkanContext, command_pool: CommandPool) void {
+        c.vkFreeCommandBuffers(vk_ctx.device.handle, command_pool.handle, 1, &self.handle);
     }
 
     pub fn begin(self: *Self, flags: c.VkCommandBufferUsageFlags) !void {
@@ -498,12 +628,12 @@ const CommandBuffer = struct {
         try vkCheck(c.vkEndCommandBuffer(self.handle));
     }
 
-    fn beginSingleTimeCommands(vk_ctx: *VulkanContext, is_primary: bool) !Self {
+    fn beginSingleTimeCommands(vk_ctx: *VulkanContext, command_pool: CommandPool, is_primary: bool) !Self {
         var self = Self{};
 
         const alloc_info = c.VkCommandBufferAllocateInfo{
             .level = if (is_primary) c.VK_COMMAND_BUFFER_LEVEL_PRIMARY else c.VK_COMMAND_BUFFER_LEVEL_SECONDARY,
-            .commandPool = vk_ctx.command_pool.handle,
+            .commandPool = command_pool.handle,
             .commandBufferCount = 1,
         };
         try vkCheck(c.vkAllocateCommandBuffers(vk_ctx.device.handle, &alloc_info, &self.handle));
@@ -514,17 +644,19 @@ const CommandBuffer = struct {
         return self;
     }
 
-    fn endSingleTimeCommands(self: Self, vk_ctx: *VulkanContext) !void {
+    fn endSingleTimeCommands(self: Self, vk_ctx: *VulkanContext, command_pool: CommandPool, queue: Queue) !void {
         try vkCheck(c.vkEndCommandBuffer(self.handle));
 
-        const submit_info = c.VkSubmitInfo{
-            .commandBufferCount = 1,
-            .pCommandBuffers = &self.handle,
-        };
-        try vkCheck(c.vkQueueSubmit(vk_ctx.graphics_queue.handle, 1, &submit_info, null));
-        try vkCheck(c.vkQueueWaitIdle(vk_ctx.graphics_queue.handle));
-
-        c.vkFreeCommandBuffers(vk_ctx.device.handle, vk_ctx.command_pool.handle, 1, &self.handle);
+        // const submit_info = c.VkSubmitInfo{
+        //     .commandBufferCount = 1,
+        //     .pCommandBuffers = &self.handle,
+        // };
+        try queue.submit(self, null);
+        try queue.waitIdle();
+        self.free(vk_ctx, command_pool);
+        // try vkCheck(c.vkQueueSubmit(queue.handle, 1, &submit_info, null));
+        // try vkCheck(c.vkQueueWaitIdle(queue.handle));
+        // c.vkFreeCommandBuffers(vk_ctx.device.handle, command_pool.handle, 1, &self.handle);
     }
 };
 
@@ -533,11 +665,11 @@ const CommandPool = struct {
 
     handle: c.VkCommandPool = undefined,
 
-    pub fn init(device: Device) !Self {
+    pub fn init(device: Device, queue_family_index: u32) !Self {
         var self = Self{};
         var cmd_pool_info = c.VkCommandPoolCreateInfo{
             .flags = c.VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
-            .queueFamilyIndex = device.physical.q_family_idx,
+            .queueFamilyIndex = queue_family_index,
         };
         try vkCheck(c.vkCreateCommandPool(device.handle, &cmd_pool_info, null, &self.handle));
         return self;
@@ -735,7 +867,7 @@ pub const Image = struct {
         old_layout: c.VkImageLayout,
         new_layout: c.VkImageLayout,
     ) !void {
-        const command_buffer = try CommandBuffer.beginSingleTimeCommands(vk_ctx, true);
+        const command_buffer = try CommandBuffer.beginSingleTimeCommands(vk_ctx, vk_ctx.command_pool, true);
 
         var barrier = c.VkImageMemoryBarrier{
             .oldLayout = old_layout,
@@ -783,12 +915,12 @@ pub const Image = struct {
 
         c.vkCmdPipelineBarrier(command_buffer.handle, source_stage, destination_stage, 0, 0, null, 0, null, 1, &barrier);
 
-        try command_buffer.endSingleTimeCommands(vk_ctx);
+        try command_buffer.endSingleTimeCommands(vk_ctx, vk_ctx.command_pool, vk_ctx.graphics_queue);
     }
 
     /// Copies data from a buffer to this image.
     pub fn copyFromBuffer(self: Image, vk_ctx: *VulkanContext, buffer: Buffer) !void {
-        const command_buffer = try CommandBuffer.beginSingleTimeCommands(vk_ctx, true);
+        const command_buffer = try CommandBuffer.beginSingleTimeCommands(vk_ctx, vk_ctx.transfer_command_pool, true);
 
         const region = c.VkBufferImageCopy{
             .bufferOffset = 0,
@@ -806,7 +938,7 @@ pub const Image = struct {
 
         c.vkCmdCopyBufferToImage(command_buffer.handle, buffer.handle, self.handle, c.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 
-        try command_buffer.endSingleTimeCommands(vk_ctx);
+        try command_buffer.endSingleTimeCommands(vk_ctx, vk_ctx.transfer_command_pool, vk_ctx.transfer_queue);
     }
 
     pub fn hasDepthComponent(self: Image) bool {
@@ -839,7 +971,7 @@ const DepthBuffer = struct {
         const view = try image.createView(vk_ctx, c.VK_IMAGE_ASPECT_DEPTH_BIT);
 
         // Important: Transition the image layout so it's ready for use as a depth attachment
-        try image.transitionLayout(vk_ctx, c.VK_IMAGE_LAYOUT_UNDEFINED, c.VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+        // try image.transitionLayout(vk_ctx, c.VK_IMAGE_LAYOUT_UNDEFINED, c.VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
 
         return .{ .image = image, .view = view, .format = format };
     }
@@ -958,50 +1090,24 @@ pub const RenderPass = struct {
 
 const SyncObjects = struct {
     const Self = @This();
-    img_available_semaphore: Semaphore,
-    render_ended_semaphore: Semaphore,
-    in_flight_fence: Fence,
+    img_available_s: c.VkSemaphore = undefined,
+    render_ended_s: c.VkSemaphore = undefined,
+    in_flight_f: c.VkFence = undefined,
 
     pub fn init(vk_ctx: *VulkanContext) !Self {
-        return .{
-            .img_available_semaphore = try Semaphore.init(vk_ctx),
-            .render_ended_semaphore = try Semaphore.init(vk_ctx),
-            .in_flight_fence = try Fence.init(vk_ctx),
-        };
-    }
-    pub fn deinit(self: *Self, vk_ctx: *VulkanContext) void {
-        self.img_available_semaphore.deinit(vk_ctx);
-        self.render_ended_semaphore.deinit(vk_ctx);
-        self.in_flight_fence.deinit(vk_ctx);
-    }
-};
+        var self: Self = .{};
+        try vkCheck(c.vkCreateSemaphore(vk_ctx.device.handle, &.{}, null, &self.img_available_s));
+        try vkCheck(c.vkCreateSemaphore(vk_ctx.device.handle, &.{}, null, &self.render_ended_s));
 
-const Semaphore = struct {
-    const Self = @This();
-    handle: c.VkSemaphore = undefined,
-
-    pub fn init(vk_ctx: *VulkanContext) !Self {
-        var self = Self{};
-        try vkCheck(c.vkCreateSemaphore(vk_ctx.device.handle, &.{}, null, &self.handle));
-        return self;
-    }
-    pub fn deinit(self: *Self, vk_ctx: *VulkanContext) void {
-        c.vkDestroySemaphore(vk_ctx.device.handle, self.handle, null);
-    }
-};
-
-const Fence = struct {
-    const Self = @This();
-    handle: c.VkFence = undefined,
-
-    pub fn init(vk_ctx: *VulkanContext) !Self {
-        var self = Self{};
         const fence_create_info = c.VkFenceCreateInfo{ .flags = c.VK_FENCE_CREATE_SIGNALED_BIT };
-        try vkCheck(c.vkCreateFence(vk_ctx.device.handle, &fence_create_info, null, &self.handle));
+        try vkCheck(c.vkCreateFence(vk_ctx.device.handle, &fence_create_info, null, &self.in_flight_f));
         return self;
     }
+
     pub fn deinit(self: *Self, vk_ctx: *VulkanContext) void {
-        c.vkDestroyFence(vk_ctx.device.handle, self.handle, null);
+        c.vkDestroySemaphore(vk_ctx.device.handle, self.img_available_s, null);
+        c.vkDestroySemaphore(vk_ctx.device.handle, self.render_ended_s, null);
+        c.vkDestroyFence(vk_ctx.device.handle, self.in_flight_f, null);
     }
 };
 
@@ -1051,31 +1157,19 @@ pub const Buffer = struct {
         c.vkUnmapMemory(vk_ctx.device.handle, self.memory);
     }
 
-    ///TODO: Use CommandBuffer vocabullary type methods
     pub fn copyTo(self: *Self, vk_ctx: *VulkanContext, dst_buffer: Buffer) !void {
-        const alloc_info = c.VkCommandBufferAllocateInfo{
-            .level = c.VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-            .commandPool = vk_ctx.command_pool.handle,
-            .commandBufferCount = 1,
-        };
-        var command_buffer: c.VkCommandBuffer = undefined;
-        try vkCheck(c.vkAllocateCommandBuffers(vk_ctx.device.handle, &alloc_info, &command_buffer));
-        defer c.vkFreeCommandBuffers(vk_ctx.device.handle, vk_ctx.command_pool.handle, 1, &command_buffer);
+        var cmdbuffer = try CommandBuffer.allocate(vk_ctx, vk_ctx.transfer_command_pool, true);
 
-        const begin_info = c.VkCommandBufferBeginInfo{ .flags = c.VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT };
-        try vkCheck(c.vkBeginCommandBuffer(command_buffer, &begin_info));
+        defer cmdbuffer.free(vk_ctx, vk_ctx.transfer_command_pool);
+
+        try cmdbuffer.begin(c.VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT);
 
         const copy_region = c.VkBufferCopy{ .size = self.size };
-        c.vkCmdCopyBuffer(command_buffer, self.handle, dst_buffer.handle, 1, &copy_region);
+        c.vkCmdCopyBuffer(cmdbuffer.handle, self.handle, dst_buffer.handle, 1, &copy_region);
 
-        try vkCheck(c.vkEndCommandBuffer(command_buffer));
+        try cmdbuffer.end();
+        try vk_ctx.graphics_queue.submit(cmdbuffer, null);
 
-        const submit_info = c.VkSubmitInfo{
-            .commandBufferCount = 1,
-            .pCommandBuffers = &command_buffer,
-        };
-
-        try vkCheck(c.vkQueueSubmit(vk_ctx.graphics_queue.handle, 1, &submit_info, null));
         try vkCheck(c.vkQueueWaitIdle(vk_ctx.graphics_queue.handle));
     }
 };
@@ -1350,15 +1444,21 @@ pub const VulkanContext = struct {
     physical_device: PhysicalDevice,
     device: Device,
     graphics_queue: Queue,
+    present_queue: Queue,
+    transfer_queue: Queue,
     command_pool: CommandPool,
+    transfer_command_pool: CommandPool,
 
     pub fn init(allocator: Allocator, window: Window) !Self {
         const instance = try Instance.init();
         const surface = try Surface.init(instance, window);
         const physical_device = try PhysicalDevice.init(allocator, instance, surface);
-        const device = try Device.init(physical_device);
-        const graphics_queue = try Queue.init(device);
-        const command_pool = try CommandPool.init(device);
+        const device = try Device.init(allocator, physical_device);
+        const graphics_queue = try Queue.init(device, physical_device.graphics_q_family);
+        const present_queue = try Queue.init(device, physical_device.present_q_family);
+        const transfer_queue = try Queue.init(device, physical_device.transfer_q_family);
+        const command_pool = try CommandPool.init(device, physical_device.graphics_q_family);
+        const transfer_command_pool = try CommandPool.init(device, physical_device.transfer_q_family);
 
         return .{
             .allocator = allocator,
@@ -1367,14 +1467,16 @@ pub const VulkanContext = struct {
             .physical_device = physical_device,
             .device = device,
             .graphics_queue = graphics_queue,
+            .present_queue = present_queue,
+            .transfer_queue = transfer_queue,
             .command_pool = command_pool,
+            .transfer_command_pool = transfer_command_pool,
         };
     }
 
     pub fn deinit(self: *Self) void {
         // Destroy in reverse order of creation
         self.command_pool.deinit(self);
-        self.graphics_queue.deinit();
         self.device.deinit();
         self.surface.deinit(self);
         self.instance.deinit();
@@ -1390,12 +1492,12 @@ pub const App = struct {
     window: Window,
     vk_ctx: *VulkanContext,
     gui_renderer: gui.GuiRenderer,
-    main_ui: gui.UI,
     text_renderer: text.Text3DRenderer,
     text_scene: text.Text3DScene,
+    main_ui: gui.UI,
     wd_ctx: WindowContext,
 
-    // Vulkan objects that depend on the swapchain (and are recreated)
+    // Vulkan objects that depend on the swapchain (recreated on window resize)
     depth_buffer: DepthBuffer,
     swapchain: Swapchain,
     render_pass: RenderPass,
@@ -1445,7 +1547,7 @@ pub const App = struct {
         self.descriptor_pool = try DescriptorPool.init(self.vk_ctx, .Uniform);
 
         self.descriptor_set = try self.descriptor_pool.allocateSet(self.vk_ctx, self.descriptor_layout);
-        self.command_buffer = try CommandBuffer.allocate(self.vk_ctx, true);
+        self.command_buffer = try CommandBuffer.allocate(self.vk_ctx, self.vk_ctx.command_pool, true);
         self.sync = try SyncObjects.init(self.vk_ctx);
 
         try self.initVertexBuffer();
@@ -1490,12 +1592,12 @@ pub const App = struct {
             .height = 30,
         }, "Quit", .{ 0, 0, 1, 1 }, .{ 1, 1, 1, 1 }, quitCallback);
 
-        try self.main_ui.addPainText(.{
+        try self.main_ui.addPlainText(.{
             .x = 10.0,
             .y = @as(f32, @floatFromInt(self.window.size.y)) - 120.0,
             .width = 150,
             .height = 30,
-        }, "", .{ 0, 0, 1, 1 }, .{ 1, 1, 1, 1 });
+        }, "                  ", .{ 0, 0, 1, 1 }, .{ 1, 0, 0, 1 });
     }
 
     pub fn deinit(self: *Self) void {
@@ -1527,7 +1629,6 @@ pub const App = struct {
 
     fn cleanupSwapchain(self: *Self) void {
         self.text_renderer.destroyPipeline();
-        self.gui_renderer.destroyPipeline();
         self.pipeline.deinit(self.vk_ctx);
         self.pipeline_layout.deinit(self.vk_ctx);
         self.render_pass.deinit(self.vk_ctx);
@@ -1613,10 +1714,6 @@ pub const App = struct {
                 .rotation = scene.Quat.fromAxisAngle(.{ 0, 1, 0 }, 0.5),
             }).toMatrix();
             self.text_renderer.drawText("Sine Wave Motion!", wave_transform, .{ 1.0, 1.0, 0.0, 1.0 }, 0.7);
-
-            // const billboard_pos = [_]f32{ 7, 3, 0 };
-            // try self.text_scene.addBillboardText("I ALWAYS FACE YOU", billboard_pos, .{ 1.0, 0.2, 1.0, 1.0 }, 1.2);
-
             self.gui_renderer.processAndDrawUi(self, &self.main_ui);
             self.text_renderer.processAndDrawTextScene(&self.text_scene);
 
@@ -1627,10 +1724,10 @@ pub const App = struct {
     }
 
     fn draw(self: *Self) !void {
-        try vkCheck(c.vkWaitForFences(self.vk_ctx.device.handle, 1, &self.sync.in_flight_fence.handle, c.VK_TRUE, std.math.maxInt(u64)));
+        try vkCheck(c.vkWaitForFences(self.vk_ctx.device.handle, 1, &self.sync.in_flight_f, c.VK_TRUE, std.math.maxInt(u64)));
 
         var image_index: u32 = 0;
-        const acquire_result = c.vkAcquireNextImageKHR(self.vk_ctx.device.handle, self.swapchain.handle, std.math.maxInt(u64), self.sync.img_available_semaphore.handle, null, &image_index);
+        const acquire_result = c.vkAcquireNextImageKHR(self.vk_ctx.device.handle, self.swapchain.handle, std.math.maxInt(u64), self.sync.img_available_s, null, &image_index);
 
         if (acquire_result == c.VK_ERROR_OUT_OF_DATE_KHR) {
             try self.recreateSwapchain();
@@ -1638,13 +1735,13 @@ pub const App = struct {
         } else if (acquire_result != c.VK_SUCCESS and acquire_result != c.VK_SUBOPTIMAL_KHR) {
             try vkCheck(acquire_result);
         }
-        try vkCheck(c.vkResetFences(self.vk_ctx.device.handle, 1, &self.sync.in_flight_fence.handle));
+        try vkCheck(c.vkResetFences(self.vk_ctx.device.handle, 1, &self.sync.in_flight_f));
         try vkCheck(c.vkResetCommandBuffer(self.command_buffer.handle, 0));
         try self.recordCommandBuffer(image_index);
 
-        const wait_semaphores = [_]c.VkSemaphore{self.sync.img_available_semaphore.handle};
+        const wait_semaphores = [_]c.VkSemaphore{self.sync.img_available_s};
         const wait_stages = [_]c.VkPipelineStageFlags{c.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
-        const signal_semaphores = [_]c.VkSemaphore{self.sync.render_ended_semaphore.handle};
+        const signal_semaphores = [_]c.VkSemaphore{self.sync.render_ended_s};
         const submit_info = c.VkSubmitInfo{
             .waitSemaphoreCount = wait_semaphores.len,
             .pWaitSemaphores = &wait_semaphores,
@@ -1654,7 +1751,7 @@ pub const App = struct {
             .signalSemaphoreCount = signal_semaphores.len,
             .pSignalSemaphores = &signal_semaphores,
         };
-        try vkCheck(c.vkQueueSubmit(self.vk_ctx.graphics_queue.handle, 1, &submit_info, self.sync.in_flight_fence.handle));
+        try vkCheck(c.vkQueueSubmit(self.vk_ctx.graphics_queue.handle, 1, &submit_info, self.sync.in_flight_f));
 
         const swapchains = [_]c.VkSwapchainKHR{self.swapchain.handle};
         const present_info = c.VkPresentInfoKHR{
@@ -1734,7 +1831,7 @@ pub const App = struct {
     }
 
     fn recreateSwapchain(self: *Self) !void {
-        try vkCheck(c.vkDeviceWaitIdle(self.vk_ctx.device.handle));
+        try vkCheck(c.vkQueueWaitIdle(self.vk_ctx.graphics_queue.handle));
         self.cleanupSwapchain();
 
         self.swapchain = try Swapchain.init(self.vk_ctx);
