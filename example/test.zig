@@ -91,37 +91,39 @@ const UniformBufferObject = extern struct {
 // --- Callbacks and Window ---
 const Callbacks = struct {
     fn cbCursorPos(wd: ?*c.GLFWwindow, xpos: f64, ypos: f64) callconv(.C) void {
-        const app: *App = @alignCast(@ptrCast(c.glfwGetWindowUserPointer(wd orelse return) orelse return));
+        const app: *App = @alignCast(@ptrCast(c.glfwGetWindowUserPointer(wd) orelse unreachable));
         app.gui_renderer.handleCursorPos(xpos, ypos);
         app.wd_ctx.handleCursorPos(xpos, ypos);
     }
 
     fn cbMouseButton(wd: ?*c.GLFWwindow, button: c_int, action: c_int, mods: c_int) callconv(.C) void {
-        const app: *App = @alignCast(@ptrCast(c.glfwGetWindowUserPointer(wd orelse return) orelse return));
+        const app: *App = @alignCast(@ptrCast(c.glfwGetWindowUserPointer(wd) orelse unreachable));
         app.gui_renderer.handleMouseButton(button, action, mods);
         app.wd_ctx.handleMouseButton(button, action);
     }
 
     fn cbKey(wd: ?*c.GLFWwindow, key: c_int, code: c_int, action: c_int, mods: c_int) callconv(.C) void {
-        const app: *App = @alignCast(@ptrCast(c.glfwGetWindowUserPointer(wd orelse return) orelse return));
+        const app: *App = @alignCast(@ptrCast(c.glfwGetWindowUserPointer(wd) orelse unreachable));
         app.wd_ctx.handleKey(key, action, mods);
 
         // TODO: Change
         if (action == c.GLFW_PRESS) {
             app.scene.setGridResolution(@intCast(code)) catch unreachable;
-            app.updateVertexBuffer() catch @panic("Update VB failed");
+            app.text_scene.clearText();
+            app.init3dText() catch unreachable;
+            app.updateVertexBuffer() catch unreachable;
         }
     }
 
     fn cbFramebufferResize(wd: ?*c.GLFWwindow, width: c_int, height: c_int) callconv(.C) void {
-        const app: *App = @alignCast(@ptrCast(c.glfwGetWindowUserPointer(wd orelse return) orelse return));
+        const app: *App = @alignCast(@ptrCast(c.glfwGetWindowUserPointer(wd) orelse unreachable));
         app.window.size.x = width;
         app.window.size.y = height;
         app.framebuffer_resized = true;
     }
 
     fn cbScroll(wd: ?*c.GLFWwindow, xoffset: f64, yoffset: f64) callconv(.C) void {
-        const user_ptr = c.glfwGetWindowUserPointer(wd orelse return) orelse @panic("No window user ptr");
+        const user_ptr = c.glfwGetWindowUserPointer(wd) orelse unreachable;
         const app: *App = @alignCast(@ptrCast(user_ptr));
 
         app.wd_ctx.handleScroll(xoffset, yoffset);
@@ -143,25 +145,25 @@ fn addLineCallback(ptr: *anyopaque) void {
 
     app.scene.addLine(.{ 0, 0, 0 }, end_pos) catch unreachable;
 
-    const tmp = std.fmt.allocPrint(app.allocator, "({d:.1},{d:.1},{d:.1})", .{ end_pos[0], end_pos[1], end_pos[2] }) catch unreachable;
-    defer app.allocator.free(tmp);
+    const txt = std.fmt.allocPrint(app.allocator, "({d:.1},{d:.1},{d:.1})", .{ end_pos[0], end_pos[1], end_pos[2] }) catch unreachable;
+    defer app.allocator.free(txt);
     app.text_scene.addBillboardText(
-        tmp,
+        txt,
         end_pos,
         .{ 1.0, 1.0, 1.0, 1.0 }, // white color
         0.65, // font scale
     ) catch unreachable;
+
     // TODO: remove static text addition
     const time = @as(f32, @floatFromInt(@mod(std.time.milliTimestamp(), 10000))) / 1000.0;
-
     const rot_x = scene.Quat.fromAxisAngle(.{ 1, 0, 0 }, time * 0.3);
     const rot_y = scene.Quat.fromAxisAngle(.{ 0, 1, 0 }, time * 0.5);
     const tumbling_transform = scene.Transform.new(.{
         .position = .{ 7, 3, -4 },
         .rotation = rot_x.mul(rot_y), // Combine rotations
     }).toMatrix();
-
     app.text_scene.addText("Tumbling Test 123", tumbling_transform, .{ 1.0, 0.3, 0.3, 1.0 }, 1.5) catch unreachable;
+    // ---------------------------------
 
     app.updateVertexBuffer() catch unreachable;
 }
@@ -1607,6 +1609,7 @@ pub const App = struct {
         app.text_scene = text.Text3DScene.init(allocator);
         app.perf = fps_tracker.PerformanceTracker.init();
         try app.initUi();
+        try app.init3dText();
 
         try app.initVulkanResources();
 
@@ -1703,6 +1706,41 @@ pub const App = struct {
             .height = button_h,
         }, "            ", .{ 0, 0, 0, 0 }, .{ 1, 1, 0, 1 }); // Transparent background
     }
+
+    pub fn init3dText(self: *Self) !void {
+        const text_scene = &self.text_scene;
+        const axis = self.scene.axis;
+
+        // Axis labels (placed at the tip)
+        try text_scene.addBillboardText("X", axis[1].pos, .{ 1, 0, 0, 1 }, 1.45);
+        try text_scene.addBillboardText("Y", axis[3].pos, .{ 0, 1, 0, 1 }, 1.45);
+        try text_scene.addBillboardText("Z", axis[5].pos, .{ 0, 0, 1, 1 }, 1.45);
+
+        // Grid labels at integer positions
+        const res = self.scene.grid.len / 8;
+        const half: i32 = @intCast(res);
+        // const fixed: f32 = @floatFromInt(half);
+
+        var i: i32 = -half;
+        while (i <= half) : (i += 1) {
+            const f = @as(f32, @floatFromInt(i));
+
+            // Skip zero to avoid cluttering center
+            if (i != 0) {
+                var buf_x: [16]u8 = undefined;
+                const str_x = try std.fmt.bufPrint(&buf_x, "{}", .{i});
+                try text_scene.addBillboardText(str_x, .{ f, 0.0, 0.0 }, .{ 1, 0.2, 0.2, 1 }, 0.8);
+
+                var buf_y: [16]u8 = undefined;
+                const str_y = try std.fmt.bufPrint(&buf_y, "{}", .{i});
+                try text_scene.addBillboardText(str_y, .{ 0.0, f, 0.0 }, .{ 0.2, 1, 0.2, 1 }, 0.8);
+            }
+        }
+
+        // Label center
+        try text_scene.addBillboardText("0", .{ 0.0, 0.0, 0.0 }, .{ 1, 1, 1, 1 }, 0.8);
+    }
+
     pub fn deinit(self: *Self) void {
         // Wait for device to be idle before cleaning up
         _ = c.vkDeviceWaitIdle(self.vk_ctx.device.handle);
@@ -1881,8 +1919,8 @@ pub const App = struct {
 
         const clear_values = [_]c.VkClearValue{
             // Color attachment clear value
-            .{ .color = .{ .float32 = .{ 0.392, 0.584, 0.929, 1.0 } } }, // Cornflower Blue
-            // .{ .color = .{ .float32 = .{ 0, 0, 0, 1.0 } } },
+            // .{ .color = .{ .float32 = .{ 0.392, 0.584, 0.929, 1.0 } } }, // Cornflower Blue
+            .{ .color = .{ .float32 = .{ 0, 0, 0, 1.0 } } },
             // Depth attachment clear value
             .{ .depthStencil = .{ .depth = 0.0, .stencil = 0 } },
         };

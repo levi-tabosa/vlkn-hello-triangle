@@ -83,7 +83,7 @@ pub const Text3DScene = struct {
 
         try self.list.append(.{
             .text = t,
-            .transform = .{ .billboard = .{ .position = position } },
+            .transform = .{ .billboard = .{ .position = position - @Vector(3, f32){ 0.1, 0.1, -0.1 } } },
             .color = color orelse .{ 0.5, 0.5, 0.5, 1.0 },
             .font_size = font_size orelse 1.0,
         });
@@ -184,8 +184,9 @@ pub const Text3DRenderer = struct {
             .font = gui.Font.init(vk_ctx.allocator),
         };
 
-        try self.font.loadFNT(font.periclesW01_fnt);
-        try self.createFontTextureAndSampler(vk_ctx.allocator, font.periclesW01_png);
+        try self.font.loadFNT(font.notosanstc_variablefont_wght_fnt);
+        try self.createFontTextureAndSampler(vk_ctx.allocator, font.notosanstc_variablefont_wght_png);
+        self.font.scale_h = @as(f32, @floatFromInt(self.png_handle.height + 1));
         try self.createDescriptors();
         try self.createBuffers(vk_ctx);
         try self.createPipeline(render_pass, main_scene_ds_layout);
@@ -218,7 +219,7 @@ pub const Text3DRenderer = struct {
     }
 
     fn createFontTextureAndSampler(self: *Self, allocator: std.mem.Allocator, png_data: []const u8) !void {
-        const image = try gui.loadPngGrayscale(allocator, png_data);
+        const image = try gui.loadPng(allocator, png_data);
         self.png_handle = image;
 
         const image_size: u64 = @intCast(image.width * image.height * (image.bit_depth / 8));
