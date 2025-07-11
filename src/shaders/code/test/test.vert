@@ -1,6 +1,7 @@
 // test.vert
 #version 450
 
+// Set 0: Is shared with text3d.vert 
 layout(binding = 0) uniform UniformBufferObject {
     mat4 view;
     mat4 projection;

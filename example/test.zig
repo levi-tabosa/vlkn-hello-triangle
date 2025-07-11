@@ -392,14 +392,6 @@ const PhysicalDevice = struct {
         for (physical_devices) |device| {
             var properties: c.VkPhysicalDeviceProperties = undefined;
             c.vkGetPhysicalDeviceProperties(device, &properties);
-            var q_count: u32 = 0;
-            c.vkGetPhysicalDeviceQueueFamilyProperties(device, &q_count, null);
-            if (q_count == 0) return error.NoQueueFamiliesAvailable;
-            const q_family_props = try allocator.alloc(c.VkQueueFamilyProperties, q_count);
-            defer allocator.free(q_family_props);
-            c.vkGetPhysicalDeviceQueueFamilyProperties(device, &q_count, q_family_props.ptr);
-
-            std.debug.print("{any}\n", .{q_family_props});
 
             // Score devices: prefer discrete GPUs, then integrated, etc.
             var score: i32 = 0;
@@ -454,7 +446,9 @@ const PhysicalDevice = struct {
             var support: c.VkBool32 = c.VK_FALSE;
             try vkCheck(c.vkGetPhysicalDeviceSurfaceSupportKHR(self.handle, idx, surface.handle, &support));
             if (support == c.VK_TRUE) {
-                if (present_idx == null) present_idx = idx;
+                if (present_idx == null) {
+                    present_idx = idx;
+                }
             }
 
             // If we didn't find a dedicated transfer queue, use any queue that supports transfer
@@ -542,8 +536,6 @@ const Device = struct {
         // Create a VkDeviceQueueCreateInfo for each unique family
         var queue_create_infos = try std.ArrayList(c.VkDeviceQueueCreateInfo).initCapacity(allocator, unique_queue_families.count());
         defer queue_create_infos.deinit();
-
-        std.debug.print("{}\n", .{unique_queue_families.count()});
 
         var it = unique_queue_families.iterator(.{});
         while (it.next()) |family_index| {
@@ -1131,7 +1123,6 @@ pub const Buffer = struct {
         };
 
         if (vk_ctx.physical_device.graphics_q_family != vk_ctx.physical_device.transfer_q_family) {
-            std.debug.print("buffer init. sharing mode concurrent\n", .{});
             const queue_family_indices = [_]u32{
                 vk_ctx.physical_device.graphics_q_family,
                 vk_ctx.physical_device.transfer_q_family,
@@ -1140,7 +1131,6 @@ pub const Buffer = struct {
             buffer_info.queueFamilyIndexCount = queue_family_indices.len;
             buffer_info.pQueueFamilyIndices = &queue_family_indices;
         }
-        std.debug.print("buffer init. sharing mode exclusive (1 queue)\n", .{});
         try vkCheck(c.vkCreateBuffer(vk_ctx.device.handle, &buffer_info, null, &self.handle));
 
         var mem_reqs: c.VkMemoryRequirements = undefined;
@@ -1215,23 +1205,24 @@ const DescriptorType = enum(u8) {
     }
 };
 
+const DescriptorSetLayoutArgs = struct { type: c.VkDescriptorType, stage_flags: c.VkShaderStageFlags };
+
 pub const DescriptorSetLayout = struct {
     const Self = @This();
 
     handle: c.VkDescriptorSetLayout = undefined,
 
-    pub fn init(vk_ctx: *VulkanContext, types: []const DescriptorType) !Self {
+    pub fn init(vk_ctx: *VulkanContext, args: []const DescriptorSetLayoutArgs) !Self {
         var self = Self{};
-        const bindings = try vk_ctx.allocator.alloc(c.VkDescriptorSetLayoutBinding, types.len);
+        const bindings = try vk_ctx.allocator.alloc(c.VkDescriptorSetLayoutBinding, args.len);
         defer vk_ctx.allocator.free(bindings);
 
-        for (types, 0..) |t, i| {
+        for (args, 0..) |arg, i| {
             bindings[i] = .{
                 .binding = @intCast(i),
-                .descriptorType = t.getVkType(),
+                .descriptorType = arg.type,
                 .descriptorCount = 1,
-                // TODO: pass in stage bit
-                .stageFlags = c.VK_SHADER_STAGE_VERTEX_BIT,
+                .stageFlags = arg.stage_flags,
             };
         }
 
@@ -1247,85 +1238,150 @@ pub const DescriptorSetLayout = struct {
     }
 };
 
+// Expressive union for descriptor info
+pub const DescriptorWriteInfo = union(enum) {
+    UniformBuffer: c.VkDescriptorBufferInfo,
+    StorageBuffer: c.VkDescriptorBufferInfo,
+    CombinedImageSampler: c.VkDescriptorImageInfo,
+};
+
+pub const DescriptorWrite = struct {
+    binding: u32,
+    info: DescriptorWriteInfo,
+};
+
 pub const DescriptorSet = struct {
     handle: c.VkDescriptorSet = undefined,
 
     pub fn update(
         self: *const DescriptorSet,
         vk_ctx: *VulkanContext,
-        args: []const struct { buff: Buffer, desc_type: DescriptorType, range: u64 },
+        writes: []const DescriptorWrite,
     ) !void {
-        const desc_writes = try vk_ctx.allocator.alloc(c.VkWriteDescriptorSet, args.len);
+        const desc_writes = try vk_ctx.allocator.alloc(c.VkWriteDescriptorSet, writes.len);
         defer vk_ctx.allocator.free(desc_writes);
-        for (args, 0..) |arg, i| {
-            var desc_buffer_info = c.VkDescriptorBufferInfo{
-                .buffer = arg.buff.handle,
-                .offset = 0,
-                .range = arg.range,
+
+        // We need to store the info structs because pBufferInfo/pImageInfo are pointers.
+        // Their lifetime must exceed the vkUpdateDescriptorSets call.
+        var buffer_infos = try vk_ctx.allocator.alloc(c.VkDescriptorBufferInfo, writes.len);
+        defer vk_ctx.allocator.free(buffer_infos);
+        var image_infos = try vk_ctx.allocator.alloc(c.VkDescriptorImageInfo, writes.len);
+        defer vk_ctx.allocator.free(image_infos);
+
+        for (writes, 0..) |write, i| {
+            desc_writes[i] = .{
+                .dstSet = self.handle,
+                .dstBinding = write.binding,
+                .dstArrayElement = 0,
+                .descriptorCount = 1,
             };
 
-            desc_writes[i] = c.VkWriteDescriptorSet{
-                .dstSet = self.handle,
-                .dstBinding = @intCast(i),
-                .descriptorType = arg.desc_type.getVkType(),
-                .descriptorCount = 1,
-                .pBufferInfo = &desc_buffer_info,
-            };
+            switch (write.info) {
+                .UniformBuffer => |info| {
+                    buffer_infos[i] = info;
+                    desc_writes[i].descriptorType = c.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+                    desc_writes[i].pBufferInfo = &buffer_infos[i];
+                },
+                .StorageBuffer => |info| {
+                    buffer_infos[i] = info;
+                    desc_writes[i].descriptorType = c.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+                    desc_writes[i].pBufferInfo = &buffer_infos[i];
+                },
+                .CombinedImageSampler => |info| {
+                    image_infos[i] = info;
+                    desc_writes[i].descriptorType = c.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+                    desc_writes[i].pImageInfo = &image_infos[i];
+                },
+            }
         }
 
         c.vkUpdateDescriptorSets(vk_ctx.device.handle, @intCast(desc_writes.len), desc_writes.ptr, 0, null);
     }
 };
 
+const DescriptorPoolArgs = struct {
+    type: c.VkDescriptorType,
+    count: u32,
+};
+
 pub const DescriptorPool = struct {
     const Self = @This();
     handle: c.VkDescriptorPool = undefined,
 
-    pub fn init(vk_ctx: *VulkanContext, @"type": DescriptorType) !Self {
+    pub fn init(vk_ctx: *VulkanContext, max_sets: u32, pool_sizes_args: []const DescriptorPoolArgs) !Self {
         var self = Self{};
-        var pool_size = c.VkDescriptorPoolSize{ .type = @"type".getVkType(), .descriptorCount = 1 };
+        const sizes = try vk_ctx.allocator.alloc(c.VkDescriptorPoolSize, pool_sizes_args.len);
+        defer vk_ctx.allocator.free(sizes);
+
+        for (pool_sizes_args, 0..) |arg, i| {
+            sizes[i] = .{
+                .type = arg.type,
+                .descriptorCount = arg.count,
+            };
+        }
+
         var pool_info = c.VkDescriptorPoolCreateInfo{
-            .poolSizeCount = 1,
-            .pPoolSizes = &pool_size,
-            .maxSets = 1,
+            .poolSizeCount = @intCast(sizes.len),
+            .pPoolSizes = sizes.ptr,
+            .maxSets = max_sets,
         };
         try vkCheck(c.vkCreateDescriptorPool(vk_ctx.device.handle, &pool_info, null, &self.handle));
         return self;
     }
+
     pub fn deinit(self: *Self, vk_ctx: *VulkanContext) void {
         c.vkDestroyDescriptorPool(vk_ctx.device.handle, self.handle, null);
     }
 
-    pub fn allocateSet(self: Self, vk_ctx: *VulkanContext, layout: DescriptorSetLayout) !DescriptorSet {
+    /// Allocates multiple sets from multiple layouts into a caller-owned buffer
+    pub fn allocateSets(self: Self, vk_ctx: *VulkanContext, layouts: []const DescriptorSetLayout, out_sets: []DescriptorSet) !void {
+        std.debug.assert(layouts.len == out_sets.len);
+
+        const layout_handles = try vk_ctx.allocator.alloc(c.VkDescriptorSetLayout, layouts.len);
+        defer vk_ctx.allocator.free(layout_handles);
+
+        const set_handles = try vk_ctx.allocator.alloc(c.VkDescriptorSet, out_sets.len);
+        defer vk_ctx.allocator.free(set_handles);
+
+        for (layouts, 0..) |l, i| {
+            layout_handles[i] = l.handle;
+        }
+
         var set_alloc_info = c.VkDescriptorSetAllocateInfo{
             .descriptorPool = self.handle,
-            .descriptorSetCount = 1,
-            .pSetLayouts = &layout.handle,
+            .descriptorSetCount = @intCast(layouts.len),
+            .pSetLayouts = layout_handles.ptr,
         };
-        var set: c.VkDescriptorSet = undefined;
-        try vkCheck(c.vkAllocateDescriptorSets(vk_ctx.device.handle, &set_alloc_info, &set));
-        return .{
-            .handle = set,
-        };
+        try vkCheck(c.vkAllocateDescriptorSets(vk_ctx.device.handle, &set_alloc_info, set_handles.ptr));
+
+        for (out_sets, 0..) |*set, i| {
+            set.handle = set_handles[i];
+        }
+    }
+
+    /// A convenience wrapper for the common case of allocating a single set
+    pub fn allocateSet(self: Self, vk_ctx: *VulkanContext, layout: DescriptorSetLayout) !DescriptorSet {
+        var set: DescriptorSet = .{};
+        // Create a slice of length 1 that points to the 'set' variable on the stack.
+        try self.allocateSets(vk_ctx, &.{layout}, (&set)[0..1]);
+        return set;
     }
 };
-
 pub const ShaderModule = struct {
     const Self = @This();
     handle: c.VkShaderModule = undefined,
-    owner: c.VkDevice, // TODO: REMOVE
 
-    pub fn init(allocator: Allocator, device_handle: c.VkDevice, code: []const u8) !Self {
-        var self = Self{ .owner = device_handle };
+    pub fn init(allocator: Allocator, vk_ctx: *VulkanContext, code: []const u8) !Self {
+        var self = Self{};
         const aligned_code = try allocator.alignedAlloc(u32, @alignOf(u32), code.len / @sizeOf(u32));
         defer allocator.free(aligned_code);
         @memcpy(std.mem.sliceAsBytes(aligned_code), code);
         var create_info = c.VkShaderModuleCreateInfo{ .codeSize = code.len, .pCode = aligned_code.ptr };
-        try vkCheck(c.vkCreateShaderModule(device_handle, &create_info, null, &self.handle));
+        try vkCheck(c.vkCreateShaderModule(vk_ctx.device.handle, &create_info, null, &self.handle));
         return self;
     }
-    pub fn deinit(self: *Self) void {
-        c.vkDestroyShaderModule(self.owner, self.handle, null);
+    pub fn deinit(self: *Self, vk_ctx: *VulkanContext) void {
+        c.vkDestroyShaderModule(vk_ctx.device.handle, self.handle, null);
     }
 };
 
@@ -1355,10 +1411,10 @@ pub const Pipeline = struct {
     pub fn init(vk_ctx: *VulkanContext, render_pass: RenderPass, layout: PipelineLayout) !Self {
         var self = Self{};
 
-        var vert_shader_module = try ShaderModule.init(vk_ctx.allocator, vk_ctx.device.handle, vert_shader_bin);
-        defer vert_shader_module.deinit();
-        var frag_shader_module = try ShaderModule.init(vk_ctx.allocator, vk_ctx.device.handle, frag_shader_bin);
-        defer frag_shader_module.deinit();
+        var vert_shader_module = try ShaderModule.init(vk_ctx.allocator, vk_ctx, vert_shader_bin);
+        defer vert_shader_module.deinit(vk_ctx);
+        var frag_shader_module = try ShaderModule.init(vk_ctx.allocator, vk_ctx, frag_shader_bin);
+        defer frag_shader_module.deinit(vk_ctx);
 
         const shader_stages = [_]c.VkPipelineShaderStageCreateInfo{
             .{ .stage = c.VK_SHADER_STAGE_VERTEX_BIT, .module = vert_shader_module.handle, .pName = "main" },
@@ -1556,8 +1612,13 @@ pub const App = struct {
     fn initVulkanResources(self: *Self) !void {
         self.swapchain = try Swapchain.init(self.vk_ctx);
         self.depth_buffer = try DepthBuffer.init(self.vk_ctx, self.swapchain.extent.width, self.swapchain.extent.height);
-        self.descriptor_layout = try DescriptorSetLayout.init(self.vk_ctx, &.{.Uniform});
-        self.descriptor_pool = try DescriptorPool.init(self.vk_ctx, .Uniform);
+        self.descriptor_layout = try DescriptorSetLayout.init(
+            self.vk_ctx,
+            &.{.{ .stage_flags = c.VK_SHADER_STAGE_VERTEX_BIT, .type = c.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER }},
+        );
+        self.descriptor_pool = try DescriptorPool.init(self.vk_ctx, 1, &.{
+            .{ .type = c.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .count = 1 },
+        });
 
         self.descriptor_set = try self.descriptor_pool.allocateSet(self.vk_ctx, self.descriptor_layout);
         self.command_buffer = try CommandBuffer.allocate(self.vk_ctx, self.vk_ctx.command_pool, true);
@@ -1567,7 +1628,17 @@ pub const App = struct {
         try self.initUniformBuffer();
 
         try self.descriptor_set.update(self.vk_ctx, &.{
-            .{ .buff = self.uniform_buffer, .desc_type = .Uniform, .range = @sizeOf(UniformBufferObject) },
+            .{
+                .binding = 0, // Explicitly state the binding index
+                .info = .{
+                    // Use the correct union tag for a uniform buffer
+                    .UniformBuffer = .{
+                        .buffer = self.uniform_buffer.handle,
+                        .offset = 0,
+                        .range = @sizeOf(UniformBufferObject),
+                    },
+                },
+            },
         });
 
         self.render_pass = try RenderPass.init(self.vk_ctx, &self.swapchain);

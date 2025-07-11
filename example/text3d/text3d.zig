@@ -2,7 +2,8 @@
 const std = @import("std");
 const vk = @import("../test.zig");
 const c = @import("c").c;
-const gui = @import("../gui/gui.zig"); // To reuse Font struct
+//TODO: move font stuff to another file and import that
+const gui = @import("../gui/gui.zig");
 const font = @import("font");
 const util = @import("util");
 
@@ -137,13 +138,13 @@ pub const Text3DRenderer = struct {
     pipeline_layout: vk.PipelineLayout = undefined,
 
     // Font Texture Descriptors (Set 1)
-    font_descriptor_set_layout: c.VkDescriptorSetLayout = undefined,
-    font_descriptor_pool: c.VkDescriptorPool = undefined, // This pool will now hold two sets
-    font_descriptor_set: c.VkDescriptorSet = undefined,
+    font_descriptor_set_layout: vk.DescriptorSetLayout = undefined,
+    font_descriptor_pool: vk.DescriptorPool = undefined, // This pool will now hold two sets
+    font_descriptor_set: vk.DescriptorSet = undefined,
 
     // Draw Data Descriptors (Set 2) for the SSBO
-    draw_data_descriptor_set_layout: c.VkDescriptorSetLayout = undefined,
-    draw_data_descriptor_set: c.VkDescriptorSet = undefined,
+    draw_data_descriptor_set_layout: vk.DescriptorSetLayout = undefined,
+    draw_data_descriptor_set: vk.DescriptorSet = undefined,
 
     sampler: c.VkSampler = undefined,
     texture: vk.Image = undefined,
@@ -197,9 +198,9 @@ pub const Text3DRenderer = struct {
         self.texture.deinit(self.vk_ctx);
         self.vk_ctx.allocator.free(self.png_handle.pixels);
 
-        c.vkDestroyDescriptorPool(self.vk_ctx.device.handle, self.font_descriptor_pool, null);
-        c.vkDestroyDescriptorSetLayout(self.vk_ctx.device.handle, self.font_descriptor_set_layout, null);
-        c.vkDestroyDescriptorSetLayout(self.vk_ctx.device.handle, self.draw_data_descriptor_set_layout, null);
+        c.vkDestroyDescriptorPool(self.vk_ctx.device.handle, self.font_descriptor_pool.handle, null);
+        c.vkDestroyDescriptorSetLayout(self.vk_ctx.device.handle, self.font_descriptor_set_layout.handle, null);
+        c.vkDestroyDescriptorSetLayout(self.vk_ctx.device.handle, self.draw_data_descriptor_set_layout.handle, null);
 
         self.pipeline.deinit(self.vk_ctx);
         self.pipeline_layout.deinit(self.vk_ctx);
@@ -261,82 +262,59 @@ pub const Text3DRenderer = struct {
         };
         try vk.vkCheck(c.vkCreateSampler(self.vk_ctx.device.handle, &sampler_info, null, &self.sampler));
     }
+    // text.zig
 
-    // Create all descriptor sets for this renderer
     fn createDescriptors(self: *Self) !void {
         // --- Layouts ---
-        // Layout for Font Sampler (Set 1)
-        const sampler_layout_binding = c.VkDescriptorSetLayoutBinding{
-            .binding = 0,
-            .descriptorType = c.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-            .descriptorCount = 1,
-            .stageFlags = c.VK_SHADER_STAGE_FRAGMENT_BIT,
-        };
-        const font_layout_info = c.VkDescriptorSetLayoutCreateInfo{
-            .bindingCount = 1,
-            .pBindings = &sampler_layout_binding,
-        };
-        try vk.vkCheck(c.vkCreateDescriptorSetLayout(self.vk_ctx.device.handle, &font_layout_info, null, &self.font_descriptor_set_layout));
+        self.font_descriptor_set_layout = try vk.DescriptorSetLayout.init(self.vk_ctx, &.{
+            .{ .type = c.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .stage_flags = c.VK_SHADER_STAGE_FRAGMENT_BIT },
+        });
 
-        // Layout for Draw Data SSBO (Set 2)
-        const ssbo_layout_binding = c.VkDescriptorSetLayoutBinding{
-            .binding = 0,
-            .descriptorType = c.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-            .descriptorCount = 1,
-            .stageFlags = c.VK_SHADER_STAGE_VERTEX_BIT, // Used in vertex shader
-        };
-        const draw_data_layout_info = c.VkDescriptorSetLayoutCreateInfo{
-            .bindingCount = 1,
-            .pBindings = &ssbo_layout_binding,
-        };
-        try vk.vkCheck(c.vkCreateDescriptorSetLayout(self.vk_ctx.device.handle, &draw_data_layout_info, null, &self.draw_data_descriptor_set_layout));
+        self.draw_data_descriptor_set_layout = try vk.DescriptorSetLayout.init(self.vk_ctx, &.{
+            .{ .type = c.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .stage_flags = c.VK_SHADER_STAGE_VERTEX_BIT },
+        });
 
-        // Pool needs to accommodate both descriptor types
-        const pool_sizes = [_]c.VkDescriptorPoolSize{
-            .{ .type = c.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 1 },
-            .{ .type = c.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1 },
-        };
-        const pool_info = c.VkDescriptorPoolCreateInfo{
-            .poolSizeCount = pool_sizes.len,
-            .pPoolSizes = &pool_sizes,
-            .maxSets = 2, // We are allocating two sets from this pool
-        };
-        try vk.vkCheck(c.vkCreateDescriptorPool(self.vk_ctx.device.handle, &pool_info, null, &self.font_descriptor_pool));
+        // --- Pool ---
+        // Create a pool that can hold one of each descriptor type, and specify we need to allocate 2 sets from it.
+        self.font_descriptor_pool = try vk.DescriptorPool.init(
+            self.vk_ctx,
+            2, // max_sets: we will allocate 2 sets
+            &.{
+                .{ .type = c.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .count = 1 },
+                .{ .type = c.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .count = 1 },
+            },
+        );
 
-        // --- Allocation & Updates ---
-        // Allocate Set 1 (Font Sampler)
-        const set_layouts = [_]c.VkDescriptorSetLayout{ self.font_descriptor_set_layout, self.draw_data_descriptor_set_layout };
-        var allocated_sets: [2]c.VkDescriptorSet = undefined;
-        const set_alloc_info = c.VkDescriptorSetAllocateInfo{
-            .descriptorPool = self.font_descriptor_pool,
-            .descriptorSetCount = set_layouts.len,
-            .pSetLayouts = &set_layouts,
+        // --- Allocation ---
+        var sets_to_alloc = [_]vk.DescriptorSet{
+            .{}, // font_descriptor_set
+            .{}, // draw_data_descriptor_set
         };
-        try vk.vkCheck(c.vkAllocateDescriptorSets(self.vk_ctx.device.handle, &set_alloc_info, &allocated_sets));
-        self.font_descriptor_set = allocated_sets[0];
-        self.draw_data_descriptor_set = allocated_sets[1];
+        try self.font_descriptor_pool.allocateSets(self.vk_ctx, &.{
+            self.font_descriptor_set_layout,
+            self.draw_data_descriptor_set_layout,
+        }, &sets_to_alloc);
+        self.font_descriptor_set = sets_to_alloc[0];
+        self.draw_data_descriptor_set = sets_to_alloc[1];
 
-        // Update Set 1 (Font Sampler)
-        const image_info = c.VkDescriptorImageInfo{
-            .imageLayout = c.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-            .imageView = self.texture_view,
-            .sampler = self.sampler,
-        };
-        const font_desc_write = c.VkWriteDescriptorSet{
-            .dstSet = self.font_descriptor_set,
-            .dstBinding = 0,
-            .dstArrayElement = 0,
-            .descriptorType = c.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-            .descriptorCount = 1,
-            .pImageInfo = &image_info,
-        };
-        c.vkUpdateDescriptorSets(self.vk_ctx.device.handle, 1, &font_desc_write, 0, null);
+        // --- Update Set 1 (Font Sampler) ---
+        try self.font_descriptor_set.update(self.vk_ctx, &.{
+            .{
+                .binding = 0,
+                .info = .{
+                    .CombinedImageSampler = .{
+                        .imageLayout = c.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                        .imageView = self.texture_view,
+                        .sampler = self.sampler,
+                    },
+                },
+            },
+        });
 
-        // Update Set 2 (Draw Data SSBO) - We'll do this after creating the buffer in createBuffers()
+        // Update Set 2 (Draw Data SSBO) will be done in createBuffers()
     }
 
     fn createBuffers(self: *Self, vk_ctx: *vk.VulkanContext) !void {
-        // Vertex Buffer
         const vtx_buffer_size = MAX_VERTICES * @sizeOf(Text3DVertex);
         self.vertex_buffer = try vk.Buffer.init(
             vk_ctx,
@@ -376,28 +354,26 @@ pub const Text3DRenderer = struct {
         );
         self.mapped_draw_data = try self.draw_data_buffer.map(vk_ctx, DrawData);
 
-        // the SSBO exists now, update its descriptor set
-        const buffer_info = c.VkDescriptorBufferInfo{
-            .buffer = self.draw_data_buffer.handle,
-            .offset = 0,
-            .range = c.VK_WHOLE_SIZE,
-        };
-        const ssbo_desc_write = c.VkWriteDescriptorSet{
-            .dstSet = self.draw_data_descriptor_set, //
-            .dstBinding = 0,
-            .dstArrayElement = 0,
-            .descriptorType = c.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-            .descriptorCount = 1,
-            .pBufferInfo = &buffer_info,
-        };
-        c.vkUpdateDescriptorSets(self.vk_ctx.device.handle, 1, &ssbo_desc_write, 0, null);
+        // --- Update Set 2 (Draw Data SSBO) ---
+        try self.draw_data_descriptor_set.update(self.vk_ctx, &.{
+            .{
+                .binding = 0,
+                .info = .{
+                    .StorageBuffer = .{
+                        .buffer = self.draw_data_buffer.handle,
+                        .offset = 0,
+                        .range = c.VK_WHOLE_SIZE,
+                    },
+                },
+            },
+        });
     }
 
     pub fn createPipeline(self: *Self, render_pass: vk.RenderPass, main_scene_ds_layout: vk.DescriptorSetLayout) !void {
         const set_layouts = [_]c.VkDescriptorSetLayout{
             main_scene_ds_layout.handle,
-            self.font_descriptor_set_layout,
-            self.draw_data_descriptor_set_layout,
+            self.font_descriptor_set_layout.handle,
+            self.draw_data_descriptor_set_layout.handle,
         };
 
         self.pipeline_layout = try vk.PipelineLayout.init(self.vk_ctx, .{
@@ -405,11 +381,10 @@ pub const Text3DRenderer = struct {
             .pSetLayouts = &set_layouts,
         });
 
-        // The rest of the pipeline creation is almost identical, just using the updated vertex definition
-        var vert_mod = try vk.ShaderModule.init(self.vk_ctx.allocator, self.vk_ctx.device.handle, text3d_vert_shader_bin);
-        defer vert_mod.deinit();
-        var frag_mod = try vk.ShaderModule.init(self.vk_ctx.allocator, self.vk_ctx.device.handle, text3d_frag_shader_bin);
-        defer frag_mod.deinit();
+        var vert_mod = try vk.ShaderModule.init(self.vk_ctx.allocator, self.vk_ctx, text3d_vert_shader_bin);
+        defer vert_mod.deinit(self.vk_ctx);
+        var frag_mod = try vk.ShaderModule.init(self.vk_ctx.allocator, self.vk_ctx, text3d_frag_shader_bin);
+        defer frag_mod.deinit(self.vk_ctx);
 
         const shader_stages = [_]c.VkPipelineShaderStageCreateInfo{
             .{ .stage = c.VK_SHADER_STAGE_VERTEX_BIT, .module = vert_mod.handle, .pName = "main" },
@@ -501,8 +476,8 @@ pub const Text3DRenderer = struct {
 
         const desc_sets = [_]c.VkDescriptorSet{
             main_descriptor_set.handle, // 0: Scene UBO
-            self.font_descriptor_set, // 1: Font Sampler
-            self.draw_data_descriptor_set, // 2: Draw Data SSBO
+            self.font_descriptor_set.handle, // 1: Font Sampler
+            self.draw_data_descriptor_set.handle, // 2: Draw Data SSBO
         };
         c.vkCmdBindDescriptorSets(cmd_buffer, c.VK_PIPELINE_BIND_POINT_GRAPHICS, self.pipeline_layout.handle, 0, desc_sets.len, &desc_sets, 0, null);
 

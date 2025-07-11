@@ -1,18 +1,17 @@
 // text3d.vet
 #version 450
 
-// Set 0: Scene UBO (same as before)
+// Set 0: Scene UBO (same as test.vert)
 layout(set = 0, binding = 0) uniform UniformBufferObject {
     mat4 view;
     mat4 projection;
 } ubo;
 
-// NEW: Set 2: SSBO with an array of model matrices
+// Set 2: SSBO with an array of model matrices
 layout(set = 2, binding = 0) readonly buffer DrawDataTable {
     mat4 models[];
 } drawData;
 
-// --- Vertex Attributes (model matrix is gone) ---
 layout(location = 0) in vec3 in_local_pos;
 layout(location = 1) in vec2 in_uv;
 layout(location = 2) in vec4 in_color;

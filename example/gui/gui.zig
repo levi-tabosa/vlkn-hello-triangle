@@ -164,9 +164,9 @@ pub const GuiRenderer = struct {
     pipeline: vk.Pipeline,
     pipeline_layout: vk.PipelineLayout,
     push_constants: vk.PushConstantRange,
-    descriptor_set_layout: c.VkDescriptorSetLayout,
-    descriptor_pool: c.VkDescriptorPool,
-    descriptor_set: c.VkDescriptorSet,
+    descriptor_set_layout: vk.DescriptorSetLayout,
+    descriptor_pool: vk.DescriptorPool,
+    descriptor_set: vk.DescriptorSet,
     sampler: c.VkSampler,
     texture: vk.Image,
     texture_view: c.VkImageView,
@@ -205,11 +205,11 @@ pub const GuiRenderer = struct {
             .png_handle = undefined,
         };
 
-        try self.font.loadFNT(font.periclesW01_fnt);
         try self.createTextureAndSampler(vk_ctx.allocator, font.periclesW01_png);
         try self.createDescriptors();
         try self.createBuffers();
         try self.createPipeline(render_pass);
+        try self.font.loadFNT(font.periclesW01_fnt);
         return self;
     }
 
@@ -218,8 +218,8 @@ pub const GuiRenderer = struct {
         c.vkDestroyImageView(self.vk_ctx.device.handle, self.texture_view, null);
         self.texture.deinit(self.vk_ctx);
         self.vk_ctx.allocator.free(self.png_handle.pixels);
-        c.vkDestroyDescriptorPool(self.vk_ctx.device.handle, self.descriptor_pool, null);
-        c.vkDestroyDescriptorSetLayout(self.vk_ctx.device.handle, self.descriptor_set_layout, null);
+        self.descriptor_pool.deinit(self.vk_ctx);
+        self.descriptor_set_layout.deinit(self.vk_ctx);
         self.pipeline_layout.deinit(self.vk_ctx);
         self.pipeline.deinit(self.vk_ctx);
         self.vertex_buffer.unmap(self.vk_ctx);
@@ -274,7 +274,6 @@ pub const GuiRenderer = struct {
         self.texture_view = try self.texture.createView(self.vk_ctx, c.VK_IMAGE_ASPECT_COLOR_BIT);
 
         const sampler_info = c.VkSamplerCreateInfo{
-            .sType = c.VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
             .magFilter = c.VK_FILTER_LINEAR,
             .minFilter = c.VK_FILTER_LINEAR,
             .addressModeU = c.VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
@@ -287,55 +286,38 @@ pub const GuiRenderer = struct {
     }
 
     fn createDescriptors(self: *Self) !void {
-        // var a = try vk.DescriptorSetLayout.init(self.vk_ctx, &.{.CombinedImageSampler});
-        const sampler_layout_binding = c.VkDescriptorSetLayoutBinding{
-            .binding = 0,
-            .descriptorType = c.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-            .descriptorCount = 1,
-            .stageFlags = c.VK_SHADER_STAGE_FRAGMENT_BIT,
-        };
-        const layout_info = c.VkDescriptorSetLayoutCreateInfo{
-            .sType = c.VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-            .bindingCount = 1,
-            .pBindings = &sampler_layout_binding,
-        };
-        try vk.vkCheck(c.vkCreateDescriptorSetLayout(self.vk_ctx.device.handle, &layout_info, null, &self.descriptor_set_layout));
+        self.descriptor_set_layout = try vk.DescriptorSetLayout.init(self.vk_ctx, &.{
+            .{
+                .type = c.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                .stage_flags = c.VK_SHADER_STAGE_FRAGMENT_BIT,
+            },
+        });
 
-        const pool_size = c.VkDescriptorPoolSize{
-            .type = c.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-            .descriptorCount = 1,
-        };
-        const pool_info = c.VkDescriptorPoolCreateInfo{
-            .sType = c.VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-            .poolSizeCount = 1,
-            .pPoolSizes = &pool_size,
-            .maxSets = 1,
-        };
-        try vk.vkCheck(c.vkCreateDescriptorPool(self.vk_ctx.device.handle, &pool_info, null, &self.descriptor_pool));
+        self.descriptor_pool = try vk.DescriptorPool.init(
+            self.vk_ctx,
+            1,
+            &.{
+                .{ .type = c.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .count = 1 },
+            },
+        );
 
-        const set_alloc_info = c.VkDescriptorSetAllocateInfo{
-            .sType = c.VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
-            .descriptorPool = self.descriptor_pool,
-            .descriptorSetCount = 1,
-            .pSetLayouts = &self.descriptor_set_layout,
-        };
-        try vk.vkCheck(c.vkAllocateDescriptorSets(self.vk_ctx.device.handle, &set_alloc_info, &self.descriptor_set));
+        self.descriptor_set = try self.descriptor_pool.allocateSet(
+            self.vk_ctx,
+            self.descriptor_set_layout,
+        );
 
-        const image_info = c.VkDescriptorImageInfo{
-            .imageLayout = c.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-            .imageView = self.texture_view,
-            .sampler = self.sampler,
-        };
-        const desc_write = c.VkWriteDescriptorSet{
-            .sType = c.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-            .dstSet = self.descriptor_set,
-            .dstBinding = 0,
-            .dstArrayElement = 0,
-            .descriptorType = c.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-            .descriptorCount = 1,
-            .pImageInfo = &image_info,
-        };
-        c.vkUpdateDescriptorSets(self.vk_ctx.device.handle, 1, &desc_write, 0, null);
+        try self.descriptor_set.update(self.vk_ctx, &.{
+            .{
+                .binding = 0,
+                .info = .{
+                    .CombinedImageSampler = .{
+                        .imageLayout = c.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                        .imageView = self.texture_view,
+                        .sampler = self.sampler,
+                    },
+                },
+            },
+        });
     }
 
     fn createBuffers(self: *Self) !void {
@@ -361,25 +343,24 @@ pub const GuiRenderer = struct {
     pub fn createPipeline(self: *Self, render_pass: vk.RenderPass) !void {
         self.pipeline_layout = try vk.PipelineLayout.init(self.vk_ctx, .{
             .setLayoutCount = 1,
-            .pSetLayouts = &self.descriptor_set_layout,
+            .pSetLayouts = &self.descriptor_set_layout.handle,
             .pushConstantRangeCount = 1,
             .pPushConstantRanges = &self.push_constants.handle,
         });
 
-        var vert_mod = try vk.ShaderModule.init(self.vk_ctx.allocator, self.vk_ctx.device.handle, gui_vert_shader_bin);
-        defer vert_mod.deinit();
-        var frag_mod = try vk.ShaderModule.init(self.vk_ctx.allocator, self.vk_ctx.device.handle, gui_frag_shader_bin);
-        defer frag_mod.deinit();
+        var vert_mod = try vk.ShaderModule.init(self.vk_ctx.allocator, self.vk_ctx, gui_vert_shader_bin);
+        defer vert_mod.deinit(self.vk_ctx);
+        var frag_mod = try vk.ShaderModule.init(self.vk_ctx.allocator, self.vk_ctx, gui_frag_shader_bin);
+        defer frag_mod.deinit(self.vk_ctx);
 
         const shader_stages = [_]c.VkPipelineShaderStageCreateInfo{
-            .{ .sType = c.VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = c.VK_SHADER_STAGE_VERTEX_BIT, .module = vert_mod.handle, .pName = "main" },
-            .{ .sType = c.VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = c.VK_SHADER_STAGE_FRAGMENT_BIT, .module = frag_mod.handle, .pName = "main" },
+            .{ .stage = c.VK_SHADER_STAGE_VERTEX_BIT, .module = vert_mod.handle, .pName = "main" },
+            .{ .stage = c.VK_SHADER_STAGE_FRAGMENT_BIT, .module = frag_mod.handle, .pName = "main" },
         };
 
         const binding_desc = GuiVertex.getBindingDescription();
         const attrib_desc = GuiVertex.getAttributeDescriptions();
         const vertex_input_info = c.VkPipelineVertexInputStateCreateInfo{
-            .sType = c.VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
             .vertexBindingDescriptionCount = 1,
             .pVertexBindingDescriptions = &binding_desc,
             .vertexAttributeDescriptionCount = attrib_desc.len,
@@ -387,13 +368,11 @@ pub const GuiRenderer = struct {
         };
 
         const input_assembly = c.VkPipelineInputAssemblyStateCreateInfo{
-            .sType = c.VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
             .topology = c.VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
             .primitiveRestartEnable = c.VK_FALSE,
         };
 
         const rasterizer = c.VkPipelineRasterizationStateCreateInfo{
-            .sType = c.VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
             .depthClampEnable = c.VK_FALSE,
             .rasterizerDiscardEnable = c.VK_FALSE,
             .polygonMode = c.VK_POLYGON_MODE_FILL,
@@ -403,7 +382,6 @@ pub const GuiRenderer = struct {
         };
 
         const multisampling = c.VkPipelineMultisampleStateCreateInfo{
-            .sType = c.VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
             .sampleShadingEnable = c.VK_FALSE,
             .rasterizationSamples = c.VK_SAMPLE_COUNT_1_BIT,
         };
@@ -420,14 +398,12 @@ pub const GuiRenderer = struct {
         };
 
         const color_blending = c.VkPipelineColorBlendStateCreateInfo{
-            .sType = c.VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
             .logicOpEnable = c.VK_FALSE,
             .attachmentCount = 1,
             .pAttachments = &color_blend_attachment,
         };
 
         const pipeline_info = c.VkGraphicsPipelineCreateInfo{
-            .sType = c.VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
             .stageCount = shader_stages.len,
             .pStages = &shader_stages,
             .pVertexInputState = &vertex_input_info,
@@ -454,7 +430,7 @@ pub const GuiRenderer = struct {
         if (self.index_count == 0) return;
 
         c.vkCmdBindPipeline(cmd_buffer, c.VK_PIPELINE_BIND_POINT_GRAPHICS, self.pipeline.handle);
-        c.vkCmdBindDescriptorSets(cmd_buffer, c.VK_PIPELINE_BIND_POINT_GRAPHICS, self.pipeline_layout.handle, 0, 1, &self.descriptor_set, 0, null);
+        c.vkCmdBindDescriptorSets(cmd_buffer, c.VK_PIPELINE_BIND_POINT_GRAPHICS, self.pipeline_layout.handle, 0, 1, &self.descriptor_set.handle, 0, null);
         const offset: c.VkDeviceSize = 0;
         c.vkCmdBindVertexBuffers(cmd_buffer, 0, 1, &self.vertex_buffer.handle, &offset);
         c.vkCmdBindIndexBuffer(cmd_buffer, self.index_buffer.handle, 0, c.VK_INDEX_TYPE_UINT32);
