@@ -1122,12 +1122,25 @@ pub const Buffer = struct {
         var self = Self{
             .size = size,
         };
+
         var buffer_info = c.VkBufferCreateInfo{
             .size = size,
             .usage = usage,
             // Not shared between queues
             .sharingMode = c.VK_SHARING_MODE_EXCLUSIVE,
         };
+
+        if (vk_ctx.physical_device.graphics_q_family != vk_ctx.physical_device.transfer_q_family) {
+            std.debug.print("buffer init. sharing mode concurrent\n", .{});
+            const queue_family_indices = [_]u32{
+                vk_ctx.physical_device.graphics_q_family,
+                vk_ctx.physical_device.transfer_q_family,
+            };
+            buffer_info.sharingMode = c.VK_SHARING_MODE_CONCURRENT;
+            buffer_info.queueFamilyIndexCount = queue_family_indices.len;
+            buffer_info.pQueueFamilyIndices = &queue_family_indices;
+        }
+        std.debug.print("buffer init. sharing mode exclusive (1 queue)\n", .{});
         try vkCheck(c.vkCreateBuffer(vk_ctx.device.handle, &buffer_info, null, &self.handle));
 
         var mem_reqs: c.VkMemoryRequirements = undefined;
@@ -1571,35 +1584,41 @@ pub const App = struct {
     }
 
     pub fn initUi(self: *Self) !void {
-        try self.main_ui.addButton(.{
-            .x = 10,
-            .y = 10,
-            .width = 150,
-            .height = 30,
-        }, "Add Line", .{ 0, 0, 1, 1 }, .{ 1, 1, 1, 1 }, addLineCallback);
+        // A standard button height, e.g., 6% of the window height
+        const button_h: f32 = 0.06;
+        // A standard button width
+        const button_w: f32 = 0.15;
+        // Padding between buttons
+        const padding: f32 = 0.01;
 
         try self.main_ui.addButton(.{
-            .x = 10,
-            .y = 50,
-            .width = 150,
-            .height = 30,
-        }, "Clear Lines", .{ 0, 0, 1, 1 }, .{ 1, 1, 1, 1 }, clearLinesCallback);
+            .x = padding,
+            .y = padding,
+            .width = button_w,
+            .height = button_h,
+        }, "Add Line", .{ 0.2, 0.2, 0.8, 1 }, .{ 1, 1, 1, 1 }, addLineCallback);
 
         try self.main_ui.addButton(.{
-            .x = 10,
-            .y = 550,
-            .width = 150,
-            .height = 30,
-        }, "Quit", .{ 0, 0, 1, 1 }, .{ 1, 1, 1, 1 }, quitCallback);
+            .x = padding,
+            .y = padding + button_h + padding, // Position below the first button
+            .width = button_w,
+            .height = button_h,
+        }, "Clear Lines", .{ 0.2, 0.2, 0.8, 1 }, .{ 1, 1, 1, 1 }, clearLinesCallback);
+
+        try self.main_ui.addButton(.{
+            .x = padding,
+            .y = padding + (button_h + padding) * 2, // Position below the second button
+            .width = button_w,
+            .height = button_h,
+        }, "Quit", .{ 0.8, 0.2, 0.2, 1 }, .{ 1, 1, 1, 1 }, quitCallback);
 
         try self.main_ui.addPlainText(.{
-            .x = 10.0,
-            .y = @as(f32, @floatFromInt(self.window.size.y)) - 120.0,
-            .width = 150,
-            .height = 30,
-        }, "                  ", .{ 0, 0, 1, 1 }, .{ 1, 0, 0, 1 });
+            .x = padding,
+            .y = padding + (button_h + padding) * 3, // Below all buttons
+            .width = button_w,
+            .height = button_h,
+        }, "            ", .{ 0, 0, 0, 0 }, .{ 1, 1, 0, 1 }); // Transparent background
     }
-
     pub fn deinit(self: *Self) void {
         // Wait for device to be idle before cleaning up
         _ = c.vkDeviceWaitIdle(self.vk_ctx.device.handle);
@@ -1714,7 +1733,7 @@ pub const App = struct {
                 .rotation = scene.Quat.fromAxisAngle(.{ 0, 1, 0 }, 0.5),
             }).toMatrix();
             self.text_renderer.drawText("Sine Wave Motion!", wave_transform, .{ 1.0, 1.0, 0.0, 1.0 }, 0.7);
-            self.gui_renderer.processAndDrawUi(self, &self.main_ui);
+            self.gui_renderer.processAndDrawUi(&self.main_ui, self, self.window.size.x, self.window.size.y);
             self.text_renderer.processAndDrawTextScene(&self.text_scene);
 
             self.perf.endFrame();
@@ -1770,6 +1789,63 @@ pub const App = struct {
         } else {
             try vkCheck(present_result);
         }
+    }
+
+    pub fn recordCommandBuffer(self: *Self, image_index: u32) !void {
+        const begin_info = c.VkCommandBufferBeginInfo{};
+        try vkCheck(c.vkBeginCommandBuffer(self.command_buffer.handle, &begin_info));
+
+        const clear_values = [_]c.VkClearValue{
+            // Color attachment clear value
+            .{ .color = .{ .float32 = .{ 0.392, 0.584, 0.929, 1.0 } } }, // Cornflower Blue
+            // .{ .color = .{ .float32 = .{ 0, 0, 0, 1.0 } } },
+            // Depth attachment clear value
+            .{ .depthStencil = .{ .depth = 0.0, .stencil = 0 } },
+        };
+
+        const render_pass_info = c.VkRenderPassBeginInfo{
+            .renderPass = self.render_pass.handle,
+            .framebuffer = self.render_pass.framebuffer[image_index],
+            .renderArea = .{
+                .offset = .{ .x = 0, .y = 0 },
+                .extent = self.swapchain.extent,
+            },
+            .clearValueCount = clear_values.len,
+            .pClearValues = &clear_values,
+        };
+
+        c.vkCmdBeginRenderPass(self.command_buffer.handle, &render_pass_info, c.VK_SUBPASS_CONTENTS_INLINE);
+        c.vkCmdBindPipeline(self.command_buffer.handle, c.VK_PIPELINE_BIND_POINT_GRAPHICS, self.pipeline.handle);
+
+        var viewport = c.VkViewport{
+            .height = @floatFromInt(self.window.size.y),
+            .width = @floatFromInt(self.window.size.x),
+        };
+
+        var scissor = c.VkRect2D{
+            .extent = .{
+                .height = @intCast(self.window.size.y),
+                .width = @intCast(self.window.size.x),
+            },
+            .offset = .{},
+        };
+
+        c.vkCmdSetViewport(self.command_buffer.handle, 0, 1, &viewport);
+        c.vkCmdSetScissor(self.command_buffer.handle, 0, 1, &scissor);
+
+        const vertex_buffers = [_]c.VkBuffer{self.vertex_buffer.handle};
+        const offsets = [_]c.VkDeviceSize{0};
+        c.vkCmdBindVertexBuffers(self.command_buffer.handle, 0, 1, &vertex_buffers, &offsets);
+        c.vkCmdBindDescriptorSets(self.command_buffer.handle, c.VK_PIPELINE_BIND_POINT_GRAPHICS, self.pipeline_layout.handle, 0, 1, &self.descriptor_set.handle, 0, null);
+        c.vkCmdDraw(self.command_buffer.handle, @intCast(self.scene.getTotalVertexCount()), 1, 0, 0);
+        self.text_renderer.endFrame(self.command_buffer.handle, self.descriptor_set);
+        self.gui_renderer.endFrame(
+            self.command_buffer.handle,
+            @floatFromInt(self.window.size.x),
+            @floatFromInt(self.window.size.y),
+        );
+        c.vkCmdEndRenderPass(self.command_buffer.handle);
+        try vkCheck(c.vkEndCommandBuffer(self.command_buffer.handle));
     }
 
     fn initVertexBuffer(self: *Self) !void {
@@ -1845,63 +1921,6 @@ pub const App = struct {
         self.pipeline = try Pipeline.init(self.vk_ctx, self.render_pass, self.pipeline_layout);
         try self.gui_renderer.createPipeline(self.render_pass);
         try self.text_renderer.createPipeline(self.render_pass, self.descriptor_layout);
-    }
-
-    pub fn recordCommandBuffer(self: *Self, image_index: u32) !void {
-        const begin_info = c.VkCommandBufferBeginInfo{};
-        try vkCheck(c.vkBeginCommandBuffer(self.command_buffer.handle, &begin_info));
-
-        const clear_values = [_]c.VkClearValue{
-            // Color attachment clear value
-            .{ .color = .{ .float32 = .{ 0.392, 0.584, 0.929, 1.0 } } }, // Cornflower Blue
-            // .{ .color = .{ .float32 = .{ 0, 0, 0, 1.0 } } },
-            // Depth attachment clear value
-            .{ .depthStencil = .{ .depth = 0.0, .stencil = 0 } },
-        };
-
-        const render_pass_info = c.VkRenderPassBeginInfo{
-            .renderPass = self.render_pass.handle,
-            .framebuffer = self.render_pass.framebuffer[image_index],
-            .renderArea = .{
-                .offset = .{ .x = 0, .y = 0 },
-                .extent = self.swapchain.extent,
-            },
-            .clearValueCount = clear_values.len,
-            .pClearValues = &clear_values,
-        };
-
-        c.vkCmdBeginRenderPass(self.command_buffer.handle, &render_pass_info, c.VK_SUBPASS_CONTENTS_INLINE);
-        c.vkCmdBindPipeline(self.command_buffer.handle, c.VK_PIPELINE_BIND_POINT_GRAPHICS, self.pipeline.handle);
-
-        var viewport = c.VkViewport{
-            .height = @floatFromInt(self.window.size.y),
-            .width = @floatFromInt(self.window.size.x),
-        };
-
-        var scissor = c.VkRect2D{
-            .extent = .{
-                .height = @intCast(self.window.size.y),
-                .width = @intCast(self.window.size.x),
-            },
-            .offset = .{},
-        };
-
-        c.vkCmdSetViewport(self.command_buffer.handle, 0, 1, &viewport);
-        c.vkCmdSetScissor(self.command_buffer.handle, 0, 1, &scissor);
-
-        const vertex_buffers = [_]c.VkBuffer{self.vertex_buffer.handle};
-        const offsets = [_]c.VkDeviceSize{0};
-        c.vkCmdBindVertexBuffers(self.command_buffer.handle, 0, 1, &vertex_buffers, &offsets);
-        c.vkCmdBindDescriptorSets(self.command_buffer.handle, c.VK_PIPELINE_BIND_POINT_GRAPHICS, self.pipeline_layout.handle, 0, 1, &self.descriptor_set.handle, 0, null);
-        c.vkCmdDraw(self.command_buffer.handle, @intCast(self.scene.getTotalVertexCount()), 1, 0, 0);
-        self.text_renderer.endFrame(self.command_buffer.handle, self.descriptor_set);
-        self.gui_renderer.endFrame(
-            self.command_buffer.handle,
-            @floatFromInt(self.window.size.x),
-            @floatFromInt(self.window.size.y),
-        );
-        c.vkCmdEndRenderPass(self.command_buffer.handle);
-        try vkCheck(c.vkEndCommandBuffer(self.command_buffer.handle));
     }
 };
 

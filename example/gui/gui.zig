@@ -27,8 +27,14 @@ const WidgetData = union(enum) {
     };
 };
 
-// Rectangle structure for widget positioning
 const Rect = struct {
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+};
+// Rectangle structure for widget positioning
+const RelativeRect = struct {
     x: f32,
     y: f32,
     width: f32,
@@ -37,7 +43,7 @@ const Rect = struct {
 
 // Widget definition
 pub const Widget = struct {
-    rect: Rect,
+    rel_rect: RelativeRect,
     background: @Vector(4, f32) = .{ 0, 0, 0, 1 },
     foreground: @Vector(4, f32) = .{ 1, 1, 1, 1 },
     data: WidgetData,
@@ -64,31 +70,31 @@ pub const UI = struct {
 
     pub fn addButton(
         self: *Self,
-        rect: Rect,
+        rel_rect: RelativeRect,
         text: []const u8,
-        background: @Vector(4, f32),
-        foreground: @Vector(4, f32),
+        bg: @Vector(4, f32),
+        fg: @Vector(4, f32),
         on_click: ?OnClickFn,
     ) !void {
         const text_copy = try self.copyString(text);
         try self.widgets.append(.{
-            .rect = rect,
-            .background = background,
-            .foreground = foreground,
+            .rel_rect = rel_rect,
+            .background = bg,
+            .foreground = fg,
             .data = .{ .button = .{ .text = text_copy, .on_click = on_click } },
         });
     }
 
     pub fn addPlainText(
         self: *Self,
-        rect: Rect,
+        rect: RelativeRect,
         text: []const u8,
         background: @Vector(4, f32),
         foreground: @Vector(4, f32),
     ) !void {
         const text_copy = try self.copyString(text);
         try self.widgets.append(.{
-            .rect = rect,
+            .rel_rect = rect,
             .background = background,
             .foreground = foreground,
             .data = .{ .plain_text = .{ .text = text_copy } },
@@ -281,6 +287,7 @@ pub const GuiRenderer = struct {
     }
 
     fn createDescriptors(self: *Self) !void {
+        // var a = try vk.DescriptorSetLayout.init(self.vk_ctx, &.{.CombinedImageSampler});
         const sampler_layout_binding = c.VkDescriptorSetLayoutBinding{
             .binding = 0,
             .descriptorType = c.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
@@ -471,58 +478,83 @@ pub const GuiRenderer = struct {
         };
     }
 
-    pub fn processAndDrawUi(self: *Self, app: *anyopaque, ui: *const UI) void {
-        for (ui.widgets.items, 1..) |widget, id| {
-            const widget_id: u32 = @intCast(id);
-            const is_hot = self.isMouseOverWidget(widget.rect);
-            if (is_hot) {
-                self.hot_id = widget_id;
-                if (self.mouse_state.left_button_down) {
-                    self.active_id = widget_id;
+    pub fn processAndDrawUi(self: *GuiRenderer, ui_to_draw: *const UI, app: *anyopaque, width: c_int, height: c_int) void {
+        const window_width: f32 = @floatFromInt(width);
+        const window_height: f32 = @floatFromInt(height);
+
+        for (ui_to_draw.widgets.items) |widget| {
+            self.last_id += 1;
+            const id = self.last_id;
+            // Compute absolute rect from relative rect
+            const rect = Rect{
+                .x = widget.rel_rect.x * window_width,
+                .y = widget.rel_rect.y * window_height,
+                .width = widget.rel_rect.width * window_width,
+                .height = widget.rel_rect.height * window_height,
+            };
+
+            if (self.isMouseOver(rect)) {
+                self.hot_id = id;
+                if (self.active_id == 0 and self.mouse_state.left_button_down) {
+                    self.active_id = id;
                 }
             }
 
-            const clicked = is_hot and self.active_id == widget_id and !self.mouse_state.left_button_down;
-
+            // Use rect for drawing and mouse interaction
             switch (widget.data) {
                 .button => |data| {
-                    var rect_color = widget.background;
-                    if (self.hot_id == widget_id) {
-                        rect_color += @Vector(4, f32){ 0.1, 0.1, 0.1, 0 };
-                        if (self.active_id == widget_id) {
-                            rect_color -= @Vector(4, f32){ 0.2, 0.2, 0.2, 0 };
+                    var bg_color = widget.background;
+                    // Visual feedback for hot/active states
+                    if (self.hot_id == id) {
+                        if (self.active_id == id) {
+                            // Button is being pressed
+                            bg_color = .{ widget.background[0] * 0.5, widget.background[1] * 0.5, widget.background[2] * 0.5, 1.0 };
+                        } else {
+                            // Button is being hovered over
+                            bg_color = .{ widget.background[0] * 1.2, widget.background[1] * 1.2, widget.background[2] * 1.2, 1.0 };
                         }
                     }
-                    self.drawRect(widget.rect, rect_color);
 
-                    const scale = data.font_size / self.font.font_size;
-                    const text_metrics = self.measureText(data.text, scale);
-                    const text_x = widget.rect.x + (widget.rect.width - text_metrics.width) / 2.0;
-                    const text_y = widget.rect.y + (widget.rect.height - self.font.line_height * scale) / 2.0;
+                    // Draw button background
+                    self.drawRect(rect, widget.background);
+
+                    // Compute text scale based on widget height
+                    const desired_text_height = 0.6 * rect.height;
+                    const scale = desired_text_height / self.font.line_height;
+
+                    // Measure text width for centering
+                    const text_width = self.measureText(data.text, scale);
+                    const text_x = rect.x + @max((rect.width - text_width) / 2.0, 1.0);
+                    const text_y = rect.y + @max((rect.height - desired_text_height) / 2.0, 1.0);
+
+                    // Draw text
                     self.drawText(data.text, text_x, text_y, widget.foreground, scale);
 
-                    if (clicked and data.on_click != null) {
-                        data.on_click.?(app);
+                    // Mouse interaction
+                    if (self.mouse_state.left_button_down == false and self.hot_id == id and self.active_id == id) {
+                        if (data.on_click) |callback| {
+                            callback(app);
+                        }
                     }
                 },
                 .plain_text => |data| {
-                    const scale = data.font_size / self.font.font_size;
-                    const text_metrics = self.measureText(data.text, scale);
-                    const text_x = widget.rect.x + (widget.rect.width - text_metrics.width) / 2.0;
-                    const text_y = widget.rect.y + (widget.rect.height - self.font.line_height * scale) / 2.0;
-                    self.drawText(data.text, text_x, text_y, widget.foreground, scale);
+                    // Similar logic for plain text
+                    const desired_text_height = 0.8 * rect.height;
+                    const scale = desired_text_height / self.font.line_height;
+                    self.drawText(data.text, rect.x, rect.y, widget.foreground, scale);
                 },
             }
         }
     }
 
-    fn isMouseOverWidget(self: *const Self, rect: Rect) bool {
-        return self.mouse_state.x >= rect.x and
-            self.mouse_state.x <= rect.x + rect.width and
-            self.mouse_state.y >= rect.y and
-            self.mouse_state.y <= rect.y + rect.height;
+    fn isMouseOver(self: *GuiRenderer, rect: Rect) bool {
+        const mouse_x = self.mouse_state.x;
+        const mouse_y = self.mouse_state.y;
+        return mouse_x >= rect.x and
+            mouse_x < rect.x + rect.width and
+            mouse_y >= rect.y and
+            mouse_y < rect.y + rect.height;
     }
-
     fn drawRect(self: *Self, rect: Rect, color: [4]f32) void {
         if (self.vertex_count + 4 > MAX_VERTICES or self.index_count + 6 > MAX_INDICES) return;
 
@@ -584,14 +616,14 @@ pub const GuiRenderer = struct {
         }
     }
 
-    fn measureText(self: *const Self, text: []const u8, scale: f32) struct { width: f32 } {
+    fn measureText(self: *const Self, text: []const u8, scale: f32) f32 {
         var width: f32 = 0;
         for (text) |char_code| {
             if (char_code == 170) break;
             const glyph = self.font.glyphs.get(char_code) orelse self.font.glyphs.get('?') orelse continue;
             width += glyph.xadvance * scale;
         }
-        return .{ .width = width };
+        return width;
     }
 
     pub fn handleCursorPos(self: *Self, x: f64, y: f64) void {
