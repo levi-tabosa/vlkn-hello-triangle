@@ -14,6 +14,7 @@ const OnClickFn = *const fn (app: *anyopaque) void;
 const WidgetData = union(enum) {
     button: ButtonData,
     plain_text: PlainTextData,
+    slider: SliderData,
 
     const ButtonData = struct {
         text: []u8,
@@ -24,6 +25,13 @@ const WidgetData = union(enum) {
     const PlainTextData = struct {
         text: []u8,
         font_size: f32 = 20.0,
+    };
+
+    const SliderData = struct {
+        min_value: f32,
+        max_value: f32,
+        value: f32,
+        on_change: ?*const fn (app: *anyopaque, new_value: f32) void = null,
     };
 };
 
@@ -98,6 +106,29 @@ pub const UI = struct {
             .background = background,
             .foreground = foreground,
             .data = .{ .plain_text = .{ .text = text_copy } },
+        });
+    }
+
+    pub fn addSlider(
+        self: *Self,
+        rel_rect: RelativeRect,
+        min_value: f32,
+        max_value: f32,
+        initial_value: f32,
+        bg: @Vector(4, f32),
+        fg: @Vector(4, f32),
+        on_change: ?*const fn (app: *anyopaque, new_value: f32) void,
+    ) !void {
+        try self.widgets.append(.{
+            .rel_rect = rel_rect,
+            .background = bg,
+            .foreground = fg,
+            .data = .{ .slider = .{
+                .min_value = min_value,
+                .max_value = max_value,
+                .value = initial_value,
+                .on_change = on_change,
+            } },
         });
     }
 
@@ -458,7 +489,7 @@ pub const GuiRenderer = struct {
         const window_width: f32 = @floatFromInt(width);
         const window_height: f32 = @floatFromInt(height);
 
-        for (ui_to_draw.widgets.items) |widget| {
+        for (ui_to_draw.widgets.items) |*widget| {
             self.last_id += 1;
             const id = self.last_id;
             // Compute absolute rect from relative rect
@@ -469,6 +500,7 @@ pub const GuiRenderer = struct {
                 .height = widget.rel_rect.height * window_height,
             };
 
+            // const is_mouse_over = ;
             if (self.isMouseOver(rect)) {
                 self.hot_id = id;
                 if (self.active_id == 0 and self.mouse_state.left_button_down) {
@@ -519,6 +551,64 @@ pub const GuiRenderer = struct {
                     const scale = desired_text_height / self.font.line_height;
                     self.drawText(data.text, rect.x, rect.y, widget.foreground, scale);
                 },
+                .slider => |*data| {
+                    // --- Drawing ---
+                    // Draw Slider Track (the background line)
+                    const track_color = .{ 0.3, 0.3, 0.3, 1.0 };
+                    self.drawRect(rect, track_color);
+
+                    // Calculate handle position
+                    const slider_width = rect.width;
+                    const handle_width: f32 = 10.0; // Width of the slider handle (pixels)
+                    const normalized_value = (data.value - data.min_value) / (data.max_value - data.min_value);
+                    const handle_x = rect.x + (slider_width - handle_width) * normalized_value;
+                    const handle_rect = Rect{
+                        .x = handle_x,
+                        .y = rect.y,
+                        .width = handle_width,
+                        .height = rect.height,
+                    };
+
+                    // Choose a color for the handle: darker if active, lighter if hot, normal otherwise
+                    var handle_color = widget.foreground;
+                    if (self.active_id == id) {
+                        handle_color = .{ handle_color[0] * 0.5, handle_color[1] * 0.5, handle_color[2] * 0.5, 1.0 };
+                    } else if (self.hot_id == id) {
+                        handle_color = .{ handle_color[0] * 1.2, handle_color[1] * 1.2, handle_color[2] * 1.2, 1.0 };
+                    }
+
+                    // Draw the Slider Handle
+                    self.drawRect(handle_rect, handle_color); // or drawRoundedRect for nicer visuals
+
+                    // --- Interaction ---
+
+                    const is_over_handle = self.isMouseOverSliderHandle(rect, data.value, data.min_value, data.max_value);
+
+                    if (is_over_handle) {
+                        self.hot_id = id;
+                        if (self.active_id == 0 and self.mouse_state.left_button_down) {
+                            self.active_id = id;
+                        }
+                    }
+
+                    // If the slider is active, update the value based on mouse position
+                    if (self.active_id == id and self.mouse_state.left_button_down) {
+                        // Calculate new value based on mouse X position
+                        var new_value = data.min_value + ((self.mouse_state.x - rect.x) / slider_width) * (data.max_value - data.min_value);
+
+                        // Clamp the value to the allowed range
+                        new_value = @max(new_value, data.min_value);
+                        new_value = @min(new_value, data.max_value);
+
+                        // Update the value
+                        data.value = @floatCast(new_value);
+
+                        // Call the onChange callback, if provided
+                        if (data.on_change) |callback| {
+                            callback(app, @floatCast(new_value));
+                        }
+                    }
+                },
             }
         }
     }
@@ -531,6 +621,24 @@ pub const GuiRenderer = struct {
             mouse_y >= rect.y and
             mouse_y < rect.y + rect.height;
     }
+
+    fn isMouseOverSliderHandle(self: *GuiRenderer, rect: Rect, slider_value: f32, min_value: f32, max_value: f32) bool {
+        const slider_width = rect.width;
+        const handle_width: f32 = 10.0; // Width of the slider handle (pixels)
+
+        // Calculate handle position
+        const normalized_value = (slider_value - min_value) / (max_value - min_value);
+        const handle_x = rect.x + (slider_width - handle_width) * normalized_value;
+
+        const mouse_x = self.mouse_state.x;
+        const mouse_y = self.mouse_state.y;
+
+        return mouse_x >= handle_x and
+            mouse_x < handle_x + handle_width and
+            mouse_y >= rect.y and
+            mouse_y < rect.y + rect.height;
+    }
+
     fn drawRect(self: *Self, rect: Rect, color: [4]f32) void {
         if (self.vertex_count + 4 > MAX_VERTICES or self.index_count + 6 > MAX_INDICES) return;
 
@@ -546,6 +654,13 @@ pub const GuiRenderer = struct {
 
         self.vertex_count += 4;
         self.index_count += 6;
+    }
+
+    fn drawRoundedRect(self: *Self, rect: Rect, color: [4]f32, radius: f32) void {
+        _ = radius;
+        // Currently this is a stub. We can approximate it with several rectangles and triangles.
+        // A real implementation would involve better geometry.
+        self.drawRect(rect, color);
     }
 
     fn drawText(self: *Self, text: []const u8, x_start: f32, y_start: f32, color: [4]f32, scale: f32) void {

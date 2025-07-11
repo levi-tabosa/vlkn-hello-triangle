@@ -179,6 +179,12 @@ fn quitCallback(ptr: *anyopaque) void {
     c.glfwSetWindowShouldClose(app.window.handle, 1);
 }
 
+fn sliderCallback(ptr: *anyopaque, new_value: f32) void {
+    _ = ptr;
+    // You would access and update some state of 'app' here, based on the new value.
+    std.log.info("Slider value changed to: {}", .{new_value});
+}
+
 const Window = struct {
     const Self = @This();
 
@@ -1682,6 +1688,13 @@ pub const App = struct {
             .width = button_w,
             .height = button_h,
         }, "Quit", .{ 0.8, 0.2, 0.2, 1 }, .{ 1, 1, 1, 1 }, quitCallback);
+
+        try self.main_ui.addSlider(.{
+            .x = 0.1,
+            .y = 0.7, // Below the other UI elements
+            .width = 0.3, // Make it wider
+            .height = 0.05,
+        }, 0.0, 1.0, 0.5, .{ 0.4, 0.4, 0.4, 1 }, .{ 0.8, 0.8, 0.8, 1 }, sliderCallback);
 
         try self.main_ui.addPlainText(.{
             .x = padding,
