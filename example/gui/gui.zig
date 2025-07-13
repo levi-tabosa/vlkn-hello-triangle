@@ -7,19 +7,41 @@ const util = @import("util");
 const gui_vert_shader_bin = @import("spirv").gui_vs;
 const gui_frag_shader_bin = @import("spirv").gui_fs;
 
-// Callback function type for button clicks
-const OnClickFn = *const fn (app: *anyopaque) void;
+pub const TextBuffer = struct {
+    const Self = @This();
+    const BUFFER_SIZE = 32;
+    buf: [BUFFER_SIZE]u8 = undefined,
+    len: u32 = 0,
+
+    pub fn slice(self: *const Self) []const u8 {
+        return self.buf[0..self.len];
+    }
+
+    pub fn append(self: *Self, char: u8) bool {
+        if (self.len >= BUFFER_SIZE) return false;
+        self.buf[self.len] = char;
+        self.len += 1;
+        return true;
+    }
+
+    pub fn backspace(self: *Self) void {
+        if (self.len > 0) {
+            self.len -= 1;
+        }
+    }
+};
 
 // Widget data variants
 const WidgetData = union(enum) {
     button: ButtonData,
     plain_text: PlainTextData,
     slider: SliderData,
+    text_field: TextFieldData,
 
     const ButtonData = struct {
         text: []u8,
         font_size: f32 = 20.0,
-        on_click: ?OnClickFn = null,
+        on_click: ?*const fn (app: *anyopaque) void = null,
     };
 
     const PlainTextData = struct {
@@ -32,6 +54,13 @@ const WidgetData = union(enum) {
         max_value: f32,
         value: f32,
         on_change: ?*const fn (app: *anyopaque, new_value: f32) void = null,
+    };
+
+    const TextFieldData = struct {
+        label: []const u8,
+        // This is a pointer to the buffer owned by the main App struct.
+        // This allows the GUI to modify the App's state directly.
+        buffer: *TextBuffer,
     };
 };
 
@@ -51,6 +80,7 @@ const RelativeRect = struct {
 
 // Widget definition
 pub const Widget = struct {
+    id: u32,
     rel_rect: RelativeRect,
     background: @Vector(4, f32) = .{ 0, 0, 0, 1 },
     foreground: @Vector(4, f32) = .{ 1, 1, 1, 1 },
@@ -63,6 +93,7 @@ pub const UI = struct {
 
     widgets: std.ArrayList(Widget),
     string_pool: util.Pool([256]u8),
+    next_id: u32 = 1,
 
     pub fn init(allocator: std.mem.Allocator) Self {
         return .{
@@ -82,14 +113,24 @@ pub const UI = struct {
         text: []const u8,
         bg: @Vector(4, f32),
         fg: @Vector(4, f32),
-        on_click: ?OnClickFn,
+        font_size: f32,
+        on_click: ?*const fn (app: *anyopaque) void,
     ) !void {
         const text_copy = try self.copyString(text);
+        const id = self.next_id;
+        self.next_id += 1;
         try self.widgets.append(.{
+            .id = id,
             .rel_rect = rel_rect,
             .background = bg,
             .foreground = fg,
-            .data = .{ .button = .{ .text = text_copy, .on_click = on_click } },
+            .data = .{
+                .button = .{
+                    .text = text_copy,
+                    .on_click = on_click,
+                    .font_size = font_size,
+                },
+            },
         });
     }
 
@@ -99,13 +140,22 @@ pub const UI = struct {
         text: []const u8,
         background: @Vector(4, f32),
         foreground: @Vector(4, f32),
+        font_size: f32,
     ) !void {
         const text_copy = try self.copyString(text);
+        const id = self.next_id;
+        self.next_id += 1;
         try self.widgets.append(.{
+            .id = id,
             .rel_rect = rect,
             .background = background,
             .foreground = foreground,
-            .data = .{ .plain_text = .{ .text = text_copy } },
+            .data = .{
+                .plain_text = .{
+                    .text = text_copy,
+                    .font_size = font_size,
+                },
+            },
         });
     }
 
@@ -119,7 +169,10 @@ pub const UI = struct {
         fg: @Vector(4, f32),
         on_change: ?*const fn (app: *anyopaque, new_value: f32) void,
     ) !void {
+        const id = self.next_id;
+        self.next_id += 1;
         try self.widgets.append(.{
+            .id = id,
             .rel_rect = rel_rect,
             .background = bg,
             .foreground = fg,
@@ -129,6 +182,27 @@ pub const UI = struct {
                 .value = initial_value,
                 .on_change = on_change,
             } },
+        });
+    }
+
+    pub fn addTextField(
+        self: *Self,
+        rel_rect: RelativeRect,
+        label: []const u8,
+        buffer: *TextBuffer,
+        bg: @Vector(4, f32),
+        fg: @Vector(4, f32),
+    ) !void {
+        // We only need to copy the label, the buffer is a pointer.
+        const label_copy = try self.copyString(label);
+        const id = self.next_id;
+        self.next_id += 1;
+        try self.widgets.append(.{
+            .id = id,
+            .rel_rect = rel_rect,
+            .background = bg,
+            .foreground = fg,
+            .data = .{ .text_field = .{ .label = label_copy, .buffer = buffer } },
         });
     }
 
@@ -212,7 +286,9 @@ pub const GuiRenderer = struct {
     mouse_state: MouseState = .{},
     active_id: u32 = 0,
     hot_id: u32 = 0,
-    last_id: u32 = 0,
+    // State for text input
+    focused_id: u32 = 0,
+    cursor_pos: u32 = 0,
     png_handle: PngImage,
 
     pub fn init(vk_ctx: *vk.VulkanContext, render_pass: vk.RenderPass) !Self {
@@ -455,7 +531,6 @@ pub const GuiRenderer = struct {
     pub fn beginFrame(self: *Self) void {
         self.vertex_count = 0;
         self.index_count = 0;
-        self.last_id = 0;
         self.hot_id = 0;
     }
 
@@ -472,10 +547,6 @@ pub const GuiRenderer = struct {
         c.vkCmdPushConstants(cmd_buffer, self.pipeline_layout.handle, c.VK_SHADER_STAGE_VERTEX_BIT, 0, @sizeOf([16]f32), &ortho_projection);
 
         c.vkCmdDrawIndexed(cmd_buffer, self.index_count, 1, 0, 0, 0);
-
-        if (!self.mouse_state.left_button_down) {
-            self.active_id = 0;
-        }
     }
 
     fn orthoProjectionMatrix(left: f32, right: f32, top: f32, bottom: f32) [16]f32 {
@@ -487,13 +558,13 @@ pub const GuiRenderer = struct {
         };
     }
 
-    pub fn processAndDrawUi(self: *GuiRenderer, ui_to_draw: *const UI, app: *anyopaque, width: c_int, height: c_int) void {
+    /// Returns true if mouse interacting with ui Element
+    pub fn processAndDrawUi(self: *GuiRenderer, ui_to_draw: *const UI, app: *anyopaque, width: c_int, height: c_int) bool {
         const window_width: f32 = @floatFromInt(width);
         const window_height: f32 = @floatFromInt(height);
 
         for (ui_to_draw.widgets.items) |*widget| {
-            self.last_id += 1;
-            const id = self.last_id;
+            const id = widget.id;
             // Compute absolute rect from relative rect
             const rect = Rect{
                 .x = widget.rel_rect.x * window_width,
@@ -507,51 +578,57 @@ pub const GuiRenderer = struct {
                 self.hot_id = id;
                 if (self.active_id == 0 and self.mouse_state.left_button_down) {
                     self.active_id = id;
+                    std.debug.print("aa", .{});
+                    // If we click something that is NOT a text field, unfocus.
+                    if (widget.data != .text_field) {
+                        self.focused_id = 0;
+                    }
                 }
             }
 
             // Use rect for drawing and mouse interaction
             switch (widget.data) {
-                .button => |data| {
+                .button => |*data| {
                     var bg_color = widget.background;
-                    // Visual feedback for hot/active states
                     if (self.hot_id == id) {
                         if (self.active_id == id) {
-                            // Button is being pressed
                             bg_color = .{ widget.background[0] * 0.5, widget.background[1] * 0.5, widget.background[2] * 0.5, 1.0 };
                         } else {
-                            // Button is being hovered over
                             bg_color = .{ widget.background[0] * 1.2, widget.background[1] * 1.2, widget.background[2] * 1.2, 1.0 };
                         }
                     }
+                    self.drawRect(rect, bg_color);
 
-                    // Draw button background
-                    self.drawRect(rect, widget.background);
-
-                    // Compute text scale based on widget height
-                    const desired_text_height = 0.6 * rect.height;
-                    const scale = desired_text_height / self.font.line_height;
-
-                    // Measure text width for centering
+                    const scale = data.font_size / self.font.font_size;
                     const text_width = self.measureText(data.text, scale);
-                    const text_x = rect.x + @max((rect.width - text_width) / 2.0, 1.0);
-                    const text_y = rect.y + @max((rect.height - desired_text_height) / 2.0, 1.0);
-
-                    // Draw text
+                    const text_height = self.font.line_height * scale;
+                    const text_x = rect.x + (rect.width - text_width) / 2.0;
+                    const text_y = rect.y + (rect.height - text_height) / 2.0;
                     self.drawText(data.text, text_x, text_y, widget.foreground, scale);
 
-                    // Mouse interaction
-                    if (self.mouse_state.left_button_down == false and self.hot_id == id and self.active_id == id) {
+                    // Set active_id when mouse is pressed over the button
+                    if (self.mouse_state.left_button_down and self.hot_id == id and self.active_id == 0) {
+                        self.active_id = id;
+                        std.debug.print("bb", .{});
+                    }
+                    // Call on_click when mouse is released over the button
+                    if (!self.mouse_state.left_button_down and self.active_id == id and self.hot_id == id) {
                         if (data.on_click) |callback| {
                             callback(app);
                         }
+                        self.active_id = 0;
                     }
                 },
                 .plain_text => |data| {
-                    // Similar logic for plain text
-                    const desired_text_height = 0.8 * rect.height;
-                    const scale = desired_text_height / self.font.line_height;
-                    self.drawText(data.text, rect.x, rect.y, widget.foreground, scale);
+                    // 1. Calculate scale from the desired font_size.
+                    const scale = data.font_size / self.font.font_size;
+                    const text_height = self.font.line_height * scale;
+
+                    // 2. Vertically center the text for better appearance.
+                    const text_y = rect.y + (rect.height - text_height) / 2.0;
+
+                    // Draw text aligned left but centered vertically.
+                    self.drawText(data.text, rect.x, text_y, widget.foreground, scale);
                 },
                 .slider => |*data| {
                     // --- Drawing ---
@@ -582,37 +659,68 @@ pub const GuiRenderer = struct {
                     // Draw the Slider Handle
                     self.drawRect(handle_rect, handle_color); // or drawRoundedRect for nicer visuals
 
-                    // --- Interaction ---
-
-                    const is_over_handle = self.isMouseOverSliderHandle(rect, data.value, data.min_value, data.max_value);
-
-                    if (is_over_handle) {
-                        self.hot_id = id;
-                        if (self.active_id == 0 and self.mouse_state.left_button_down) {
+                    // If the slider is active, update the value based on mouse position
+                    if (self.active_id == id or (self.hot_id == id and self.mouse_state.left_button_down)) {
+                        if (self.hot_id == id and self.mouse_state.left_button_down) {
                             self.active_id = id;
                         }
-                    }
-
-                    // If the slider is active, update the value based on mouse position
-                    if (self.active_id == id and self.mouse_state.left_button_down) {
-                        // Calculate new value based on mouse X position
+                        // Update value based on mouse position
                         var new_value = data.min_value + ((self.mouse_state.x - rect.x) / slider_width) * (data.max_value - data.min_value);
-
-                        // Clamp the value to the allowed range
                         new_value = @max(new_value, data.min_value);
                         new_value = @min(new_value, data.max_value);
-
-                        // Update the value
                         data.value = @floatCast(new_value);
-
-                        // Call the onChange callback, if provided
                         if (data.on_change) |callback| {
                             callback(app, @floatCast(new_value));
                         }
                     }
                 },
+                .text_field => |*data| {
+                    // --- Interaction ---
+                    if (self.hot_id == id and self.active_id == id) {
+                        // Clicked on this text field, so focus it.
+                        self.focused_id = id;
+                        // For simplicity, always move cursor to the end on focus.
+                        self.cursor_pos = data.buffer.len;
+                    }
+
+                    // --- Drawing ---
+                    var bg_color = widget.background;
+                    if (self.focused_id == id) {
+                        // Make the background slightly brighter when focused.
+                        bg_color = .{ bg_color[0] * 1.5, bg_color[1] * 1.5, bg_color[2] * 1.5, 1.0 };
+                    }
+                    self.drawRect(rect, bg_color);
+
+                    // Draw the label (if any)
+                    const scale = (0.6 * rect.height) / self.font.line_height;
+                    const label_width = self.measureText(data.label, scale);
+                    self.drawText(data.label, rect.x - label_width - 5, rect.y, widget.foreground, scale);
+
+                    // Draw the text content
+                    self.drawText(data.buffer.slice(), rect.x + 5, rect.y + (rect.height * 0.2), widget.foreground, scale);
+
+                    // Draw the blinking cursor
+                    if (self.focused_id == id) {
+                        const time_ms = std.time.milliTimestamp();
+                        if (@mod(@divFloor(time_ms, 500), 2) == 0) { // Blink every 500ms
+                            const text_up_to_cursor = data.buffer.buf[0..self.cursor_pos];
+                            const cursor_x_offset = self.measureText(text_up_to_cursor, scale);
+                            const cursor_rect = Rect{
+                                .x = rect.x + 5 + cursor_x_offset,
+                                .y = rect.y + (rect.height * 0.15),
+                                .width = 2,
+                                .height = rect.height * 0.7,
+                            };
+                            self.drawRect(cursor_rect, widget.foreground);
+                        }
+                    }
+                },
             }
         }
+        if (!self.mouse_state.left_button_down and self.active_id != 0) {
+            self.active_id = 0;
+        }
+        return self.active_id != 0;
     }
 
     fn isMouseOver(self: *GuiRenderer, rect: Rect) bool {
@@ -620,23 +728,6 @@ pub const GuiRenderer = struct {
         const mouse_y = self.mouse_state.y;
         return mouse_x >= rect.x and
             mouse_x < rect.x + rect.width and
-            mouse_y >= rect.y and
-            mouse_y < rect.y + rect.height;
-    }
-
-    fn isMouseOverSliderHandle(self: *GuiRenderer, rect: Rect, slider_value: f32, min_value: f32, max_value: f32) bool {
-        const slider_width = rect.width;
-        const handle_width: f32 = 10.0; // Width of the slider handle (pixels)
-
-        // Calculate handle position
-        const normalized_value = (slider_value - min_value) / (max_value - min_value);
-        const handle_x = rect.x + (slider_width - handle_width) * normalized_value;
-
-        const mouse_x = self.mouse_state.x;
-        const mouse_y = self.mouse_state.y;
-
-        return mouse_x >= handle_x and
-            mouse_x < handle_x + handle_width and
             mouse_y >= rect.y and
             mouse_y < rect.y + rect.height;
     }
@@ -727,6 +818,43 @@ pub const GuiRenderer = struct {
     pub fn handleMouseButton(self: *Self, btn: c_int, action: c_int, _: c_int) void {
         if (btn == c.GLFW_MOUSE_BUTTON_LEFT) {
             self.mouse_state.left_button_down = (action == c.GLFW_PRESS);
+        }
+    }
+
+    pub fn handleKey(self: *Self, key: c_int, action: c_int, ui_to_draw: *const UI) void {
+        // We only care about key presses and repeats for typing.
+        if (self.focused_id == 0 or (action != c.GLFW_PRESS and action != c.GLFW_REPEAT)) {
+            return;
+        }
+
+        // We need to find the focused widget's data buffer.
+        // This is a bit inefficient, but fine for an immediate-mode GUI.
+        var target_buffer: ?*TextBuffer = null;
+        var current_id: u32 = 0;
+        for (ui_to_draw.widgets.items) |*widget| {
+            current_id += 1;
+            if (current_id == self.focused_id) {
+                switch (widget.data) {
+                    .text_field => |*tf| target_buffer = tf.buffer,
+                    else => break,
+                }
+            }
+        }
+
+        if (target_buffer) |buffer| {
+            switch (key) {
+                c.GLFW_KEY_BACKSPACE => buffer.backspace(),
+                c.GLFW_KEY_ENTER, c.GLFW_KEY_ESCAPE => self.focused_id = 0, // Unfocus on Enter/Escape
+                else => {
+                    // This is a simplified way to get character input.
+                    // For full support, glfwSetCharCallback is better.
+                    if (key >= ' ' and key <= '~') {
+                        // This assumes a US keyboard layout.
+                        // TODO: Use glfwSetCharCallback for proper unicode input.
+                        _ = buffer.append(@intCast(key));
+                    }
+                },
+            }
         }
     }
 };

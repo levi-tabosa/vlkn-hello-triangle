@@ -68,7 +68,7 @@ pub fn getVertexAttributeDescriptions() [3]c.VkVertexInputAttributeDescription {
         .binding = 0,
         .location = 0,
         .format = c.VK_FORMAT_R32G32B32_SFLOAT,
-        .offset = @offsetOf(Vertex, "pos"),
+        .offset = @offsetOf(Vertex, "coor"),
     }, .{
         .binding = 0,
         .location = 1,
@@ -102,16 +102,18 @@ const Callbacks = struct {
         app.wd_ctx.handleMouseButton(button, action);
     }
 
+    // in test.zig, inside Callbacks struct
     fn cbKey(wd: ?*c.GLFWwindow, key: c_int, code: c_int, action: c_int, mods: c_int) callconv(.C) void {
+        _ = code;
+        _ = mods;
         const app: *App = @alignCast(@ptrCast(c.glfwGetWindowUserPointer(wd) orelse unreachable));
-        app.wd_ctx.handleKey(key, action, mods);
 
-        // TODO: Change
-        if (action == c.GLFW_PRESS) {
-            app.scene.setGridResolution(@intCast(code)) catch unreachable;
-            app.text_scene.clearText();
-            app.init3dText() catch unreachable;
-            app.updateVertexBuffer() catch unreachable;
+        // MODIFIED: Forward key events to the GUI
+        app.gui_renderer.handleKey(key, action, &app.main_ui);
+
+        // You can still have app-level keybinds here, just make sure they don't conflict.
+        if (key == c.GLFW_KEY_G and action == c.GLFW_PRESS) {
+            // Example: Change grid resolution with 'G' key now
         }
     }
 
@@ -134,15 +136,30 @@ fn addLineCallback(ptr: *anyopaque) void {
     const app: *App = @alignCast(@ptrCast(ptr));
     std.log.info("Button clicked: Adding a new line...", .{});
 
-    var prng = rand.DefaultPrng.init(@intCast(std.time.milliTimestamp()));
-    const random = prng.random();
-
-    const end_pos = .{
-        (random.float(f32) * 2.0 - 1.0) * 5,
-        (random.float(f32) * 2.0 - 1.0) * 5,
-        (random.float(f32) * 2.0 - 1.0) * 5,
+    const x = std.fmt.parseFloat(f32, app.line_x_buf.slice()) catch blk: {
+        std.log.err("Invalid X coordinate: {s}", .{app.line_x_buf.slice()});
+        break :blk 0;
+    };
+    const y = std.fmt.parseFloat(f32, app.line_y_buf.slice()) catch blk: {
+        std.log.err("Invalid Y coordinate: {s}", .{app.line_y_buf.slice()});
+        break :blk 0;
+    };
+    const z = std.fmt.parseFloat(f32, app.line_z_buf.slice()) catch blk: {
+        std.log.err("Invalid Z coordinate: {s}", .{app.line_z_buf.slice()});
+        break :blk 0;
     };
 
+    var end_pos = @Vector(3, f32){ x, y, z };
+    if (x == 0 and y == 0 and z == 0) {
+        var prng = rand.DefaultPrng.init(@intCast(std.time.milliTimestamp()));
+        const random = prng.random();
+
+        end_pos = .{
+            (random.float(f32) * 2.0 - 1.0) * 5,
+            (random.float(f32) * 2.0 - 1.0) * 5,
+            (random.float(f32) * 2.0 - 1.0) * 5,
+        };
+    }
     app.scene.addLine(.{ 0, 0, 0 }, end_pos) catch unreachable;
 
     const txt = std.fmt.allocPrint(app.allocator, "({d:.1},{d:.1},{d:.1})", .{ end_pos[0], end_pos[1], end_pos[2] }) catch unreachable;
@@ -153,17 +170,6 @@ fn addLineCallback(ptr: *anyopaque) void {
         .{ 1.0, 1.0, 1.0, 1.0 }, // white color
         0.65, // font scale
     ) catch unreachable;
-
-    // TODO: remove static text addition
-    const time = @as(f32, @floatFromInt(@mod(std.time.milliTimestamp(), 10000))) / 1000.0;
-    const rot_x = scene.Quat.fromAxisAngle(.{ 1, 0, 0 }, time * 0.3);
-    const rot_y = scene.Quat.fromAxisAngle(.{ 0, 1, 0 }, time * 0.5);
-    const tumbling_transform = scene.Transform.new(.{
-        .position = .{ 7, 3, -4 },
-        .rotation = rot_x.mul(rot_y), // Combine rotations
-    }).toMatrix();
-    app.text_scene.addText("Tumbling Test 123", tumbling_transform, .{ 1.0, 0.3, 0.3, 1.0 }, 1.5) catch unreachable;
-    // ---------------------------------
 
     app.updateVertexBuffer() catch unreachable;
 }
@@ -181,10 +187,49 @@ fn quitCallback(ptr: *anyopaque) void {
     c.glfwSetWindowShouldClose(app.window.handle, 1);
 }
 
-fn sliderCallback(ptr: *anyopaque, new_value: f32) void {
-    _ = ptr;
+fn fovSliderCallback(ptr: *anyopaque, new_value: f32) void {
+    const app: *App = @alignCast(@ptrCast(ptr));
     // You would access and update some state of 'app' here, based on the new value.
-    std.log.info("Slider value changed to: {}", .{new_value});
+    const min: f32 = 5.0;
+    const max: f32 = 180;
+
+    app.scene.camera.fov_degrees = min + (max - min) * new_value;
+}
+
+fn nearPlaneSliderCallback(ptr: *anyopaque, new_value: f32) void {
+    const app: *App = @alignCast(@ptrCast(ptr));
+    // You would access and update some state of 'app' here, based on the new value.
+    const min: f32 = 0.001;
+    const max: f32 = 50.0;
+
+    app.scene.camera.near_plane = min + (max - min) * new_value;
+}
+
+fn xCameraPosSliderCallback(ptr: *anyopaque, new_value: f32) void {
+    const app: *App = @alignCast(@ptrCast(ptr));
+    // You would access and update some state of 'app' here, based on the new value.
+    const min: f32 = -40;
+    const max: f32 = 40;
+
+    app.scene.camera.pos.coor[0] += min + (max - min) * new_value;
+}
+
+fn yCameraPosSliderCallback(ptr: *anyopaque, new_value: f32) void {
+    const app: *App = @alignCast(@ptrCast(ptr));
+    // You would access and update some state of 'app' here, based on the new value.
+    const min: f32 = -40;
+    const max: f32 = 40;
+
+    app.scene.camera.pos.coor[1] += min + (max - min) * new_value;
+}
+
+fn zCameraPosSliderCallback(ptr: *anyopaque, new_value: f32) void {
+    const app: *App = @alignCast(@ptrCast(ptr));
+    // You would access and update some state of 'app' here, based on the new value.
+    const min: f32 = -40;
+    const max: f32 = 40;
+
+    app.scene.camera.pos.coor[2] += min + (max - min) * new_value;
 }
 
 const Window = struct {
@@ -1565,33 +1610,38 @@ pub const App = struct {
     const Self = @This();
 
     allocator: Allocator,
-    scene: Scene,
     window: Window,
     vk_ctx: *VulkanContext,
-    gui_renderer: gui.GuiRenderer,
-    text_renderer: text.Text3DRenderer,
+    scene: Scene,
     text_scene: text.Text3DScene,
     main_ui: gui.UI,
-    wd_ctx: WindowContext,
+
+    wd_ctx: WindowContext = undefined,
+    gui_renderer: gui.GuiRenderer = undefined,
+    text_renderer: text.Text3DRenderer = undefined,
 
     // Vulkan objects that depend on the swapchain (recreated on window resize)
-    depth_buffer: DepthBuffer,
-    swapchain: Swapchain,
-    render_pass: RenderPass,
-    descriptor_layout: DescriptorSetLayout,
-    pipeline_layout: PipelineLayout,
-    pipeline: Pipeline,
+    depth_buffer: DepthBuffer = undefined,
+    swapchain: Swapchain = undefined,
+    render_pass: RenderPass = undefined,
+    descriptor_layout: DescriptorSetLayout = undefined,
+    pipeline_layout: PipelineLayout = undefined,
+    pipeline: Pipeline = undefined,
 
     // Other Vulkan objects
-    vertex_buffer: Buffer,
-    uniform_buffer: Buffer,
-    descriptor_pool: DescriptorPool,
-    descriptor_set: DescriptorSet,
-    command_buffer: CommandBuffer,
-    sync: SyncObjects,
+    vertex_buffer: Buffer = undefined,
+    uniform_buffer: Buffer = undefined,
+    descriptor_pool: DescriptorPool = undefined,
+    descriptor_set: DescriptorSet = undefined,
+    command_buffer: CommandBuffer = undefined,
+    sync: SyncObjects = undefined,
 
     framebuffer_resized: bool = false,
     perf: fps_tracker.PerformanceTracker,
+
+    line_x_buf: gui.TextBuffer = .{},
+    line_y_buf: gui.TextBuffer = .{},
+    line_z_buf: gui.TextBuffer = .{},
 
     /// Caller owns memory
     pub fn init(allocator: Allocator) !*Self {
@@ -1600,14 +1650,16 @@ pub const App = struct {
         vk_ctx.* = try VulkanContext.init(allocator, window);
 
         const app = try allocator.create(App);
-        app.allocator = allocator;
-        app.window = window;
-        app.vk_ctx = vk_ctx;
-        app.scene = try Scene.init(allocator, 20);
-        app.wd_ctx = .{};
-        app.main_ui = gui.UI.init(allocator);
-        app.text_scene = text.Text3DScene.init(allocator);
-        app.perf = fps_tracker.PerformanceTracker.init();
+        app.* = Self{
+            .allocator = allocator,
+            .window = window,
+            .vk_ctx = vk_ctx,
+            .wd_ctx = .{},
+            .scene = try Scene.init(allocator, 20),
+            .main_ui = gui.UI.init(allocator),
+            .text_scene = text.Text3DScene.init(allocator),
+            .perf = fps_tracker.PerformanceTracker.init(allocator),
+        };
         try app.initUi();
         try app.init3dText();
 
@@ -1676,35 +1728,67 @@ pub const App = struct {
             .y = padding,
             .width = button_w,
             .height = button_h,
-        }, "Add Line", .{ 0.2, 0.2, 0.8, 1 }, .{ 1, 1, 1, 1 }, addLineCallback);
+        }, "Add Line", .{ 0.2, 0.2, 0.8, 1 }, .{ 1, 1, 1, 1 }, 12, addLineCallback);
 
         try self.main_ui.addButton(.{
             .x = padding,
             .y = padding + button_h + padding, // Position below the first button
             .width = button_w,
             .height = button_h,
-        }, "Clear Lines", .{ 0.2, 0.2, 0.8, 1 }, .{ 1, 1, 1, 1 }, clearLinesCallback);
+        }, "Clear Lines", .{ 0.2, 0.2, 0.8, 1 }, .{ 1, 1, 1, 1 }, 12, clearLinesCallback);
 
         try self.main_ui.addButton(.{
             .x = padding,
             .y = padding + (button_h + padding) * 2, // Position below the second button
             .width = button_w,
             .height = button_h,
-        }, "Quit", .{ 0.8, 0.2, 0.2, 1 }, .{ 1, 1, 1, 1 }, quitCallback);
+        }, "Quit", .{ 0.8, 0.2, 0.2, 1 }, .{ 1, 1, 1, 1 }, 12, quitCallback);
 
         try self.main_ui.addSlider(.{
-            .x = 0.1,
-            .y = 0.7, // Below the other UI elements
-            .width = 0.3, // Make it wider
-            .height = 0.05,
-        }, 0.0, 1.0, 0.5, .{ 0.4, 0.4, 0.4, 1 }, .{ 0.8, 0.8, 0.8, 1 }, sliderCallback);
+            .x = 0.8 - padding, // Top-right
+            .y = 0.05 - padding,
+            .width = 0.15,
+            .height = 0.02,
+        }, 0.0, 1.0, 0.5, .{ 0.4, 0.4, 0.4, 1 }, .{ 0.8, 0.8, 0.8, 1 }, fovSliderCallback);
+
+        try self.main_ui.addSlider(.{
+            .x = 0.8 - padding, // Top-right
+            .y = 0.05 - padding + (button_h + padding) * 1,
+            .width = 0.15,
+            .height = 0.02,
+        }, 0.0, 1.0, 0.5, .{ 0.4, 0.4, 0.4, 1 }, .{ 0.8, 0.8, 0.8, 1 }, nearPlaneSliderCallback);
+
+        const tf_h: f32 = 0.05;
+        const tf_w: f32 = 0.08;
+        const tf_y: f32 = 0.25; // Y position for all text fields
+        const tf_padding: f32 = 0.01;
+
+        // We pass a pointer to the App's buffer: &self.line_x_buf
+        try self.main_ui.addTextField(.{
+            .x = 0.01 + 0.04,
+            .y = tf_y + padding + (button_h + padding) * 3,
+            .width = tf_w,
+            .height = tf_h,
+        }, "X:", &self.line_x_buf, .{ 0.1, 0.1, 0.1, 1 }, .{ 1, 1, 1, 1 });
+        try self.main_ui.addTextField(.{
+            .x = 0.01 + 0.04 + (tf_w + tf_padding),
+            .y = tf_y + padding + (button_h + padding) * 3,
+            .width = tf_w,
+            .height = tf_h,
+        }, "Y:", &self.line_y_buf, .{ 0.1, 0.1, 0.1, 1 }, .{ 1, 1, 1, 1 });
+        try self.main_ui.addTextField(.{
+            .x = 0.01 + 0.04 + (tf_w + tf_padding) * 2,
+            .y = tf_y + padding + (button_h + padding) * 3,
+            .width = tf_w,
+            .height = tf_h,
+        }, "Z:", &self.line_z_buf, .{ 0.1, 0.1, 0.1, 1 }, .{ 1, 1, 1, 1 });
 
         try self.main_ui.addPlainText(.{
             .x = padding,
-            .y = padding + (button_h + padding) * 3, // Below all buttons
+            .y = padding + (button_h + padding) * 4, // Below all buttons
             .width = button_w,
             .height = button_h,
-        }, "            ", .{ 0, 0, 0, 0 }, .{ 1, 1, 0, 1 }); // Transparent background
+        }, "this string will be overwriten " ** 8, .{ 0, 0, 1, 1 }, .{ 1, 1, 0, 1 }, 8); // Transparent background
     }
 
     pub fn init3dText(self: *Self) !void {
@@ -1712,9 +1796,9 @@ pub const App = struct {
         const axis = self.scene.axis;
 
         // Axis labels (placed at the tip)
-        try text_scene.addBillboardText("X", axis[1].pos, .{ 1, 0, 0, 1 }, 1.45);
-        try text_scene.addBillboardText("Y", axis[3].pos, .{ 0, 1, 0, 1 }, 1.45);
-        try text_scene.addBillboardText("Z", axis[5].pos, .{ 0, 0, 1, 1 }, 1.45);
+        try text_scene.addBillboardText("X", axis[1].coor, .{ 1, 0, 0, 1 }, 1.45);
+        try text_scene.addBillboardText("Y", axis[3].coor, .{ 0, 1, 0, 1 }, 1.45);
+        try text_scene.addBillboardText("Z", axis[5].coor, .{ 0, 0, 1, 1 }, 1.45);
 
         // Grid labels at integer positions
         const res = self.scene.grid.len / 8;
@@ -1726,15 +1810,14 @@ pub const App = struct {
             const f = @as(f32, @floatFromInt(i));
 
             // Skip zero to avoid cluttering center
-            if (i != 0) {
-                var buf_x: [16]u8 = undefined;
-                const str_x = try std.fmt.bufPrint(&buf_x, "{}", .{i});
-                try text_scene.addBillboardText(str_x, .{ f, 0.0, 0.0 }, .{ 1, 0.2, 0.2, 1 }, 0.8);
+            if (i == 0) continue;
+            var buf_x: [16]u8 = undefined;
+            const str_x = try std.fmt.bufPrint(&buf_x, "{}", .{i});
+            try text_scene.addBillboardText(str_x, .{ f, 0.0, 0.0 }, .{ 1, 0.2, 0.2, 1 }, 0.8);
 
-                var buf_y: [16]u8 = undefined;
-                const str_y = try std.fmt.bufPrint(&buf_y, "{}", .{i});
-                try text_scene.addBillboardText(str_y, .{ 0.0, f, 0.0 }, .{ 0.2, 1, 0.2, 1 }, 0.8);
-            }
+            var buf_y: [16]u8 = undefined;
+            const str_y = try std.fmt.bufPrint(&buf_y, "{}", .{i});
+            try text_scene.addBillboardText(str_y, .{ 0.0, f, 0.0 }, .{ 0.2, 1, 0.2, 1 }, 0.8);
         }
 
         // Label center
@@ -1745,6 +1828,7 @@ pub const App = struct {
         // Wait for device to be idle before cleaning up
         _ = c.vkDeviceWaitIdle(self.vk_ctx.device.handle);
 
+        self.perf.deinit();
         self.main_ui.deinit();
         self.text_scene.deinit();
         self.gui_renderer.deinit();
@@ -1781,20 +1865,27 @@ pub const App = struct {
         self.perf.setPtr(self.main_ui.widgets.getLast().data.plain_text.text); //TODO: change this hack
         while (c.glfwWindowShouldClose(self.window.handle) == 0) {
             self.perf.beginFrame();
-            self.gui_renderer.beginFrame();
-            self.text_renderer.beginFrame();
             self.wd_ctx.beginFrame();
 
             c.glfwPollEvents();
-
-            if (self.wd_ctx.processCameraInput(&self.scene, &self.text_scene)) {
-                try self.updateUniformBuffer();
-            }
 
             if (self.window.minimized()) {
                 c.glfwWaitEvents();
                 continue;
             }
+
+            self.perf.beginScope("GUI");
+            self.gui_renderer.beginFrame();
+            // Check if
+            if (self.gui_renderer.processAndDrawUi(&self.main_ui, self, self.window.size.x, self.window.size.y) or
+                self.wd_ctx.processCameraInput(&self.scene, &self.text_scene))
+            {
+                try self.updateUniformBuffer();
+            }
+            self.perf.endScope("GUI");
+
+            self.perf.beginScope("Text");
+            self.text_renderer.beginFrame();
 
             // Example 1: Static text (original)
             const transform1 = scene.Transform.new(.{ .position = .{ -5, 5, 0 } }).toMatrix();
@@ -1855,12 +1946,14 @@ pub const App = struct {
                 .rotation = scene.Quat.fromAxisAngle(.{ 0, 1, 0 }, 0.5),
             }).toMatrix();
             self.text_renderer.drawText("Sine Wave Motion!", wave_transform, .{ 1.0, 1.0, 0.0, 1.0 }, 0.7);
-            self.gui_renderer.processAndDrawUi(&self.main_ui, self, self.window.size.x, self.window.size.y);
             self.text_renderer.processAndDrawTextScene(&self.text_scene);
+            self.perf.endScope("Text");
 
-            self.perf.endFrame();
-
+            // This measures the time it takes to build and submit command buffers and present the frame.
+            self.perf.beginScope("Draw");
             try self.draw();
+            self.perf.endScope("Draw");
+            self.perf.endFrame();
         }
     }
 

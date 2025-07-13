@@ -129,40 +129,40 @@ pub const Transform = struct {
     }
 };
 pub const V3 = extern struct {
-    pos: @Vector(3, f32),
+    coor: @Vector(3, f32),
     offset: @Vector(3, f32) = .{ 0, 0, 0 }, // This is an optional offset vector, can be used for transformations.
     color: @Vector(4, f32) = .{ 1, 1, 1, 1 }, // Default color is white.
 
     pub fn add(a: V3, b: V3) V3 {
         return .{
-            .pos = a.pos + b.pos,
+            .coor = a.coor + b.coor,
         };
     }
 
     pub fn subtract(a: V3, b: V3) V3 {
         return .{
-            .pos = a.pos - b.pos,
+            .coor = a.coor - b.coor,
         };
     }
 
     pub fn dot(a: V3, b: V3) f32 {
-        return a.pos[0] * b.pos[0] + a.pos[1] * b.pos[1] + a.pos[2] * b.pos[2];
+        return a.coor[0] * b.coor[0] + a.coor[1] * b.coor[1] + a.coor[2] * b.coor[2];
     }
 
     pub fn cross(a: V3, b: V3) V3 {
-        return .{ .pos = .{
-            a.pos[1] * b.pos[2] - a.pos[2] * b.pos[1],
-            a.pos[2] * b.pos[0] - a.pos[0] * b.pos[2],
-            a.pos[0] * b.pos[1] - a.pos[1] * b.pos[0],
+        return .{ .coor = .{
+            a.coor[1] * b.coor[2] - a.coor[2] * b.coor[1],
+            a.coor[2] * b.coor[0] - a.coor[0] * b.coor[2],
+            a.coor[0] * b.coor[1] - a.coor[1] * b.coor[0],
         } };
     }
 
     pub fn normalize(v: V3) V3 {
         const l = [_]f32{std.math.sqrt(
-            v.pos[0] * v.pos[0] + v.pos[1] * v.pos[1] + v.pos[2] * v.pos[2],
+            v.coor[0] * v.coor[0] + v.coor[1] * v.coor[1] + v.coor[2] * v.coor[2],
         )} ** 3;
         return .{
-            .pos = v.pos / l,
+            .coor = v.coor / l,
         };
     }
 };
@@ -185,7 +185,7 @@ pub const Scene = struct {
             .axis = createAxis(resolution),
             .grid = try createGrid(allocator, resolution),
             .lines = std.ArrayList(V3).init(allocator),
-            .camera = Camera.init(.{ .pos = .{ res_float, res_float, res_float } }, 20.0),
+            .camera = Camera.init(.{ .coor = .{ res_float, res_float, res_float } }, 20.0),
         };
     }
 
@@ -207,9 +207,9 @@ pub const Scene = struct {
     fn createAxis(resolution: u32) [6]V3 {
         const r: f32 = @floatFromInt(resolution);
         return .{
-            .{ .pos = .{ -r, 0.0, 0.0 }, .color = .{ 1.0, 0.0, 0.0, 1.0 } }, .{ .pos = .{ r, 0.0, 0.0 }, .color = .{ 1.0, 0.0, 0.0, 1.0 } },
-            .{ .pos = .{ 0.0, -r, 0.0 }, .color = .{ 0.0, 1.0, 0.0, 1.0 } }, .{ .pos = .{ 0.0, r, 0.0 }, .color = .{ 0.0, 1.0, 0.0, 1.0 } },
-            .{ .pos = .{ 0.0, 0.0, -r }, .color = .{ 0.0, 0.0, 1.0, 1.0 } }, .{ .pos = .{ 0.0, 0.0, r }, .color = .{ 0.0, 0.0, 1.0, 1.0 } },
+            .{ .coor = .{ -r, 0.0, 0.0 }, .color = .{ 1.0, 0.0, 0.0, 1.0 } }, .{ .coor = .{ r, 0.0, 0.0 }, .color = .{ 1.0, 0.0, 0.0, 1.0 } },
+            .{ .coor = .{ 0.0, -r, 0.0 }, .color = .{ 0.0, 1.0, 0.0, 1.0 } }, .{ .coor = .{ 0.0, r, 0.0 }, .color = .{ 0.0, 1.0, 0.0, 1.0 } },
+            .{ .coor = .{ 0.0, 0.0, -r }, .color = .{ 0.0, 0.0, 1.0, 1.0 } }, .{ .coor = .{ 0.0, 0.0, r }, .color = .{ 0.0, 0.0, 1.0, 1.0 } },
         };
     }
 
@@ -223,18 +223,18 @@ pub const Scene = struct {
         while (i < upperLimit) : (i += 1) {
             const idx: f32 = @as(f32, @floatFromInt(i));
             const index = @as(usize, @intCast((i + j) * 4));
-            grid[index] = V3{ .pos = .{ idx, fixed, 0.0 }, .color = .{ 0.2, 0.2, 0.2, 1.0 } };
-            grid[index + 1] = V3{ .pos = .{ idx, -fixed, 0.0 }, .color = .{ 0.2, 0.2, 0.2, 1.0 } };
-            grid[index + 2] = V3{ .pos = .{ fixed, idx, 0.0 }, .color = .{ 0.2, 0.2, 0.2, 1.0 } };
-            grid[index + 3] = V3{ .pos = .{ -fixed, idx, 0.0 }, .color = .{ 0.2, 0.2, 0.2, 1.0 } };
+            grid[index] = V3{ .coor = .{ idx, fixed, 0.0 }, .color = .{ 0.2, 0.2, 0.2, 1.0 } };
+            grid[index + 1] = V3{ .coor = .{ idx, -fixed, 0.0 }, .color = .{ 0.2, 0.2, 0.2, 1.0 } };
+            grid[index + 2] = V3{ .coor = .{ fixed, idx, 0.0 }, .color = .{ 0.2, 0.2, 0.2, 1.0 } };
+            grid[index + 3] = V3{ .coor = .{ -fixed, idx, 0.0 }, .color = .{ 0.2, 0.2, 0.2, 1.0 } };
         }
 
         return grid;
     }
 
     pub fn addLine(self: *Self, start: [3]f32, end: [3]f32) !void {
-        try self.lines.append(.{ .pos = start, .color = .{ 1.0, 0.0, 1.0, 1.0 } });
-        try self.lines.append(.{ .pos = end, .color = .{ 1.0, 0.0, 1.0, 1.0 } });
+        try self.lines.append(.{ .coor = start, .color = .{ 1.0, 0.0, 1.0, 1.0 } });
+        try self.lines.append(.{ .coor = end, .color = .{ 1.0, 0.0, 1.0, 1.0 } });
     }
 
     pub fn getTotalVertexCount(self: Self) usize {
@@ -246,8 +246,8 @@ const Camera = struct {
     const Self = @This();
 
     pos: V3,
-    target: V3 = .{ .pos = .{ 0, 0, 0 } },
-    up: V3 = .{ .pos = .{ 0, 0, 1 } },
+    target: V3 = .{ .coor = .{ 0, 0, 0 } },
+    up: V3 = .{ .coor = .{ 0, 0, 1 } },
     pitch: f32 = 0.5,
     yaw: f32 = 0.2,
     fov_degrees: f32 = 75.0,
@@ -260,14 +260,14 @@ const Camera = struct {
         // Small value intended to clip the camera lines
         const half_edge_len = 0.05;
         const cube: [8]V3 = .{
-            .{ .pos = .{ pos.pos[0] - half_edge_len, pos.pos[1] - half_edge_len, pos.pos[2] - half_edge_len } },
-            .{ .pos = .{ pos.pos[0] - half_edge_len, pos.pos[1] - half_edge_len, pos.pos[2] + half_edge_len } },
-            .{ .pos = .{ pos.pos[0] + half_edge_len, pos.pos[1] - half_edge_len, pos.pos[2] + half_edge_len } },
-            .{ .pos = .{ pos.pos[0] + half_edge_len, pos.pos[1] - half_edge_len, pos.pos[2] - half_edge_len } },
-            .{ .pos = .{ pos.pos[0] - half_edge_len, pos.pos[1] + half_edge_len, pos.pos[2] - half_edge_len } },
-            .{ .pos = .{ pos.pos[0] - half_edge_len, pos.pos[1] + half_edge_len, pos.pos[2] + half_edge_len } },
-            .{ .pos = .{ pos.pos[0] + half_edge_len, pos.pos[1] + half_edge_len, pos.pos[2] + half_edge_len } },
-            .{ .pos = .{ pos.pos[0] + half_edge_len, pos.pos[1] + half_edge_len, pos.pos[2] - half_edge_len } },
+            .{ .coor = .{ pos.coor[0] - half_edge_len, pos.coor[1] - half_edge_len, pos.coor[2] - half_edge_len } },
+            .{ .coor = .{ pos.coor[0] - half_edge_len, pos.coor[1] - half_edge_len, pos.coor[2] + half_edge_len } },
+            .{ .coor = .{ pos.coor[0] + half_edge_len, pos.coor[1] - half_edge_len, pos.coor[2] + half_edge_len } },
+            .{ .coor = .{ pos.coor[0] + half_edge_len, pos.coor[1] - half_edge_len, pos.coor[2] - half_edge_len } },
+            .{ .coor = .{ pos.coor[0] - half_edge_len, pos.coor[1] + half_edge_len, pos.coor[2] - half_edge_len } },
+            .{ .coor = .{ pos.coor[0] - half_edge_len, pos.coor[1] + half_edge_len, pos.coor[2] + half_edge_len } },
+            .{ .coor = .{ pos.coor[0] + half_edge_len, pos.coor[1] + half_edge_len, pos.coor[2] + half_edge_len } },
+            .{ .coor = .{ pos.coor[0] + half_edge_len, pos.coor[1] + half_edge_len, pos.coor[2] - half_edge_len } },
         };
         return .{
             .pos = pos,
@@ -299,7 +299,7 @@ const Camera = struct {
 
     pub fn view(self: *Self) [16]f32 {
         if (self.radius) |r| {
-            self.pos = .{ .pos = .{
+            self.pos = .{ .coor = .{
                 r * @cos(self.yaw) * @cos(self.pitch),
                 r * @sin(self.yaw) * @cos(self.pitch),
                 r * @sin(self.pitch),
@@ -307,7 +307,7 @@ const Camera = struct {
         } else {
             self.target = V3.add(
                 self.pos,
-                .{ .pos = .{
+                .{ .coor = .{
                     @cos(-self.yaw) * @cos(self.pitch),
                     @sin(-self.yaw) * @cos(self.pitch),
                     @sin(self.pitch),
@@ -319,9 +319,9 @@ const Camera = struct {
         const y_axis = V3.cross(z_axis, x_axis);
 
         return .{
-            x_axis.pos[0],             y_axis.pos[0],             z_axis.pos[0],             0.0,
-            x_axis.pos[1],             y_axis.pos[1],             z_axis.pos[1],             0.0,
-            x_axis.pos[2],             y_axis.pos[2],             z_axis.pos[2],             0.0,
+            x_axis.coor[0],            y_axis.coor[0],            z_axis.coor[0],            0.0,
+            x_axis.coor[1],            y_axis.coor[1],            z_axis.coor[1],            0.0,
+            x_axis.coor[2],            y_axis.coor[2],            z_axis.coor[2],            0.0,
             -V3.dot(x_axis, self.pos), -V3.dot(y_axis, self.pos), -V3.dot(z_axis, self.pos), 1.0,
         };
     }
