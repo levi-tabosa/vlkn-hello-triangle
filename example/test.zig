@@ -112,9 +112,7 @@ const Callbacks = struct {
         app.gui_renderer.handleKey(key, action, &app.main_ui);
 
         // You can still have app-level keybinds here, just make sure they don't conflict.
-        if (key == c.GLFW_KEY_G and action == c.GLFW_PRESS) {
-            // Example: Change grid resolution with 'G' key now
-        }
+        if (key == c.GLFW_KEY_G and action == c.GLFW_PRESS) {}
     }
 
     fn cbFramebufferResize(wd: ?*c.GLFWwindow, width: c_int, height: c_int) callconv(.C) void {
@@ -187,9 +185,14 @@ fn quitCallback(ptr: *anyopaque) void {
     c.glfwSetWindowShouldClose(app.window.handle, 1);
 }
 
+fn toggleCameraModeCallback(ptr: *anyopaque) void {
+    const app: *App = @alignCast(@ptrCast(ptr));
+    std.log.info("Button clicked: Toggling camera mode.", .{});
+    app.scene.camera.toggleMode();
+}
+
 fn fovSliderCallback(ptr: *anyopaque, new_value: f32) void {
     const app: *App = @alignCast(@ptrCast(ptr));
-    // You would access and update some state of 'app' here, based on the new value.
     const min: f32 = 5.0;
     const max: f32 = 180;
 
@@ -198,38 +201,22 @@ fn fovSliderCallback(ptr: *anyopaque, new_value: f32) void {
 
 fn nearPlaneSliderCallback(ptr: *anyopaque, new_value: f32) void {
     const app: *App = @alignCast(@ptrCast(ptr));
-    // You would access and update some state of 'app' here, based on the new value.
     const min: f32 = 0.001;
     const max: f32 = 50.0;
 
     app.scene.camera.near_plane = min + (max - min) * new_value;
 }
 
-fn xCameraPosSliderCallback(ptr: *anyopaque, new_value: f32) void {
+fn setGridCallback(ptr: *anyopaque) void {
     const app: *App = @alignCast(@ptrCast(ptr));
-    // You would access and update some state of 'app' here, based on the new value.
-    const min: f32 = -40;
-    const max: f32 = 40;
-
-    app.scene.camera.pos.coor[0] += min + (max - min) * new_value;
-}
-
-fn yCameraPosSliderCallback(ptr: *anyopaque, new_value: f32) void {
-    const app: *App = @alignCast(@ptrCast(ptr));
-    // You would access and update some state of 'app' here, based on the new value.
-    const min: f32 = -40;
-    const max: f32 = 40;
-
-    app.scene.camera.pos.coor[1] += min + (max - min) * new_value;
-}
-
-fn zCameraPosSliderCallback(ptr: *anyopaque, new_value: f32) void {
-    const app: *App = @alignCast(@ptrCast(ptr));
-    // You would access and update some state of 'app' here, based on the new value.
-    const min: f32 = -40;
-    const max: f32 = 40;
-
-    app.scene.camera.pos.coor[2] += min + (max - min) * new_value;
+    std.debug.print("{any}\n", .{app.grid_res_buff.buf});
+    app.scene.setGridResolution(
+        std.fmt.parseInt(u32, app.grid_res_buff.slice(), 10) catch blk: {
+            std.log.err("failed on parseInt", .{});
+            break :blk 10;
+        },
+    ) catch unreachable;
+    app.updateVertexBuffer() catch unreachable;
 }
 
 const Window = struct {
@@ -237,7 +224,6 @@ const Window = struct {
 
     handle: ?*c.GLFWwindow = undefined,
     size: struct {
-        const Self = @This();
         x: c_int,
         y: c_int,
     },
@@ -1642,6 +1628,7 @@ pub const App = struct {
     line_x_buf: gui.TextBuffer = .{},
     line_y_buf: gui.TextBuffer = .{},
     line_z_buf: gui.TextBuffer = .{},
+    grid_res_buff: gui.TextBuffer = .{},
 
     /// Caller owns memory
     pub fn init(allocator: Allocator) !*Self {
@@ -1657,12 +1644,10 @@ pub const App = struct {
             .wd_ctx = .{},
             .scene = try Scene.init(allocator, 20),
             .main_ui = gui.UI.init(allocator),
-            .text_scene = text.Text3DScene.init(allocator),
+            .text_scene = try text.Text3DScene.init(allocator, 20),
             .perf = fps_tracker.PerformanceTracker.init(allocator),
         };
         try app.initUi();
-        try app.init3dText();
-
         try app.initVulkanResources();
 
         c.glfwSetWindowUserPointer(app.window.handle, app);
@@ -1719,9 +1704,14 @@ pub const App = struct {
         // A standard button height, e.g., 6% of the window height
         const button_h: f32 = 0.06;
         // A standard button width
-        const button_w: f32 = 0.15;
+        const button_w: f32 = 0.2;
         // Padding between buttons
         const padding: f32 = 0.01;
+
+        const tf_h: f32 = 0.05;
+        const tf_w: f32 = 0.08;
+        const tf_y: f32 = 0.25; // Y position for all text fields
+        const tf_padding: f32 = 0.01;
 
         try self.main_ui.addButton(.{
             .x = padding,
@@ -1744,6 +1734,22 @@ pub const App = struct {
             .height = button_h,
         }, "Quit", .{ 0.8, 0.2, 0.2, 1 }, .{ 1, 1, 1, 1 }, 12, quitCallback);
 
+        // Add the new button here
+        try self.main_ui.addButton(.{
+            .x = padding,
+            .y = padding + (button_h + padding) * 3, // Position below the Quit button
+            .width = button_w,
+            .height = button_h,
+        }, "Toggle Camera", .{ 0.2, 0.8, 0.2, 1 }, .{ 1, 1, 1, 1 }, 12, toggleCameraModeCallback);
+
+        // Adjust the Y position of the widgets that were below the old slider
+        try self.main_ui.addButton(.{
+            .x = padding + tf_w + 0.062,
+            .y = padding + (button_h + padding) * 4, // MOVED DOWN
+            .width = button_w / 4,
+            .height = tf_h,
+        }, "Set", .{ 0.8, 0.2, 0.2, 1 }, .{ 1, 1, 1, 1 }, 12, setGridCallback);
+
         try self.main_ui.addSlider(.{
             .x = 0.8 - padding, // Top-right
             .y = 0.05 - padding,
@@ -1758,70 +1764,39 @@ pub const App = struct {
             .height = 0.02,
         }, 0.0, 1.0, 0.5, .{ 0.4, 0.4, 0.4, 1 }, .{ 0.8, 0.8, 0.8, 1 }, nearPlaneSliderCallback);
 
-        const tf_h: f32 = 0.05;
-        const tf_w: f32 = 0.08;
-        const tf_y: f32 = 0.25; // Y position for all text fields
-        const tf_padding: f32 = 0.01;
-
-        // We pass a pointer to the App's buffer: &self.line_x_buf
+        // Adjust the Y position of the text fields
         try self.main_ui.addTextField(.{
-            .x = 0.01 + 0.04,
-            .y = tf_y + padding + (button_h + padding) * 3,
+            .x = tf_padding + 0.04,
+            .y = 1.0 - tf_y + padding + (button_h + padding),
             .width = tf_w,
             .height = tf_h,
         }, "X:", &self.line_x_buf, .{ 0.1, 0.1, 0.1, 1 }, .{ 1, 1, 1, 1 });
         try self.main_ui.addTextField(.{
-            .x = 0.01 + 0.04 + (tf_w + tf_padding),
-            .y = tf_y + padding + (button_h + padding) * 3,
+            .x = tf_padding + 0.04 + (tf_w + tf_padding),
+            .y = 1.0 - tf_y + padding + (button_h + padding),
             .width = tf_w,
             .height = tf_h,
         }, "Y:", &self.line_y_buf, .{ 0.1, 0.1, 0.1, 1 }, .{ 1, 1, 1, 1 });
         try self.main_ui.addTextField(.{
-            .x = 0.01 + 0.04 + (tf_w + tf_padding) * 2,
-            .y = tf_y + padding + (button_h + padding) * 3,
+            .x = tf_padding + 0.04 + (tf_w + tf_padding) * 2,
+            .y = 1.0 - tf_y + padding + (button_h + padding),
             .width = tf_w,
             .height = tf_h,
         }, "Z:", &self.line_z_buf, .{ 0.1, 0.1, 0.1, 1 }, .{ 1, 1, 1, 1 });
+        // Grid resolution field
+        try self.main_ui.addTextField(.{
+            .x = tf_padding + 0.06,
+            .y = tf_padding + (button_h + tf_padding) * 4,
+            .width = tf_w,
+            .height = tf_h,
+        }, "grid:", &self.grid_res_buff, .{ 0.1, 0.1, 0.1, 1 }, .{ 1, 1, 1, 1 });
 
         try self.main_ui.addPlainText(.{
             .x = padding,
-            .y = padding + (button_h + padding) * 4, // Below all buttons
+            .y = padding + (button_h + padding) * 5,
             .width = button_w,
             .height = button_h,
         }, "this string will be overwriten " ** 8, .{ 0, 0, 1, 1 }, .{ 1, 1, 0, 1 }, 8); // Transparent background
-    }
-
-    pub fn init3dText(self: *Self) !void {
-        const text_scene = &self.text_scene;
-        const axis = self.scene.axis;
-
-        // Axis labels (placed at the tip)
-        try text_scene.addBillboardText("X", axis[1].coor, .{ 1, 0, 0, 1 }, 1.45);
-        try text_scene.addBillboardText("Y", axis[3].coor, .{ 0, 1, 0, 1 }, 1.45);
-        try text_scene.addBillboardText("Z", axis[5].coor, .{ 0, 0, 1, 1 }, 1.45);
-
-        // Grid labels at integer positions
-        const res = self.scene.grid.len / 8;
-        const half: i32 = @intCast(res);
-        // const fixed: f32 = @floatFromInt(half);
-
-        var i: i32 = -half;
-        while (i <= half) : (i += 1) {
-            const f = @as(f32, @floatFromInt(i));
-
-            // Skip zero to avoid cluttering center
-            if (i == 0) continue;
-            var buf_x: [16]u8 = undefined;
-            const str_x = try std.fmt.bufPrint(&buf_x, "{}", .{i});
-            try text_scene.addBillboardText(str_x, .{ f, 0.0, 0.0 }, .{ 1, 0.2, 0.2, 1 }, 0.8);
-
-            var buf_y: [16]u8 = undefined;
-            const str_y = try std.fmt.bufPrint(&buf_y, "{}", .{i});
-            try text_scene.addBillboardText(str_y, .{ 0.0, f, 0.0 }, .{ 0.2, 1, 0.2, 1 }, 0.8);
-        }
-
-        // Label center
-        try text_scene.addBillboardText("0", .{ 0.0, 0.0, 0.0 }, .{ 1, 1, 1, 1 }, 0.8);
     }
 
     pub fn deinit(self: *Self) void {
@@ -1887,65 +1862,6 @@ pub const App = struct {
             self.perf.beginScope("Text");
             self.text_renderer.beginFrame();
 
-            // Example 1: Static text (original)
-            const transform1 = scene.Transform.new(.{ .position = .{ -5, 5, 0 } }).toMatrix();
-            self.text_renderer.drawText("Hello 3D World!", transform1, .{ 1.0, 0.8, 0.2, 1.0 }, 1.0);
-
-            // Example 2: Text rotating around the Z axis (original)
-            const time = @as(f32, @floatFromInt(@mod(std.time.milliTimestamp(), 10000))) / 1000.0;
-            const transform2 = scene.Transform.new(.{
-                .position = .{ 0, 0, -5 },
-                .rotation = scene.Quat.fromAxisAngle(.{ 0, 0, 1 }, time * 0.5),
-            }).toMatrix();
-            self.text_renderer.drawText(
-                \\ABCDEFGHIJKLMNOPQRSTUVWXYZ
-                \\1234567890 !@#$%^&*()_+-=
-            ,
-                transform2,
-                .{ 0.2, 1.0, 0.8, 1.0 },
-                1.0,
-            );
-
-            // Example 3: Tumbling text, rotating on multiple axes
-            const rot_x = scene.Quat.fromAxisAngle(.{ 1, 0, 0 }, time * 0.3);
-            const rot_y = scene.Quat.fromAxisAngle(.{ 0, 1, 0 }, time * 0.5);
-            const tumbling_transform = scene.Transform.new(.{
-                .position = .{ 7, 3, -4 },
-                .rotation = rot_x.mul(rot_y), // Combine rotations
-            }).toMatrix();
-            self.text_renderer.drawText("Tumbling Test 123", tumbling_transform, .{ 1.0, 0.3, 0.3, 1.0 }, 1.5);
-
-            // Example 4: Text orbiting in a circle on the XZ plane
-            const orbit_radius: f32 = 8.0;
-            const orbit_transform = scene.Transform.new(.{
-                .position = .{
-                    orbit_radius * @cos(time * 0.8),
-                    2.0, // Fixed height
-                    orbit_radius * @sin(time * 0.8),
-                },
-                // Make it "roll" along the orbit path by rotating on its own Y axis
-                .rotation = scene.Quat.fromAxisAngle(.{ 0, 1, 0 }, -time),
-            }).toMatrix();
-            self.text_renderer.drawText(
-                \\The quick brown fox
-                \\jumps over the lazy dog.
-            ,
-                orbit_transform,
-                .{ 0.5, 0.5, 1.0, 1.0 },
-                0.8,
-            );
-
-            // Example 5: Text moving up and down on a sine wave
-            const wave_transform = scene.Transform.new(.{
-                .position = .{
-                    -10.0,
-                    @sin(time * 2.0) * 3.0, // Moves up and down
-                    -6.0,
-                },
-                // Make it face the camera a bit
-                .rotation = scene.Quat.fromAxisAngle(.{ 0, 1, 0 }, 0.5),
-            }).toMatrix();
-            self.text_renderer.drawText("Sine Wave Motion!", wave_transform, .{ 1.0, 1.0, 0.0, 1.0 }, 0.7);
             self.text_renderer.processAndDrawTextScene(&self.text_scene);
             self.perf.endScope("Text");
 

@@ -157,10 +157,14 @@ pub const V3 = extern struct {
         } };
     }
 
-    pub fn normalize(v: V3) V3 {
-        const l = [_]f32{std.math.sqrt(
+    pub fn len(v: V3) f32 {
+        return std.math.sqrt(
             v.coor[0] * v.coor[0] + v.coor[1] * v.coor[1] + v.coor[2] * v.coor[2],
-        )} ** 3;
+        );
+    }
+
+    pub fn normalize(v: V3) V3 {
+        const l = [_]f32{v.len()} ** 3;
         return .{
             .coor = v.coor / l,
         };
@@ -178,14 +182,12 @@ pub const Scene = struct {
     lines: std.ArrayList(V3),
 
     pub fn init(allocator: std.mem.Allocator, resolution: u32) !Self {
-        const res_float: f32 = @floatFromInt(resolution / 2);
-
         return .{
             .allocator = allocator,
             .axis = createAxis(resolution),
             .grid = try createGrid(allocator, resolution),
             .lines = std.ArrayList(V3).init(allocator),
-            .camera = Camera.init(.{ .coor = .{ res_float, res_float, res_float } }, 20.0),
+            .camera = Camera.init(20.0),
         };
     }
 
@@ -245,35 +247,65 @@ pub const Scene = struct {
 const Camera = struct {
     const Self = @This();
 
+    pub const Mode = enum { orbit, fps };
+
     pos: V3,
     target: V3 = .{ .coor = .{ 0, 0, 0 } },
-    up: V3 = .{ .coor = .{ 0, 0, 1 } },
+    up: V3 = .{ .coor = .{ 0, 0, 1 } }, // Z is up
     pitch: f32 = 0.5,
     yaw: f32 = 0.2,
     fov_degrees: f32 = 75.0,
     near_plane: f32 = 0.1,
-    radius: ?f32 = null,
+    mode: Mode = .orbit,
+    radius: f32 = 20.0,
     shape: [8]V3,
 
-    pub fn init(pos: V3, radius: ?f32) Self {
+    pub fn init(radius: f32) Self {
         // This value is set based on the near value of the perspective matrix
         // Small value intended to clip the camera lines
-        const half_edge_len = 0.05;
+        const half_edge = 0.05;
+        const dummy = V3{ .coor = .{ 0, 0, 0 } };
         const cube: [8]V3 = .{
-            .{ .coor = .{ pos.coor[0] - half_edge_len, pos.coor[1] - half_edge_len, pos.coor[2] - half_edge_len } },
-            .{ .coor = .{ pos.coor[0] - half_edge_len, pos.coor[1] - half_edge_len, pos.coor[2] + half_edge_len } },
-            .{ .coor = .{ pos.coor[0] + half_edge_len, pos.coor[1] - half_edge_len, pos.coor[2] + half_edge_len } },
-            .{ .coor = .{ pos.coor[0] + half_edge_len, pos.coor[1] - half_edge_len, pos.coor[2] - half_edge_len } },
-            .{ .coor = .{ pos.coor[0] - half_edge_len, pos.coor[1] + half_edge_len, pos.coor[2] - half_edge_len } },
-            .{ .coor = .{ pos.coor[0] - half_edge_len, pos.coor[1] + half_edge_len, pos.coor[2] + half_edge_len } },
-            .{ .coor = .{ pos.coor[0] + half_edge_len, pos.coor[1] + half_edge_len, pos.coor[2] + half_edge_len } },
-            .{ .coor = .{ pos.coor[0] + half_edge_len, pos.coor[1] + half_edge_len, pos.coor[2] - half_edge_len } },
+            .{ .coor = .{ dummy.coor[0] - half_edge, dummy.coor[1] - half_edge, dummy.coor[2] - half_edge } },
+            .{ .coor = .{ dummy.coor[0] - half_edge, dummy.coor[1] - half_edge, dummy.coor[2] + half_edge } },
+            .{ .coor = .{ dummy.coor[0] + half_edge, dummy.coor[1] - half_edge, dummy.coor[2] + half_edge } },
+            .{ .coor = .{ dummy.coor[0] + half_edge, dummy.coor[1] - half_edge, dummy.coor[2] - half_edge } },
+            .{ .coor = .{ dummy.coor[0] - half_edge, dummy.coor[1] + half_edge, dummy.coor[2] - half_edge } },
+            .{ .coor = .{ dummy.coor[0] - half_edge, dummy.coor[1] + half_edge, dummy.coor[2] + half_edge } },
+            .{ .coor = .{ dummy.coor[0] + half_edge, dummy.coor[1] + half_edge, dummy.coor[2] + half_edge } },
+            .{ .coor = .{ dummy.coor[0] + half_edge, dummy.coor[1] + half_edge, dummy.coor[2] - half_edge } },
         };
         return .{
-            .pos = pos,
-            .radius = std.math.clamp(radius.?, 5.0, 100.0),
+            .pos = dummy,
+            .radius = radius,
             .shape = cube,
         };
+    }
+
+    pub fn toggleMode(self: *Self) void {
+        switch (self.mode) {
+            .orbit => {
+                // Switching from Orbit to FPS. The current 'pos' from the last view
+                // call is a perfect starting point for FPS mode.
+                self.mode = .fps;
+            },
+            .fps => {
+                // Switching from FPS to Orbit. We need to calculate the spherical
+                // coordinates (radius, pitch, yaw) from the camera's current
+                // cartesian position to ensure a seamless transition.
+                self.radius = self.pos.len();
+                // Avoid division by zero if camera is at the origin
+                if (self.radius < 0.001) {
+                    self.radius = 20.0; // Reset to a default radius
+                    self.pitch = 0.5;
+                    self.yaw = 0.2;
+                } else {
+                    self.pitch = std.math.asin(self.pos.coor[2] / self.radius);
+                    self.yaw = std.math.atan2(self.pos.coor[1], self.pos.coor[0]);
+                }
+                self.mode = .orbit;
+            },
+        }
     }
 
     pub fn adjustPitchYaw(self: *Self, pitch_delta: f32, yaw_delta: f32) void {
@@ -291,29 +323,41 @@ const Camera = struct {
     }
 
     pub fn adjustRadius(self: *Self, radius_delta: f32) void {
-        if (self.radius) |*r| {
-            r.* += radius_delta;
-            r.* = math.clamp(r.*, 5.0, 100000.0);
+        if (self.mode == .orbit) {
+            self.radius += radius_delta;
+            self.radius = math.clamp(self.radius, 5.0, 100000.0);
         }
     }
 
     pub fn view(self: *Self) [16]f32 {
-        if (self.radius) |r| {
-            self.pos = .{ .coor = .{
-                r * @cos(self.yaw) * @cos(self.pitch),
-                r * @sin(self.yaw) * @cos(self.pitch),
-                r * @sin(self.pitch),
-            } };
-        } else {
-            self.target = V3.add(
-                self.pos,
-                .{ .coor = .{
-                    @cos(-self.yaw) * @cos(self.pitch),
-                    @sin(-self.yaw) * @cos(self.pitch),
-                    @sin(self.pitch),
-                } },
-            );
+        switch (self.mode) {
+            .orbit => {
+                // In orbit mode, calculate position from spherical coordinates.
+                // The target is always the origin.
+                self.pos = .{ .coor = .{
+                    self.radius * @cos(self.yaw) * @cos(self.pitch),
+                    self.radius * @sin(self.yaw) * @cos(self.pitch),
+                    self.radius * @sin(self.pitch),
+                } };
+                self.target = .{ .coor = .{ 0, 0, 0 } };
+            },
+            .fps => {
+                // In FPS mode, 'pos' is the authority. Calculate a 'target'
+                // point in front of it based on the current orientation.
+                self.target = V3.add(
+                    self.pos,
+                    .{
+                        .coor = .{
+                            @cos(-self.yaw) * @cos(self.pitch),
+                            @sin(-self.yaw) * @cos(self.pitch),
+                            -@sin(self.pitch), // Correct up-down axis by inverting the Z
+                        },
+                    },
+                );
+            },
         }
+
+        // LookAt logic
         const z_axis = V3.normalize(V3.subtract(self.pos, self.target));
         const x_axis = V3.normalize(V3.cross(self.up, z_axis));
         const y_axis = V3.cross(z_axis, x_axis);

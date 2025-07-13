@@ -578,7 +578,6 @@ pub const GuiRenderer = struct {
                 self.hot_id = id;
                 if (self.active_id == 0 and self.mouse_state.left_button_down) {
                     self.active_id = id;
-                    std.debug.print("aa", .{});
                     // If we click something that is NOT a text field, unfocus.
                     if (widget.data != .text_field) {
                         self.focused_id = 0;
@@ -609,7 +608,6 @@ pub const GuiRenderer = struct {
                     // Set active_id when mouse is pressed over the button
                     if (self.mouse_state.left_button_down and self.hot_id == id and self.active_id == 0) {
                         self.active_id = id;
-                        std.debug.print("bb", .{});
                     }
                     // Call on_click when mouse is released over the button
                     if (!self.mouse_state.left_button_down and self.active_id == id and self.hot_id == id) {

@@ -49,20 +49,73 @@ const DynamicText = struct {
 pub const Text3DScene = struct {
     const Self = @This();
 
-    list: std.ArrayList(DynamicText),
     string_pool: util.Pool([256]u8),
-    last_cam_matrix: [16]f32 = undefined,
+    list: std.ArrayList(DynamicText),
+    axis: [3]DynamicText = undefined,
+    labels: []DynamicText = undefined,
+    last_view_matrix: [16]f32 = undefined,
 
-    pub fn init(allocator: std.mem.Allocator) Self {
+    pub fn init(allocator: std.mem.Allocator, res: u32) !Self {
+        const list = std.ArrayList(DynamicText).init(allocator);
+        var string_pool = util.Pool([256]u8).init(allocator);
+        const buff = try string_pool.new();
+        const labels = try string_pool.arena.allocator().alloc(DynamicText, res * 4);
+
         return .{
-            .list = .init(allocator),
-            .string_pool = .init(allocator),
+            .string_pool = string_pool,
+            .list = list,
+            .axis = blk: {
+                @memcpy(buff[0..3], "XYZ");
+                break :blk .{
+                    .{
+                        .text = buff[0..1],
+                        .transform = .{ .billboard = .{ .position = .{ @floatFromInt(res), 0, 0 } } },
+                        .color = .{ 1, 0, 0, 1 },
+                        .font_size = 1.45,
+                    },
+                    .{
+                        .text = buff[1..2],
+                        .transform = .{ .billboard = .{ .position = .{ 0, @floatFromInt(res), 0 } } },
+                        .color = .{ 0, 1, 0, 1 },
+                        .font_size = 1.45,
+                    },
+                    .{
+                        .text = buff[2..3],
+                        .transform = .{ .billboard = .{ .position = .{ 0, 0, @floatFromInt(res) } } },
+                        .color = .{ 0, 0, 1, 1 },
+                        .font_size = 1.45,
+                    },
+                };
+            },
+            .labels = blk: {
+                var count: usize = 3;
+
+                for (0..res * 2) |i| {
+                    const n = @as(i32, @intCast(i)) - @as(i32, @intCast(res));
+                    const lbl = try std.fmt.bufPrint(buff[count..], "{d}", .{n});
+                    count += lbl.len;
+                    labels[i * 2] = .{
+                        .text = lbl,
+                        .transform = .{ .billboard = .{ .position = .{ @floatFromInt(n), 0, 0 } } },
+                        .color = .{ 1, 0, 0, 1 },
+                        .font_size = 0.8,
+                    };
+                    labels[i * 2 + 1] = .{
+                        .text = lbl,
+                        .transform = .{ .billboard = .{ .position = .{ 0, @floatFromInt(n), 0 } } },
+                        .color = .{ 0, 1, 0, 1 },
+                        .font_size = 0.8,
+                    };
+                }
+
+                break :blk labels;
+            },
         };
     }
 
     pub fn deinit(self: *Self) void {
-        self.string_pool.deinit();
         self.list.deinit();
+        self.string_pool.deinit();
     }
 
     pub fn addText(self: *Self, text: []const u8, modal: [16]f32, color: ?[4]f32, font_size: ?f32) !void {
@@ -81,9 +134,11 @@ pub const Text3DScene = struct {
         const t = (try self.string_pool.new())[0..text.len];
         @memcpy(t, text);
 
+        const billboard_visual_offset = @Vector(3, f32){ 0.1, 0.1, -0.1 };
+
         try self.list.append(.{
             .text = t,
-            .transform = .{ .billboard = .{ .position = position - @Vector(3, f32){ 0.1, 0.1, -0.1 } } },
+            .transform = .{ .billboard = .{ .position = position - billboard_visual_offset } },
             .color = color orelse .{ 0.5, 0.5, 0.5, 1.0 },
             .font_size = font_size orelse 1.0,
         });
@@ -98,7 +153,7 @@ pub const Text3DScene = struct {
 
     /// Takes a camera matrix to manage the billboard text
     pub fn updateCameraViewMatrix(self: *Self, matrix: [16]f32) void {
-        self.last_cam_matrix = matrix;
+        self.last_view_matrix = matrix;
     }
 };
 
@@ -184,8 +239,8 @@ pub const Text3DRenderer = struct {
             .font = gui.Font.init(vk_ctx.allocator),
         };
 
-        try self.font.loadFNT(font.notosanstc_variablefont_wght_fnt);
-        try self.createFontTextureAndSampler(vk_ctx.allocator, font.notosanstc_variablefont_wght_png);
+        try self.font.loadFNT(font.report_regular_fnt);
+        try self.createFontTextureAndSampler(vk_ctx.allocator, font.report_regular_png);
         self.font.scale_h = @as(f32, @floatFromInt(self.png_handle.height + 1));
         try self.createDescriptors();
         try self.createBuffers(vk_ctx);
@@ -491,10 +546,26 @@ pub const Text3DRenderer = struct {
     }
 
     pub fn processAndDrawTextScene(self: *Self, scene: *const Text3DScene) void {
+        for (scene.axis) |lbl| {
+            self.drawText(
+                lbl.text,
+                createBillboardMatrix(scene.last_view_matrix, lbl.transform.billboard.position, lbl.font_size),
+                lbl.color,
+                lbl.font_size,
+            );
+        }
+        for (scene.labels) |lbl| {
+            self.drawText(
+                lbl.text,
+                createBillboardMatrix(scene.last_view_matrix, lbl.transform.billboard.position, lbl.font_size),
+                lbl.color,
+                lbl.font_size,
+            );
+        }
         for (scene.list.items) |d_text| {
             const model_matrix = switch (d_text.transform) {
                 .static => |mat| mat,
-                .billboard => |b| createBillboardMatrix(scene.last_cam_matrix, b.position, d_text.font_size),
+                .billboard => |b| createBillboardMatrix(scene.last_view_matrix, b.position, d_text.font_size),
             };
 
             // Delegate the actual buffer population to a private helper.
@@ -527,9 +598,6 @@ pub const Text3DRenderer = struct {
         var current_y: f32 = 0;
 
         for (text) |char_code| {
-            if (char_code == 170) { //End of string
-                break;
-            }
             if (char_code == '\n') {
                 current_x = 0;
                 current_y += self.font.line_height;
@@ -571,7 +639,6 @@ pub const Text3DRenderer = struct {
 
             local_vertex_count += 4;
             local_index_count += 6;
-
             current_x += glyph.xadvance;
         }
 
