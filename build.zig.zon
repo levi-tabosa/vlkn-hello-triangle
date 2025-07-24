@@ -36,14 +36,19 @@
     // Once all dependencies are fetched, `zig build` no longer requires
     // internet connectivity.
     .dependencies = .{
-        // .vulkan = .{
-        //     .url = "",
-        //     .hash = "",
-        // },
-        // .glfw = .{
-        //     .url = "",
-        //     .hash = "",
-        // },
+        .glfw = .{
+            .url = "https://github.com/glfw/glfw/releases/download/3.4/glfw-3.4.zip",
+            .hash = "1220625fa7ce79733c6889844cb02ea1f6e4b81b46a3fabacec181714879947f4abd",
+        },
+        // We now fetch the official C headers directly from Khronos.
+        .vulkan_headers = .{
+            .url = "https://github.com/KhronosGroup/Vulkan-Headers/archive/refs/tags/v1.3.283.tar.gz",
+            .hash = "1220a7e73d72a0d56bc2a65f9d8999a7c019e42260a0744c408d1cded111bc205e10",
+        },
+        .glslc = .{
+            .url = "https://github.com/Games-by-Mason/shader_compiler/archive/refs/tags/v0.1.0.tar.gz",
+            .hash = "1220eca903ef543443f9b4a4402c03050c74e9d572ad0c2cd0414a65277138a7a55f",
+        },
         // See `zig fetch --save <url>` for a command-line interface for adding dependencies.
         //.example = .{
         //    // When updating this field to a new URL, be sure to delete the corresponding
