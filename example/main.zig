@@ -3,14 +3,10 @@
 const std = @import("std");
 const spirv = @import("spirv");
 const math = std.math;
-const c = @cImport({
-    @cInclude("vulkan/vulkan.h");
-    @cDefine("GLFW_INCLUDE_VULKAN", "");
-    @cInclude("GLFW/glfw3.h");
-});
+const c = @import("c").imports;
 
-const vert_shader_code = spirv.vs;
-const frag_shader_code = spirv.fs;
+const vert_shader_code = spirv.triangle_vert;
+const frag_shader_code = spirv.triangle_frag;
 
 const AppError = error{
     GlfwInitFailed,

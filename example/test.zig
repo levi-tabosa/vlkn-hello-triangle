@@ -8,13 +8,13 @@ const text = @import("text3d/text3d.zig");
 const fps_tracker = @import("fps_tracker/performance_tracker.zig");
 //TODO: remove
 const rand = std.Random;
-const c = @import("c").c;
+const c = @import("c").imports;
 
 const Allocator = std.mem.Allocator;
 
 // --- Shader Bytecode ---
-const vert_shader_bin = spirv.vs;
-const frag_shader_bin = spirv.fs;
+const vert_shader_bin = spirv.test_vert;
+const frag_shader_bin = spirv.test_frag;
 
 const Vertex = scene.V3;
 const Scene = scene.Scene;

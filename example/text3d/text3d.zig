@@ -1,14 +1,14 @@
 // text3d.zig
 const std = @import("std");
 const vk = @import("../test.zig");
-const c = @import("c").c;
+const c = @import("c").imports;
 //TODO: move font stuff to another file and import that
 const gui = @import("../gui/gui.zig");
 const font = @import("font");
 const util = @import("util");
 
-const text3d_vert_shader_bin = @import("spirv").text3d_vs;
-const text3d_frag_shader_bin = @import("spirv").text3d_fs;
+const text3d_vert_shader_bin = @import("spirv").text_vert;
+const text3d_frag_shader_bin = @import("spirv").text_frag;
 
 const Text3DVertex = extern struct {
     pos: [3]f32,

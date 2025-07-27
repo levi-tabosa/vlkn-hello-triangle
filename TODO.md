@@ -1,5 +1,16 @@
-liberar recursos apos uso em funçoes `create` decriptor e tal
-refactor
-dados de vertex dinamicos
-refatorar inicialização do UBO
-lib simple de gui com glfw de back-end
+Clear text field on given action
+ - make text field to update on backspace
+ - improve  
+Move camera with buttons/scroll while on FPS mode
+
+Implement faster UI than current "immediate"-UI
+
+Implement Mesh abstraction
+
+Custom assets (build systam that supports custom textures, models, fonts, etc.. (or even shaders for backgrounds or effects))
+
+Get fonts through fetch system (Google)
+
+Animated transforms
+ -
+

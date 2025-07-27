@@ -7,17 +7,13 @@ const Allocator = std.mem.Allocator;
 const spirv = @import("spirv");
 const scene = @import("geometry");
 const fonts = @import("font");
-const c = @cImport({
-    @cDefine("GLFW_INCLUDE_VULKAN", {});
-    @cInclude("vulkan/vulkan.h");
-    @cInclude("GLFW/glfw3.h");
-});
+const c = @import("c").imports;
 
 // --- Shader Bytecode ---
 // We embed the compiled SPIR-V files directly into the executable.
 // This makes distribution easier as we don't need to ship the .spv files.
-const vert_shader_code = spirv.vs;
-const frag_shader_code = spirv.fs;
+const vert_shader_code = spirv.example_vert;
+const frag_shader_code = spirv.example_frag;
 
 const Vertex = scene.V3;
 const Scene = scene.Scene;
@@ -75,7 +71,7 @@ pub fn getVertexAttributeDescriptions() [3]c.VkVertexInputAttributeDescription {
         .binding = 0,
         .location = 0,
         .format = c.VK_FORMAT_R32G32B32_SFLOAT,
-        .offset = @offsetOf(Vertex, "pos"),
+        .offset = @offsetOf(Vertex, "coor"),
     }, .{
         .binding = 0,
         .location = 1,
@@ -112,7 +108,7 @@ const Callbacks = struct {
         const yaw = ndc_x * std.math.pi; // X-axis maps to yaw
 
         app.updateUniformBuffer() catch unreachable;
-        app.scene.setPitchYaw(pitch, yaw);
+        app.scene.camera.adjustPitchYaw(pitch, yaw);
     }
 
     fn cbKey(wd: ?*c.GLFWwindow, char: c_int, code: c_int, btn: c_int, mods: c_int) callconv(.C) void {
@@ -1647,7 +1643,7 @@ const App = struct {
 
     fn updateUniformBuffer(self: *Self) !void {
         const ubo = UniformBufferObject{
-            .view_matrix = self.scene.view_matrix,
+            .view_matrix = self.scene.camera.view(),
             .perspective_matrix = blk: {
                 // FIX: This is the correct perspective matrix for Vulkan's coordinate system.
                 //TODO: Internalize this better, maybe use a function to generate it.

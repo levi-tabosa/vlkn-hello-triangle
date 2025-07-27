@@ -1,75 +1,79 @@
 const std = @import("std");
 
-// FIXED: This function now correctly uses `b.addRunArtifact`
-// In build.zig
-
-// In build.zig
-
+/// Compiles a GLSL shader to SPIR-V using shader-compiler targeting Vulkan-1.3
+/// Returns a install step that associate with the artifact.
 fn addShaderStep(
     b: *std.Build,
     glslc_exe: *std.Build.Step.Compile,
-    optimize: std.builtin.OptimizeMode, // Pass in the build mode
-    glsl_path: []const u8,
-    spv_path: []const u8,
-    install_path: []const u8,
-) !*std.Build.Step {
+    optimize: std.builtin.OptimizeMode,
+    source_path: []const u8,
+    // We need the final output name, e.g., "gui.vert.spv".
+    output_name: []const u8,
+) *std.Build.Step {
     const compile_step = b.addRunArtifact(glslc_exe);
 
-    // Add optimization flags based on the build mode, as recommended by the README.
+    // Options
     switch (optimize) {
         .Debug => {},
         .ReleaseSafe, .ReleaseFast => compile_step.addArgs(&.{"--optimize-perf"}),
         .ReleaseSmall => compile_step.addArgs(&.{ "--optimize-perf", "--optimize-size" }),
     }
-    compile_step.addArgs(&.{
-        "--target", "Vulkan-1.3",
-    });
 
-    // The command format is: [options] <input> <output>
+    compile_step.addArgs(&.{ "--target", "Vulkan-1.3" });
 
-    // 1. Add the input file argument.
-    compile_step.addFileArg(b.path(glsl_path));
+    // Re-execute the compile step if the source file changes.
+    compile_step.addFileArg(b.path(source_path));
 
-    // 2. Add the output file argument. This is positional, NO "-o" FLAG.
-    //    addOutputFileArg correctly handles this and gives us a handle to the artifact.
-    const output_file_source = compile_step.addOutputFileArg(spv_path);
+    // Get a handle to the output artifact.
+    // This will be a new handle if cache miss occurs.
+    const output_file_source = compile_step.addOutputFileArg(output_name);
 
-    // 3. Install the generated artifact to the desired location.
-    const install_step = b.addInstallFile(output_file_source, install_path);
+    const install_step = b.addInstallFile(
+        output_file_source,
+        b.fmt("shaders/{s}", .{output_name}),
+    );
 
     return &install_step.step;
 }
 
-fn linkVulkanAndGlfwLibs(
-    exe: *std.Build.Step.Compile,
+/// This function configures a `Module` with all necessary C dependencies.
+/// Any executable importing this module will automatically inherit these settings.
+fn configureVulkanAndGlfw(
+    module: *std.Build.Module,
     target: std.Build.ResolvedTarget,
     lib_glfw: *std.Build.Step.Compile,
     glfw_dep: *std.Build.Dependency,
     vk_headers_dep: *std.Build.Dependency,
 ) void {
-    exe.linkLibrary(lib_glfw);
-    exe.addIncludePath(glfw_dep.path("include"));
-    exe.addIncludePath(vk_headers_dep.path("include"));
-    exe.linkSystemLibrary("vulkan");
+    module.linkLibrary(lib_glfw);
+    module.addIncludePath(glfw_dep.path("include"));
+    module.addIncludePath(vk_headers_dep.path("include"));
+    module.linkSystemLibrary("vulkan", .{});
 
-    if (target.result.os.tag == .windows) {
-        exe.linkSystemLibrary("gdi32");
-        exe.linkSystemLibrary("shell32");
-    } else if (target.result.os.tag == .linux) {
-        exe.linkSystemLibrary("m");
-        exe.linkSystemLibrary("pthread");
-        exe.linkSystemLibrary("dl");
-        exe.linkSystemLibrary("X11");
-        exe.linkSystemLibrary("xcb");
-        exe.linkSystemLibrary("Xrandr");
-        exe.linkSystemLibrary("Xinerama");
-        exe.linkSystemLibrary("Xi");
-        exe.linkSystemLibrary("Xcursor");
-        exe.linkSystemLibrary("Xxf86vm");
-    } else if (target.result.os.tag == .macos) {
-        exe.linkFramework("Cocoa");
-        exe.linkFramework("IOKit");
-        exe.linkFramework("CoreFoundation");
+    // Platform-specific libraries
+    switch (target.result.os.tag) {
+        .windows => {
+            module.linkSystemLibrary("gdi32", .{});
+            module.linkSystemLibrary("shell32", .{});
+        },
+        .linux => {
+            module.linkSystemLibrary("m", .{});
+            module.linkSystemLibrary("pthread", .{});
+            module.linkSystemLibrary("dl", .{});
+            module.linkSystemLibrary("X11", .{});
+            module.linkSystemLibrary("xcb", .{});
+            module.linkSystemLibrary("Xrandr", .{});
+            module.linkSystemLibrary("Xinerama", .{});
+            module.linkSystemLibrary("Xi", .{});
+            module.linkSystemLibrary("Xcursor", .{});
+            module.linkSystemLibrary("Xxf86vm", .{});
+        },
+        .macos => {
+            module.linkFramework("Cocoa", .{});
+            module.linkFramework("IOKit", .{});
+            module.linkFramework("CoreFoundation", .{});
+        },
+        else => {},
     }
 }
 
@@ -77,28 +81,46 @@ pub fn build(b: *std.Build) !void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    //================================================================================
-    // Fetch and Build Dependencies
-    //================================================================================
-
     const glfw_dep = b.dependency("glfw", .{ .target = target, .optimize = optimize });
     const vk_headers_dep = b.dependency("vulkan_headers", .{});
-
-    // SOLUTION: Fetch the glslc dependency and get its pre-defined executable artifact.
-    // This is much simpler and more reliable.
     const glslc_dep = b.dependency("glslc", .{ .target = target, .optimize = optimize });
     const glslc_exe = glslc_dep.artifact("shader_compiler");
 
-    // --- Compile GLFW as a Static Library --- (This part remains the same)
+    // --- Compile GLFW as a Static Library ---
     const lib_glfw = b.addStaticLibrary(.{ .name = "glfw", .target = target, .optimize = optimize });
     lib_glfw.linkLibC();
     lib_glfw.addIncludePath(glfw_dep.path("include"));
     lib_glfw.addCSourceFiles(.{
         .root = glfw_dep.path("src"),
-        .files = &.{ "context.c", "init.c", "input.c", "monitor.c", "vulkan.c", "window.c", "osmesa_context.c", "platform.c", "egl_context.c", "null_init.c", "null_monitor.c", "null_joystick.c", "null_window.c" },
+        .files = &.{
+            "context.c",
+            "init.c",
+            "input.c",
+            "monitor.c",
+            "vulkan.c",
+            "window.c",
+            "osmesa_context.c",
+            "platform.c",
+            "egl_context.c",
+            "null_init.c",
+            "null_monitor.c",
+            "null_joystick.c",
+            "null_window.c",
+        },
     });
     if (target.result.os.tag == .linux) {
-        lib_glfw.addCSourceFiles(.{ .root = glfw_dep.path("src"), .files = &.{ "x11_init.c", "x11_monitor.c", "x11_window.c", "xkb_unicode.c", "posix_time.c", "posix_thread.c", "posix_module.c", "posix_poll.c", "glx_context.c", "linux_joystick.c" } });
+        lib_glfw.addCSourceFiles(.{ .root = glfw_dep.path("src"), .files = &.{
+            "x11_init.c",
+            "x11_monitor.c",
+            "x11_window.c",
+            "xkb_unicode.c",
+            "posix_time.c",
+            "posix_thread.c",
+            "posix_module.c",
+            "posix_poll.c",
+            "glx_context.c",
+            "linux_joystick.c",
+        } });
         lib_glfw.root_module.addCMacro("_GLFW_X11", "1");
         lib_glfw.linkSystemLibrary("X11");
         lib_glfw.linkSystemLibrary("Xrandr");
@@ -106,88 +128,115 @@ pub fn build(b: *std.Build) !void {
         lib_glfw.linkSystemLibrary("Xi");
         lib_glfw.linkSystemLibrary("Xcursor");
         lib_glfw.linkSystemLibrary("Xxf86vm");
+    } else if (target.result.os.tag == .windows) {
+        lib_glfw.addCSourceFiles(.{ .root = glfw_dep.path("src"), .files = &.{
+            "win32_init.c",
+            "win32_joystick.c",
+            "win32_monitor.c",
+            "win32_time.c",
+            "win32_thread.c",
+            "win32_window.c",
+        } });
+        lib_glfw.root_module.addCMacro("_GLFW_WIN32", "1");
+        lib_glfw.linkSystemLibrary("gdi32");
+        lib_glfw.linkSystemLibrary("shell32");
+    } else if (target.result.os.tag == .macos) {
+        lib_glfw.addCSourceFiles(.{ .root = glfw_dep.path("src"), .files = &.{
+            "cocoa_init.m",
+            "cocoa_joystick.m",
+            "cocoa_monitor.m",
+            "cocoa_time.m",
+            "cocoa_window.m",
+        } });
+        lib_glfw.root_module.addCMacro("_GLFW_COCOA", "1");
     }
-    // (You would add .windows and .macos branches here as before)
 
-    //================================================================================
-    // Executables and Shaders
-    //================================================================================
+    // This module is created and configured with all C dependencies.
+    // Any executable that imports "c" will now automatically get all the correct
+    // include paths and library links.
+    const c_mod = b.createModule(.{
+        .root_source_file = b.path("src/c/c.zig"),
+        .target = target,
+    });
+    configureVulkanAndGlfw(c_mod, target, lib_glfw, glfw_dep, vk_headers_dep);
 
-    // ... The rest of your build script can now remain exactly the same ...
-    // ... It will correctly use the `glslc_exe` artifact we fetched. ...
-
-    const executables = [_]struct {
-        step_id: []const u8,
-        source: []const u8,
-        name: ?[]const u8 = null,
-        description: ?[]const u8 = null,
-        install_dir: ?[]const u8 = null,
-    }{
-        .{ .step_id = "triangle", .source = "example/main.zig" },
-        .{ .step_id = "example", .source = "example/example.zig" },
-        .{ .step_id = "test", .source = "example/test.zig" },
+    const shaders = [_]struct { name: []const u8, path: []const u8 }{
+        .{ .name = "gui", .path = "src/shaders/code/gui" },
+        .{ .name = "text", .path = "src/shaders/code/text" },
+        .{ .name = "triangle", .path = "src/shaders/code/triangle" },
+        .{ .name = "example", .path = "src/shaders/code/example" },
+        .{ .name = "test", .path = "src/shaders/code/test" },
     };
 
-    const gui_vert_shader_source = "src/shaders/code/gui/gui.vert";
-    const gui_frag_shader_source = "src/shaders/code/gui/gui.frag";
-    const gui_vert_shader_output = "spirv/bin/gui.vert.spv";
-    const gui_frag_shader_output = "spirv/bin/gui.frag.spv";
+    // Compile all shaders and collect their install steps.
+    var shader_install_steps = std.ArrayList(*std.Build.Step).init(b.allocator);
+    defer shader_install_steps.deinit();
 
-    const text_vert_shader_source = "src/shaders/code/text/text.vert";
-    const text_frag_shader_source = "src/shaders/code/text/text.frag";
-    const text_vert_shader_output = "spirv/bin/text3d.vert.spv";
-    const text_frag_shader_output = "spirv/bin/text3d.frag.spv";
+    for (shaders) |shader| {
+        const vert_source = b.fmt("{s}/{s}.vert", .{ shader.path, shader.name });
+        const frag_source = b.fmt("{s}/{s}.frag", .{ shader.path, shader.name });
+        const vert_output = b.fmt("{s}.vert.spv", .{shader.name});
+        const frag_output = b.fmt("{s}.frag.spv", .{shader.name});
 
-    const install_gui_vert_shader = try addShaderStep(b, glslc_exe, optimize, gui_vert_shader_source, gui_vert_shader_output, "../src/shaders/spirv/bin/gui.vert.spv");
-    const install_gui_frag_shader = try addShaderStep(b, glslc_exe, optimize, gui_frag_shader_source, gui_frag_shader_output, "../src/shaders/spirv/bin/gui.frag.spv");
-    const install_text_vert_shader = try addShaderStep(b, glslc_exe, optimize, text_vert_shader_source, text_vert_shader_output, "../src/shaders/spirv/bin/text3d.vert.spv");
-    const install_text_frag_shader = try addShaderStep(b, glslc_exe, optimize, text_frag_shader_source, text_frag_shader_output, "../src/shaders/spirv/bin/text3d.frag.spv");
+        const install_vert_step = addShaderStep(b, glslc_exe, optimize, vert_source, vert_output);
+        const install_frag_step = addShaderStep(b, glslc_exe, optimize, frag_source, frag_output);
 
-    for (executables) |exe_info| {
-        const shader_code_path = "src/shaders/code/";
-        const vert_shader_source = b.fmt(shader_code_path ++ "{s}/{s}.vert", .{ exe_info.step_id, exe_info.step_id });
-        const frag_shader_source = b.fmt(shader_code_path ++ "{s}/{s}.frag", .{ exe_info.step_id, exe_info.step_id });
-        const vert_shader_output = b.fmt("spirv/bin/{s}.vert.spv", .{exe_info.step_id});
-        const frag_shader_output = b.fmt("spirv/bin/{s}.frag.spv", .{exe_info.step_id});
+        try shader_install_steps.append(install_vert_step);
+        try shader_install_steps.append(install_frag_step);
+    }
 
-        const install_vert_shader = try addShaderStep(b, glslc_exe, optimize, vert_shader_source, vert_shader_output, "../src/shaders/spirv/bin/vert.spv");
-        const install_frag_shader = try addShaderStep(b, glslc_exe, optimize, frag_shader_source, frag_shader_output, "../src/shaders/spirv/bin/frag.spv");
+    // TODO: add shader binaries as anonymous imports
+    // and generate spirv.zig automatically.
+    // This will have the same effect but binaries won't need
+    // to be in the package directory.
+    const spirv_options = b.addOptions();
+    spirv_options.addOption(
+        []const u8,
+        "out_dir",
+        b.fmt("{s}/shaders/", .{b.install_prefix}),
+    );
+    const spirv_mod = b.createModule(.{
+        .root_source_file = b.path("spirv.zig"),
+        .target = target,
+    });
 
+    spirv_mod.addOptions("shaders", spirv_options);
+
+    // Define and Build Executables
+    const execs = [_]struct { []const u8, []const u8 }{
+        .{ "triangle", "example/main.zig" },
+        .{ "example", "example/example.zig" },
+        .{ "test", "example/test.zig" },
+    };
+
+    for (execs) |exe_info| {
+        const exe_id, const src = exe_info;
         const exe = b.addExecutable(.{
-            .name = exe_info.name orelse exe_info.step_id,
+            .name = exe_id,
             .target = target,
             .optimize = optimize,
-            .root_source_file = b.path(exe_info.source),
+            .root_source_file = b.path(src),
         });
 
-        exe.root_module.addAnonymousImport("c", .{ .root_source_file = b.path("src/c/c.zig") });
-        exe.root_module.addAnonymousImport("spirv", .{ .root_source_file = b.path("src/shaders/spirv/spirv.zig") });
+        exe.root_module.addImport("c", c_mod);
+        exe.root_module.addImport("spirv", spirv_mod);
+
         exe.root_module.addAnonymousImport("font", .{ .root_source_file = b.path("src/fonts/font.zig") });
+        // TODO: Make this import a scene interface instead so scenes can be user code
         exe.root_module.addAnonymousImport("geometry", .{ .root_source_file = b.path("src/scenes/geometry.zig") });
         exe.root_module.addAnonymousImport("util", .{ .root_source_file = b.path("src/util/util.zig") });
 
-        exe.step.dependOn(install_vert_shader);
-        exe.step.dependOn(install_frag_shader);
-        exe.step.dependOn(install_gui_vert_shader);
-        exe.step.dependOn(install_gui_frag_shader);
-        exe.step.dependOn(install_text_vert_shader);
-        exe.step.dependOn(install_text_frag_shader);
+        // Shaders should be installed before compiling the executable.
+        for (shader_install_steps.items) |shader_step| {
+            exe.step.dependOn(shader_step);
+        }
 
-        linkVulkanAndGlfwLibs(exe, target, lib_glfw, glfw_dep, vk_headers_dep);
+        // For now we run it emediately after building.
+        const install = b.addInstallArtifact(exe, .{});
+        const run_cmd = b.addRunArtifact(exe);
+        run_cmd.step.dependOn(&install.step);
 
-        const install = b.addInstallArtifact(exe, .{
-            .dest_dir = if (exe_info.install_dir) |dir|
-                .{ .override = .{ .custom = dir } }
-            else
-                .default,
-        });
-
-        const cmd = b.addRunArtifact(exe);
-        const step = b.step(
-            exe_info.step_id,
-            exe_info.description orelse b.fmt("Run {s}", .{exe_info.step_id}),
-        );
-        step.dependOn(&cmd.step);
-        cmd.step.dependOn(&install.step);
+        const run_step = b.step(exe_id, b.fmt("Run the {s} example", .{exe_id}));
+        run_step.dependOn(&run_cmd.step);
     }
 }
