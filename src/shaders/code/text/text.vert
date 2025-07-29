@@ -1,4 +1,4 @@
-// text3d.vet
+// text.vet
 #version 450
 
 // Set 0: Scene UBO (same as test.vert)
@@ -16,7 +16,6 @@ layout(location = 0) in vec3 in_local_pos;
 layout(location = 1) in vec2 in_uv;
 layout(location = 2) in vec4 in_color;
 
-// --- Outputs to Fragment Shader ---
 layout(location = 0) out vec2 frag_uv;
 layout(location = 1) out vec4 frag_color;
 

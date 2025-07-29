@@ -5,6 +5,7 @@ const c = @import("c").imports;
 //TODO: move font stuff to another file and import that
 const gui = @import("../gui/gui.zig");
 const font = @import("font");
+const png = @import("png");
 const util = @import("util");
 
 const text3d_vert_shader_bin = @import("spirv").text_vert;
@@ -224,8 +225,8 @@ pub const Text3DRenderer = struct {
     index_count: u32 = 0,
     draw_count: u32 = 0, // Counter for indirect draw calls
 
-    font: gui.Font = undefined,
-    png_handle: gui.PngImage = undefined,
+    font: font.Font = undefined,
+    png_handle: png.PngImage = undefined,
     last_cam_matrix: [16]f32 = undefined,
 
     // const MAX_VERTICES = 32768;
@@ -236,11 +237,12 @@ pub const Text3DRenderer = struct {
     pub fn init(vk_ctx: *vk.VulkanContext, render_pass: vk.RenderPass, main_scene_ds_layout: vk.DescriptorSetLayout) !Self {
         var self: Self = .{
             .vk_ctx = vk_ctx,
-            .font = gui.Font.init(vk_ctx.allocator),
+            .font = font.Font.init(vk_ctx.allocator),
+            .png_handle = try png.loadPng(vk_ctx.allocator, font.report_regular_png),
         };
 
         try self.font.loadFNT(font.report_regular_fnt);
-        try self.createFontTextureAndSampler(vk_ctx.allocator, font.report_regular_png);
+        try self.createTextureAndSampler();
         self.font.scale_h = @as(f32, @floatFromInt(self.png_handle.height + 1));
         try self.createDescriptors();
         try self.createBuffers(vk_ctx);
@@ -273,10 +275,8 @@ pub const Text3DRenderer = struct {
         self.draw_data_buffer.deinit(self.vk_ctx);
     }
 
-    fn createFontTextureAndSampler(self: *Self, allocator: std.mem.Allocator, png_data: []const u8) !void {
-        const image = try gui.loadPng(allocator, png_data);
-        self.png_handle = image;
-
+    fn createTextureAndSampler(self: *Self) !void {
+        const image = self.png_handle;
         const image_size: u64 = @intCast(image.width * image.height * (image.bit_depth / 8));
 
         var staging_buffer = try vk.Buffer.init(

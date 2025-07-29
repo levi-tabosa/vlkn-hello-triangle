@@ -82,6 +82,7 @@ pub fn build(b: *std.Build) !void {
     const optimize = b.standardOptimizeOption(.{});
 
     const glfw_dep = b.dependency("glfw", .{ .target = target, .optimize = optimize });
+
     const vk_headers_dep = b.dependency("vulkan_headers", .{});
     const glslc_dep = b.dependency("glslc", .{ .target = target, .optimize = optimize });
     const glslc_exe = glslc_dep.artifact("shader_compiler");
@@ -222,6 +223,7 @@ pub fn build(b: *std.Build) !void {
         exe.root_module.addImport("spirv", spirv_mod);
 
         exe.root_module.addAnonymousImport("font", .{ .root_source_file = b.path("src/fonts/font.zig") });
+        exe.root_module.addAnonymousImport("png", .{ .root_source_file = b.path("src/png/png_helper.zig") });
         // TODO: Make this import a scene interface instead so scenes can be user code
         exe.root_module.addAnonymousImport("geometry", .{ .root_source_file = b.path("src/scenes/geometry.zig") });
         exe.root_module.addAnonymousImport("util", .{ .root_source_file = b.path("src/util/util.zig") });

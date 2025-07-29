@@ -1699,104 +1699,106 @@ pub const App = struct {
         self.gui_renderer = try gui.GuiRenderer.init(self.vk_ctx, self.render_pass);
         self.text_renderer = try text.Text3DRenderer.init(self.vk_ctx, self.render_pass, self.descriptor_layout);
     }
-
+    // In your App struct
     pub fn initUi(self: *Self) !void {
-        // A standard button height, e.g., 6% of the window height
-        const button_h: f32 = 0.06;
-        // A standard button width
-        const button_w: f32 = 0.2;
-        // Padding between buttons
-        const padding: f32 = 0.01;
+        const root = &self.main_ui.root;
+        const next_id = &self.main_ui.next_id;
 
-        const tf_h: f32 = 0.05;
-        const tf_w: f32 = 0.08;
-        const tf_y: f32 = 0.25; // Y position for all text fields
-        const tf_padding: f32 = 0.01;
+        var left_panel = try root.addContainer(
+            next_id,
+            .{ .x = 0.01, .y = 0.01, .width = 0.22, .height = 0.4 }, // Position and size of the whole panel
+            .{ .Vertical = .{ .spacing = 8 } },
+            .{ 0, 0, 0, 0 },
+        );
 
-        try self.main_ui.addButton(.{
-            .x = padding,
-            .y = padding,
-            .width = button_w,
-            .height = button_h,
-        }, "Add Line", .{ 0.2, 0.2, 0.8, 1 }, .{ 1, 1, 1, 1 }, 12, addLineCallback);
+        left_panel.data.container.padding = .{ 10, 10, 10, 10 };
 
-        try self.main_ui.addButton(.{
-            .x = padding,
-            .y = padding + button_h + padding, // Position below the first button
-            .width = button_w,
-            .height = button_h,
-        }, "Clear Lines", .{ 0.2, 0.2, 0.8, 1 }, .{ 1, 1, 1, 1 }, 12, clearLinesCallback);
+        try left_panel.addButton(next_id, .{ .height = 0.15 }, "Add Line", .{ 0.2, 0.2, 0.8, 1 }, .{ 1, 1, 1, 1 }, 12, addLineCallback);
+        try left_panel.addButton(next_id, .{ .height = 0.15 }, "Clear Lines", .{ 0.2, 0.2, 0.8, 1 }, .{ 1, 1, 1, 1 }, 12, clearLinesCallback);
+        try left_panel.addButton(next_id, .{ .height = 0.15 }, "Toggle Camera", .{ 0.2, 0.8, 0.2, 1 }, .{ 1, 1, 1, 1 }, 12, toggleCameraModeCallback);
 
-        try self.main_ui.addButton(.{
-            .x = padding,
-            .y = padding + (button_h + padding) * 2, // Position below the second button
-            .width = button_w,
-            .height = button_h,
-        }, "Quit", .{ 0.8, 0.2, 0.2, 1 }, .{ 1, 1, 1, 1 }, 12, quitCallback);
+        var tf_panel = try left_panel.addContainer(
+            next_id,
+            .{ .height = 0.15 },
+            .{ .Horizontal = .{ .spacing = 5 } },
+            .{ 0, 0, 0, 0 },
+        );
 
-        // Add the new button here
-        try self.main_ui.addButton(.{
-            .x = padding,
-            .y = padding + (button_h + padding) * 3, // Position below the Quit button
-            .width = button_w,
-            .height = button_h,
-        }, "Toggle Camera", .{ 0.2, 0.8, 0.2, 1 }, .{ 1, 1, 1, 1 }, 12, toggleCameraModeCallback);
+        try tf_panel.addTextField(next_id, .{ .width = 0.7 }, "grid:", &self.grid_res_buff, .{ 0.1, 0.1, 0.1, 1 }, .{ 1, 1, 1, 1 });
+        try tf_panel.addButton(next_id, .{ .width = 0.3 }, "Set", .{ 0.8, 0.2, 0.2, 1 }, .{ 1, 1, 1, 1 }, 12, setGridCallback);
 
-        // Adjust the Y position of the widgets that were below the old slider
-        try self.main_ui.addButton(.{
-            .x = padding + tf_w + 0.062,
-            .y = padding + (button_h + padding) * 4, // MOVED DOWN
-            .width = button_w / 4,
-            .height = tf_h,
-        }, "Set", .{ 0.8, 0.2, 0.2, 1 }, .{ 1, 1, 1, 1 }, 12, setGridCallback);
+        const tree_panel = try left_panel.addTreeNode(
+            next_id,
+            .{ .x = 0.01, .y = 0.01, .width = 0.15, .height = 0.2 },
+            "node",
+            .{ .Vertical = .{ .spacing = 8 } },
+            .{ 0, 0, 0, 1 },
+            .{ 1, 1, 1, 1 },
+        );
 
-        try self.main_ui.addSlider(.{
-            .x = 0.8 - padding, // Top-right
-            .y = 0.05 - padding,
-            .width = 0.15,
-            .height = 0.02,
-        }, 0.0, 1.0, 0.5, .{ 0.4, 0.4, 0.4, 1 }, .{ 0.8, 0.8, 0.8, 1 }, fovSliderCallback);
+        try tree_panel.addButton(&self.main_ui.next_id, .{ .height = 0.15 }, "Button A", .{ 0.5, 0.2, 0.2, 1 }, .{ 1, 1, 1, 1 }, 20, null);
+        _ = try tree_panel.addPlainText(&self.main_ui.next_id, .{ .height = 0.15 }, "Some info text", .{ 1, 1, 1, 1 }, 18);
 
-        try self.main_ui.addSlider(.{
-            .x = 0.8 - padding, // Top-right
-            .y = 0.05 - padding + (button_h + padding) * 1,
-            .width = 0.15,
-            .height = 0.02,
-        }, 0.0, 1.0, 0.5, .{ 0.4, 0.4, 0.4, 1 }, .{ 0.8, 0.8, 0.8, 1 }, nearPlaneSliderCallback);
+        var right_panel = try root.addContainer(
+            next_id,
+            .{ .x = 0.78, .y = 0.01, .width = 0.2, .height = 0.15 },
+            .{ .Vertical = .{ .spacing = 10 } },
+            .{ 0, 0, 0, 0 },
+        );
+        right_panel.data.container.padding = .{ 10, 10, 10, 10 };
 
-        // Adjust the Y position of the text fields
-        try self.main_ui.addTextField(.{
-            .x = tf_padding + 0.04,
-            .y = 1.0 - tf_y + padding + (button_h + padding),
-            .width = tf_w,
-            .height = tf_h,
-        }, "X:", &self.line_x_buf, .{ 0.1, 0.1, 0.1, 1 }, .{ 1, 1, 1, 1 });
-        try self.main_ui.addTextField(.{
-            .x = tf_padding + 0.04 + (tf_w + tf_padding),
-            .y = 1.0 - tf_y + padding + (button_h + padding),
-            .width = tf_w,
-            .height = tf_h,
-        }, "Y:", &self.line_y_buf, .{ 0.1, 0.1, 0.1, 1 }, .{ 1, 1, 1, 1 });
-        try self.main_ui.addTextField(.{
-            .x = tf_padding + 0.04 + (tf_w + tf_padding) * 2,
-            .y = 1.0 - tf_y + padding + (button_h + padding),
-            .width = tf_w,
-            .height = tf_h,
-        }, "Z:", &self.line_z_buf, .{ 0.1, 0.1, 0.1, 1 }, .{ 1, 1, 1, 1 });
-        // Grid resolution field
-        try self.main_ui.addTextField(.{
-            .x = tf_padding + 0.06,
-            .y = tf_padding + (button_h + tf_padding) * 4,
-            .width = tf_w,
-            .height = tf_h,
-        }, "grid:", &self.grid_res_buff, .{ 0.1, 0.1, 0.1, 1 }, .{ 1, 1, 1, 1 });
+        try right_panel.addSlider(next_id, .{ .height = 0.25 }, 0.0, 1.0, 0.5, .{ 0.4, 0.4, 0.4, 1 }, .{ 0.8, 0.8, 0.8, 1 }, fovSliderCallback);
+        try right_panel.addSlider(next_id, .{ .height = 0.25 }, 0.0, 1.0, 0.5, .{ 0.4, 0.4, 0.4, 1 }, .{ 0.8, 0.8, 0.8, 1 }, nearPlaneSliderCallback);
 
-        try self.main_ui.addPlainText(.{
-            .x = padding,
-            .y = padding + (button_h + padding) * 5,
-            .width = button_w,
-            .height = button_h,
-        }, "this string will be overwriten " ** 8, .{ 0, 0, 1, 1 }, .{ 1, 1, 0, 1 }, 8); // Transparent background
+        var coord_panel = try root.addContainer(
+            next_id,
+            .{ .x = 0.01, .y = 0.85, .width = 0.4, .height = 0.1 },
+            .{ .Grid = .{ .columns = 2, .spacing = .{ 3, 1 } } },
+            .{ 0, 0, 0, 0 },
+        );
+        coord_panel.data.container.padding = .{ 10, 10, 10, 10 };
+
+        try coord_panel.addTextField(next_id, .{ .width = 0.33 }, "X:", &self.line_x_buf, .{ 0.1, 0.1, 0.1, 1 }, .{ 1, 1, 1, 1 });
+        try coord_panel.addTextField(next_id, .{ .width = 0.33 }, "Y:", &self.line_y_buf, .{ 0.1, 0.1, 0.1, 1 }, .{ 1, 1, 1, 1 });
+        try coord_panel.addTextField(next_id, .{ .width = 0.33 }, "Z:", &self.line_z_buf, .{ 0.1, 0.1, 0.1, 1 }, .{ 1, 1, 1, 1 });
+
+        // const main_container = try root.addContainer(&self.main_ui.next_id, .{}, .{ .Vertical = .{} }, .{ 0.1, 0.1, 0.1, 1 });
+
+        // // Add the first tree node. We give it a relative height. This height must be
+        // // large enough to contain its children when expanded.
+        // const node1 = try main_container.addTreeNode(
+        //     &self.main_ui.next_id,
+        //     .{ .height = 0.4 }, // Takes 40% of the main_container's height
+        //     "Node 1 (Click to expand)",
+        //     .{ .Vertical = .{ .spacing = 2.0 } }, // Children will be laid out vertically
+        //     .{ 0.2, 0.2, 0.3, 1.0 },
+        // );
+
+        // // Add children to Node 1
+        // _ = try node1.addButton(&self.main_ui.next_id, .{ .height = 0.1 }, "Button A", .{ 0.5, 0.2, 0.2, 1 }, .{ 1, 1, 1, 1 }, 20, null);
+        // _ = try node1.addPlainText(&self.main_ui.next_id, .{ .height = 0.1 }, "Some info text", .{ 1, 1, 1, 1 }, 18);
+
+        // // Add a nested tree node inside Node 1
+        // const node1_child = try node1.addTreeNode(
+        //     &self.main_ui.next_id,
+        //     .{ .height = 0.5 }, // Takes 50% of the remaining space in Node 1
+        //     "Node 1.1 (Nested)",
+        //     .{ .Vertical = .{} },
+        //     .{ 0.2, 0.3, 0.2, 1.0 },
+        // );
+
+        // // Add a child to the nested node
+        // try node1_child.addSlider(&self.main_ui.next_id, .{ .height = 0.3 }, 0, 100, 50, .{ 0.4, 0.4, 0.4, 1 }, .{ 1, 1, 0, 1 }, null);
+
+        // // Add a second top-level tree node
+        // const node2 = try main_container.addTreeNode(
+        //     &self.main_ui.next_id,
+        //     .{ .height = 0.2 },
+        //     "Node 2 (No Children)",
+        //     .{ .Manual = {} }, // Layout doesn't matter as it has no children
+        //     .{ 0.3, 0.2, 0.2, 1.0 },
+        // );
+        // _ = node2; // Suppress unused variable warning
     }
 
     pub fn deinit(self: *Self) void {
@@ -1837,7 +1839,15 @@ pub const App = struct {
     }
 
     pub fn run(self: *Self) !void {
-        self.perf.setPtr(self.main_ui.widgets.getLast().data.plain_text.text); //TODO: change this hack
+        const next_id = &self.main_ui.next_id;
+        const fps_label = try self.main_ui.root.addPlainText(
+            next_id,
+            .{ .x = 0.01, .y = 0.6, .width = 0.4, .height = 0.05 }, // Manually positioned
+            "this string will be overwriten " ** 8,
+            .{ 1, 1, 0, 1 },
+            12,
+        );
+        self.perf.setPtr(fps_label); //TODO: change this hack
         while (c.glfwWindowShouldClose(self.window.handle) == 0) {
             self.perf.beginFrame();
             self.wd_ctx.beginFrame();
@@ -1852,11 +1862,12 @@ pub const App = struct {
             self.perf.beginScope("GUI");
             self.gui_renderer.beginFrame();
             // Check if
-            if (self.gui_renderer.processAndDrawUi(&self.main_ui, self, self.window.size.x, self.window.size.y) or
+            if (self.gui_renderer.processAndDraw(&self.main_ui, self, self.window.size.x, self.window.size.y) or
                 self.wd_ctx.processCameraInput(&self.scene, &self.text_scene))
             {
                 try self.updateUniformBuffer();
             }
+
             self.perf.endScope("GUI");
 
             self.perf.beginScope("Text");
