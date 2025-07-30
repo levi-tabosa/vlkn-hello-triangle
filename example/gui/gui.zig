@@ -159,7 +159,6 @@ pub const Widget = struct {
                 for (node.children.items) |*child| {
                     child.deinit();
                 }
-                // node.plain_text => |*data| self.allocator.free(data.text),
                 node.children.deinit();
             },
         }
@@ -215,7 +214,6 @@ pub const Widget = struct {
         bg: @Vector(4, f32),
         fg: @Vector(4, f32),
     ) !*Widget {
-        // A TreeNode can be added to a regular container or another TreeNode.
         var children: *std.ArrayList(Widget) = switch (self.data) {
             .container => |*ct| &ct.children,
             .tree_node => |*nd| &nd.children,
@@ -557,21 +555,62 @@ pub const GuiRenderer = struct {
     }
 
     pub fn createPipeline(self: *Self, render_pass: vk.RenderPass) !void {
-        self.pipeline_layout = try vk.PipelineLayout.init(self.vk_ctx, .{ .setLayoutCount = 1, .pSetLayouts = &self.descriptor_set_layout.handle, .pushConstantRangeCount = 1, .pPushConstantRanges = &self.push_constants.handle });
+        self.pipeline_layout = try vk.PipelineLayout.init(
+            self.vk_ctx,
+            .{ .setLayoutCount = 1, .pSetLayouts = &self.descriptor_set_layout.handle, .pushConstantRangeCount = 1, .pPushConstantRanges = &self.push_constants.handle },
+        );
         var vert_mod = try vk.ShaderModule.init(self.vk_ctx.allocator, self.vk_ctx, gui_vert_shader_bin);
         defer vert_mod.deinit(self.vk_ctx);
         var frag_mod = try vk.ShaderModule.init(self.vk_ctx.allocator, self.vk_ctx, gui_frag_shader_bin);
         defer frag_mod.deinit(self.vk_ctx);
-        const shader_stages = [_]c.VkPipelineShaderStageCreateInfo{ .{ .stage = c.VK_SHADER_STAGE_VERTEX_BIT, .module = vert_mod.handle, .pName = "main" }, .{ .stage = c.VK_SHADER_STAGE_FRAGMENT_BIT, .module = frag_mod.handle, .pName = "main" } };
+        const shader_stages = [_]c.VkPipelineShaderStageCreateInfo{
+            .{ .stage = c.VK_SHADER_STAGE_VERTEX_BIT, .module = vert_mod.handle, .pName = "main" },
+            .{ .stage = c.VK_SHADER_STAGE_FRAGMENT_BIT, .module = frag_mod.handle, .pName = "main" },
+        };
         const binding_desc = GuiVertex.getBindingDescription();
         const attrib_desc = GuiVertex.getAttributeDescriptions();
-        const vertex_input_info = c.VkPipelineVertexInputStateCreateInfo{ .vertexBindingDescriptionCount = 1, .pVertexBindingDescriptions = &binding_desc, .vertexAttributeDescriptionCount = attrib_desc.len, .pVertexAttributeDescriptions = &attrib_desc };
-        const input_assembly = c.VkPipelineInputAssemblyStateCreateInfo{ .topology = c.VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, .primitiveRestartEnable = c.VK_FALSE };
-        const rasterizer = c.VkPipelineRasterizationStateCreateInfo{ .depthClampEnable = c.VK_FALSE, .rasterizerDiscardEnable = c.VK_FALSE, .polygonMode = c.VK_POLYGON_MODE_FILL, .lineWidth = 1.0, .cullMode = c.VK_CULL_MODE_NONE, .frontFace = c.VK_FRONT_FACE_CLOCKWISE };
+        const vertex_input_info = c.VkPipelineVertexInputStateCreateInfo{
+            .vertexBindingDescriptionCount = 1,
+            .pVertexBindingDescriptions = &binding_desc,
+            .vertexAttributeDescriptionCount = attrib_desc.len,
+            .pVertexAttributeDescriptions = &attrib_desc,
+        };
+        const input_assembly = c.VkPipelineInputAssemblyStateCreateInfo{
+            .topology = c.VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+            .primitiveRestartEnable = c.VK_FALSE,
+        };
+        const rasterizer = c.VkPipelineRasterizationStateCreateInfo{
+            .depthClampEnable = c.VK_FALSE,
+            .rasterizerDiscardEnable = c.VK_FALSE,
+            .polygonMode = c.VK_POLYGON_MODE_FILL,
+            .lineWidth = 1.0,
+            .cullMode = c.VK_CULL_MODE_NONE,
+            .frontFace = c.VK_FRONT_FACE_CLOCKWISE,
+        };
         const multisampling = c.VkPipelineMultisampleStateCreateInfo{ .sampleShadingEnable = c.VK_FALSE, .rasterizationSamples = c.VK_SAMPLE_COUNT_1_BIT };
-        const color_blend_attachment = c.VkPipelineColorBlendAttachmentState{ .colorWriteMask = c.VK_COLOR_COMPONENT_R_BIT | c.VK_COLOR_COMPONENT_G_BIT | c.VK_COLOR_COMPONENT_B_BIT | c.VK_COLOR_COMPONENT_A_BIT, .blendEnable = c.VK_TRUE, .srcColorBlendFactor = c.VK_BLEND_FACTOR_SRC_ALPHA, .dstColorBlendFactor = c.VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA, .colorBlendOp = c.VK_BLEND_OP_ADD, .srcAlphaBlendFactor = c.VK_BLEND_FACTOR_ONE, .dstAlphaBlendFactor = c.VK_BLEND_FACTOR_ZERO, .alphaBlendOp = c.VK_BLEND_OP_ADD };
+        const color_blend_attachment = c.VkPipelineColorBlendAttachmentState{
+            .colorWriteMask = c.VK_COLOR_COMPONENT_R_BIT | c.VK_COLOR_COMPONENT_G_BIT | c.VK_COLOR_COMPONENT_B_BIT | c.VK_COLOR_COMPONENT_A_BIT,
+            .blendEnable = c.VK_TRUE,
+            .srcColorBlendFactor = c.VK_BLEND_FACTOR_SRC_ALPHA,
+            .dstColorBlendFactor = c.VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
+            .colorBlendOp = c.VK_BLEND_OP_ADD,
+            .srcAlphaBlendFactor = c.VK_BLEND_FACTOR_ONE,
+            .dstAlphaBlendFactor = c.VK_BLEND_FACTOR_ZERO,
+            .alphaBlendOp = c.VK_BLEND_OP_ADD,
+        };
         const color_blending = c.VkPipelineColorBlendStateCreateInfo{ .logicOpEnable = c.VK_FALSE, .attachmentCount = 1, .pAttachments = &color_blend_attachment };
-        const pipeline_info = c.VkGraphicsPipelineCreateInfo{ .stageCount = shader_stages.len, .pStages = &shader_stages, .pVertexInputState = &vertex_input_info, .pInputAssemblyState = &input_assembly, .pRasterizationState = &rasterizer, .pMultisampleState = &multisampling, .pColorBlendState = &color_blending, .layout = self.pipeline_layout.handle, .renderPass = render_pass.handle, .subpass = 0 };
+        const pipeline_info = c.VkGraphicsPipelineCreateInfo{
+            .stageCount = shader_stages.len,
+            .pStages = &shader_stages,
+            .pVertexInputState = &vertex_input_info,
+            .pInputAssemblyState = &input_assembly,
+            .pRasterizationState = &rasterizer,
+            .pMultisampleState = &multisampling,
+            .pColorBlendState = &color_blending,
+            .layout = self.pipeline_layout.handle,
+            .renderPass = render_pass.handle,
+            .subpass = 0,
+        };
         try vk.vkCheck(c.vkCreateGraphicsPipelines(self.vk_ctx.device.handle, null, 1, &pipeline_info, null, &self.pipeline.handle));
     }
 
@@ -593,8 +632,13 @@ pub const GuiRenderer = struct {
         c.vkCmdDrawIndexed(cmd_buffer, self.index_count, 1, 0, 0, 0);
     }
 
-    fn orthoProjectionMatrix(left: f32, right: f32, top: f32, bottom: f32) [16]f32 {
-        return .{ 2.0 / (right - left), 0.0, 0.0, 0.0, 0.0, 2.0 / (bottom - top), 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, -(right + left) / (right - left), -(bottom + top) / (bottom - top), 0.0, 1.0 };
+    fn orthoProjectionMatrix(l: f32, r: f32, t: f32, b: f32) [16]f32 {
+        return .{
+            2.0 / (r - l),      0.0,                0.0, 0.0,
+            0.0,                2.0 / (b - t),      0.0, 0.0,
+            0.0,                0.0,                1.0, 0.0,
+            -(r + l) / (r - l), -(b + t) / (b - t), 0.0, 1.0,
+        };
     }
 
     /// Public entry point for processing and drawing the entire UI tree.
@@ -658,24 +702,15 @@ pub const GuiRenderer = struct {
                 var cursor: @Vector(2, f32) = .{ content_rect.x, content_rect.y };
                 for (children.items) |*child| {
                     var child_abs_rect: Rect = undefined;
-                    const child_rel_w = child.rel_rect.width * content_rect.width;
-                    const child_rel_h = child.rel_rect.height * content_rect.height;
 
                     switch (layout) {
-                        .Manual => |_| {
-                            child_abs_rect = .{
-                                .x = content_rect.x + (child.rel_rect.x * content_rect.width),
-                                .y = content_rect.y + (child.rel_rect.y * content_rect.height),
-                                .width = child_rel_w,
-                                .height = child_rel_h,
-                            };
-                        },
+                        .Manual => |_| child_abs_rect = child.rel_rect.toAbsolute(content_rect),
                         .Vertical => |vl| {
                             child_abs_rect = .{
                                 .x = cursor[0],
                                 .y = cursor[1],
                                 .width = content_rect.width, // Takes full available width
-                                .height = child_rel_h,
+                                .height = content_rect.height * child.rel_rect.height,
                             };
                             cursor[1] += child_abs_rect.height + vl.spacing;
                         },
@@ -683,7 +718,7 @@ pub const GuiRenderer = struct {
                             child_abs_rect = .{
                                 .x = cursor[0],
                                 .y = cursor[1],
-                                .width = child_rel_w,
+                                .width = content_rect.width * child.rel_rect.width,
                                 .height = content_rect.height, // Takes full available height
                             };
                             cursor[0] += child_abs_rect.width + hl.spacing;
@@ -701,17 +736,16 @@ pub const GuiRenderer = struct {
         const id = widget.id;
 
         self.drawRect(abs_rect, widget.background);
-
         switch (widget.data) {
             .container => |*container| {
-                const content_rect = Rect{
+                const c_rect = Rect{
                     .x = abs_rect.x + container.padding[3], // left
                     .y = abs_rect.y + container.padding[0], // top
                     .width = abs_rect.width - (container.padding[1] + container.padding[3]), // right + left
                     .height = abs_rect.height - (container.padding[0] + container.padding[2]), // top + bottom
                 };
 
-                self.processContainerLayout(&container.children, container.layout, content_rect, app);
+                self.processContainerLayout(&container.children, container.layout, c_rect, app);
             },
             .tree_node => |*data| {
                 const bar_height: f32 = 25.0;
@@ -725,8 +759,8 @@ pub const GuiRenderer = struct {
 
                 if (has_children) {
                     const button_size: f32 = 15.0;
-                    const button_margin: f32 = (bar_height - button_size) / 2.0;
-                    // Draw expand button decoration TODO:
+                    const button_margin: f32 = (bar_height - button_size);
+                    // Draw expand button decoration
                     const expand_button_rect = Rect{
                         .x = bar_rect.x + button_margin,
                         .y = bar_rect.y + button_margin,
@@ -753,12 +787,11 @@ pub const GuiRenderer = struct {
                     if (self.hot_id == expand_button_id) {
                         button_color = .{ 0.8, 0.8, 0.0, 1.0 }; // Highlight yellow
                     }
-                    if (self.active_id == expand_button_id) {
-                        button_color = .{ 1.0, 1.0, 0.5, 1.0 }; // Brighter when pressed
-                    }
 
                     const expand_char = if (data.is_expanded) "-" else "+";
-                    self.drawText(expand_char, expand_button_rect.x + 3, expand_button_rect.y - 2, button_color, 1.0);
+                    const expand_center_x = (expand_button_rect.x + expand_button_rect.width) / 2;
+                    const expand_center_y = (expand_button_rect.y + expand_button_rect.height) / 2;
+                    self.drawText(expand_char, expand_center_x, expand_center_y, button_color, 1.0);
                 }
 
                 const label_x = bar_rect.x + (if (has_children) bar_height else 5.0);

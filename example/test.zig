@@ -253,7 +253,8 @@ const Window = struct {
 
 pub const WindowContext = struct {
     const Self = @This();
-    // Raw state from GLFW (unchanged):
+    // Raw state from GLFW
+    // TODO: Use another struct for windowing back-end
     last_cursor_x: f64 = -1.0,
     last_cursor_y: f64 = -1.0,
     cursor_dx: f64 = 0,
@@ -263,8 +264,8 @@ pub const WindowContext = struct {
     left_mouse_down: bool = false,
     ctrl_down: bool = false,
 
-    // ─── Fields for fling/inertia ─────────────────────────────────────
-    fling_dx: f64 = 0, // current horizontal fling velocity
+    // current velocity
+    fling_dx: f64 = 0,
     fling_dy: f64 = 0, // current vertical   fling velocity
     flinging: bool = false, // are we currently in a fling?
     friction: f64 = 0.98, // per-frame decay factor (0.0–1.0)
@@ -277,7 +278,6 @@ pub const WindowContext = struct {
         self.scroll_changed = false;
     }
 
-    /// Called every frame; applies both drag and fling to the camera.
     /// Returns true if camera was changed
     pub fn processCameraInput(self: *Self, main_scene: *Scene, text_scene: *text.Text3DScene) bool {
         var updated = false;
@@ -356,8 +356,7 @@ pub const WindowContext = struct {
     }
 };
 
-// --- Core Vulkan Component Structs ---
-// Abstrarion as needed and vocabulary types
+// Vocabulary types
 const Instance = struct {
     const Self = @This();
 
@@ -441,7 +440,6 @@ const PhysicalDevice = struct {
             }
 
             // Add more criteria here if needed (e.g., required features, memory size)
-
             if (score > best_score) {
                 best_device = device;
                 best_score = score;
@@ -458,12 +456,11 @@ const PhysicalDevice = struct {
         defer allocator.free(q_family_props);
         c.vkGetPhysicalDeviceQueueFamilyProperties(self.handle, &q_count, q_family_props.ptr);
 
-        // --- NEW QUEUE FINDING LOGIC ---
         var graphics_idx: ?u32 = null;
         var present_idx: ?u32 = null;
         var transfer_idx: ?u32 = null;
 
-        // First pass: find a dedicated transfer queue (transfer bit ON, graphics bit OFF)
+        // Find a dedicated transfer queue
         for (q_family_props, 0..) |prop, i| {
             const idx: u32 = @intCast(i);
             if ((prop.queueFlags & c.VK_QUEUE_TRANSFER_BIT != 0) and (prop.queueFlags & c.VK_QUEUE_GRAPHICS_BIT == 0)) {
@@ -472,16 +469,16 @@ const PhysicalDevice = struct {
             }
         }
 
-        // Second pass: find graphics, present, and a fallback transfer queue
+        // Find graphics, present, and a fallback transfer queue
         for (q_family_props, 0..) |prop, i| {
             const idx: u32 = @intCast(i);
 
-            // Find a graphics queue
+            // Graphics
             if (prop.queueFlags & c.VK_QUEUE_GRAPHICS_BIT != 0) {
                 if (graphics_idx == null) graphics_idx = idx;
             }
 
-            // Find a present queue (must check for surface support)
+            // Present queue
             var support: c.VkBool32 = c.VK_FALSE;
             try vkCheck(c.vkGetPhysicalDeviceSurfaceSupportKHR(self.handle, idx, surface.handle, &support));
             if (support == c.VK_TRUE) {
@@ -508,6 +505,7 @@ const PhysicalDevice = struct {
         self.present_q_family = present_idx.?;
         self.transfer_q_family = transfer_idx.?;
 
+        // Log the queue info
         std.log.info("Queue Families Found: Graphics={d}, Present={d}, Transfer={d}", .{ self.graphics_q_family, self.present_q_family, self.transfer_q_family });
 
         return self;
@@ -1729,15 +1727,18 @@ pub const App = struct {
 
         const tree_panel = try left_panel.addTreeNode(
             next_id,
-            .{ .x = 0.01, .y = 0.01, .width = 0.15, .height = 0.2 },
+            .{ .height = 1.0 },
             "node",
-            .{ .Vertical = .{ .spacing = 8 } },
-            .{ 0, 0, 0, 1 },
+            .{ .Vertical = .{ .spacing = 18 } },
+            .{ 0.2, 0.3, 0, 0.65 },
             .{ 1, 1, 1, 1 },
         );
 
-        try tree_panel.addButton(&self.main_ui.next_id, .{ .height = 0.15 }, "Button A", .{ 0.5, 0.2, 0.2, 1 }, .{ 1, 1, 1, 1 }, 20, null);
-        _ = try tree_panel.addPlainText(&self.main_ui.next_id, .{ .height = 0.15 }, "Some info text", .{ 1, 1, 1, 1 }, 18);
+        try tree_panel.addButton(&self.main_ui.next_id, .{ .width = 0.09, .height = 0.15 }, "Button A", .{ 0.5, 0.2, 0.2, 1 }, .{ 1, 1, 1, 1 }, 20, null);
+        _ = try tree_panel.addPlainText(&self.main_ui.next_id, .{ .width = 0.09, .height = 0.15 }, "Some info text 1", .{ 1, 1, 1, 1 }, 18);
+        _ = try tree_panel.addPlainText(&self.main_ui.next_id, .{ .width = 0.09, .height = 0.15 }, "Some info text 2", .{ 1, 1, 1, 1 }, 18);
+        _ = try tree_panel.addPlainText(&self.main_ui.next_id, .{ .width = 0.09, .height = 0.15 }, "Some info text 3", .{ 1, 1, 1, 1 }, 18);
+        _ = try tree_panel.addPlainText(&self.main_ui.next_id, .{ .width = 0.09, .height = 0.15 }, "Some info text 4", .{ 1, 1, 1, 1 }, 18);
 
         var right_panel = try root.addContainer(
             next_id,
@@ -1761,44 +1762,6 @@ pub const App = struct {
         try coord_panel.addTextField(next_id, .{ .width = 0.33 }, "X:", &self.line_x_buf, .{ 0.1, 0.1, 0.1, 1 }, .{ 1, 1, 1, 1 });
         try coord_panel.addTextField(next_id, .{ .width = 0.33 }, "Y:", &self.line_y_buf, .{ 0.1, 0.1, 0.1, 1 }, .{ 1, 1, 1, 1 });
         try coord_panel.addTextField(next_id, .{ .width = 0.33 }, "Z:", &self.line_z_buf, .{ 0.1, 0.1, 0.1, 1 }, .{ 1, 1, 1, 1 });
-
-        // const main_container = try root.addContainer(&self.main_ui.next_id, .{}, .{ .Vertical = .{} }, .{ 0.1, 0.1, 0.1, 1 });
-
-        // // Add the first tree node. We give it a relative height. This height must be
-        // // large enough to contain its children when expanded.
-        // const node1 = try main_container.addTreeNode(
-        //     &self.main_ui.next_id,
-        //     .{ .height = 0.4 }, // Takes 40% of the main_container's height
-        //     "Node 1 (Click to expand)",
-        //     .{ .Vertical = .{ .spacing = 2.0 } }, // Children will be laid out vertically
-        //     .{ 0.2, 0.2, 0.3, 1.0 },
-        // );
-
-        // // Add children to Node 1
-        // _ = try node1.addButton(&self.main_ui.next_id, .{ .height = 0.1 }, "Button A", .{ 0.5, 0.2, 0.2, 1 }, .{ 1, 1, 1, 1 }, 20, null);
-        // _ = try node1.addPlainText(&self.main_ui.next_id, .{ .height = 0.1 }, "Some info text", .{ 1, 1, 1, 1 }, 18);
-
-        // // Add a nested tree node inside Node 1
-        // const node1_child = try node1.addTreeNode(
-        //     &self.main_ui.next_id,
-        //     .{ .height = 0.5 }, // Takes 50% of the remaining space in Node 1
-        //     "Node 1.1 (Nested)",
-        //     .{ .Vertical = .{} },
-        //     .{ 0.2, 0.3, 0.2, 1.0 },
-        // );
-
-        // // Add a child to the nested node
-        // try node1_child.addSlider(&self.main_ui.next_id, .{ .height = 0.3 }, 0, 100, 50, .{ 0.4, 0.4, 0.4, 1 }, .{ 1, 1, 0, 1 }, null);
-
-        // // Add a second top-level tree node
-        // const node2 = try main_container.addTreeNode(
-        //     &self.main_ui.next_id,
-        //     .{ .height = 0.2 },
-        //     "Node 2 (No Children)",
-        //     .{ .Manual = {} }, // Layout doesn't matter as it has no children
-        //     .{ 0.3, 0.2, 0.2, 1.0 },
-        // );
-        // _ = node2; // Suppress unused variable warning
     }
 
     pub fn deinit(self: *Self) void {
@@ -1842,7 +1805,7 @@ pub const App = struct {
         const next_id = &self.main_ui.next_id;
         const fps_label = try self.main_ui.root.addPlainText(
             next_id,
-            .{ .x = 0.01, .y = 0.6, .width = 0.4, .height = 0.05 }, // Manually positioned
+            .{ .x = 0.01, .y = 0.6, .width = 0.4, .height = 0.05 }, // Positioned in root's Manual layout
             "this string will be overwriten " ** 8,
             .{ 1, 1, 0, 1 },
             12,
@@ -1861,7 +1824,7 @@ pub const App = struct {
 
             self.perf.beginScope("GUI");
             self.gui_renderer.beginFrame();
-            // Check if
+
             if (self.gui_renderer.processAndDraw(&self.main_ui, self, self.window.size.x, self.window.size.y) or
                 self.wd_ctx.processCameraInput(&self.scene, &self.text_scene))
             {
