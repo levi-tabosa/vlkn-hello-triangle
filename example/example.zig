@@ -6,17 +6,14 @@ const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const spirv = @import("spirv");
 const scene = @import("geometry");
-const c = @cImport({
-    @cDefine("GLFW_INCLUDE_VULKAN", {});
-    @cInclude("vulkan/vulkan.h");
-    @cInclude("GLFW/glfw3.h");
-});
+const fonts = @import("font");
+const c = @import("c").imports;
 
 // --- Shader Bytecode ---
 // We embed the compiled SPIR-V files directly into the executable.
 // This makes distribution easier as we don't need to ship the .spv files.
-const vert_shader_code = spirv.vs;
-const frag_shader_code = spirv.fs;
+const vert_shader_code = spirv.example_vert;
+const frag_shader_code = spirv.example_frag;
 
 const Vertex = scene.V3;
 const Scene = scene.Scene;
@@ -74,7 +71,7 @@ pub fn getVertexAttributeDescriptions() [3]c.VkVertexInputAttributeDescription {
         .binding = 0,
         .location = 0,
         .format = c.VK_FORMAT_R32G32B32_SFLOAT,
-        .offset = @offsetOf(Vertex, "pos"),
+        .offset = @offsetOf(Vertex, "coor"),
     }, .{
         .binding = 0,
         .location = 1,
@@ -110,26 +107,33 @@ const Callbacks = struct {
         const pitch = -ndc_y * std.math.pi / 2.0; // Invert Y-axis for camera
         const yaw = ndc_x * std.math.pi; // X-axis maps to yaw
 
-        app.scene.setPitchYaw(pitch, yaw);
+        app.updateUniformBuffer() catch unreachable;
+        app.scene.camera.adjustPitchYaw(pitch, yaw);
     }
 
     fn cbKey(wd: ?*c.GLFWwindow, char: c_int, code: c_int, btn: c_int, mods: c_int) callconv(.C) void {
-        _ = wd;
-        // const user_ptr = c.glfwGetWindowUserPointer(wd orelse return) orelse @panic("No window user ptr");
-        // const app: *App = @alignCast(@ptrCast(user_ptr));
+        const user_ptr = c.glfwGetWindowUserPointer(wd orelse return) orelse @panic("No window user ptr");
+        const app: *App = @alignCast(@ptrCast(user_ptr));
 
-        std.debug.print("{c}; code : {} action : {} mods : {} \n", .{ @as(u8, @intCast(char)), code, btn, mods });
+        std.debug.print("{}; code : {} action : {} mods : {} \n", .{ char, code, btn, mods });
 
-        // app.scene.;
+        app.scene.setGridResolution(@intCast(code)) catch unreachable;
+        // TODO: change this to use new buffer methods
+        app.vertex_buffer.deinit();
+        app.initVertexBuffer() catch unreachable;
     }
 
     fn cbFramebufferResize(wd: ?*c.GLFWwindow, width: c_int, height: c_int) callconv(.C) void {
         const user_ptr = c.glfwGetWindowUserPointer(wd orelse return) orelse @panic("No window user ptr");
         const app: *App = @alignCast(@ptrCast(user_ptr));
+        std.debug.print("reszi\n", .{});
         app.window.size.x = width;
         app.window.size.y = height;
         // We just set a flag here. The actual recreation will happen in the draw loop.
         app.framebuffer_resized = true;
+        // _ = c.vkDeviceWaitIdle(app.device.handle);
+        // update uniform buffer so change in aspect ratio is applied
+        app.updateUniformBuffer() catch unreachable;
     }
 };
 
@@ -619,38 +623,96 @@ const CommandPool = struct {
     pub fn deinit(self: *Self) void {
         c.vkDestroyCommandPool(self.owner, self.handle, null);
     }
+};
 
-    pub fn allocateCommandBuffer(self: *Self) !CommandBuffer {
-        assert(self.handle != null);
-        const alloc_info = c.VkCommandBufferAllocateInfo{
-            .commandPool = self.handle,
-            .level = c.VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-            .commandBufferCount = 1,
-        };
-        var handle: c.VkCommandBuffer = undefined;
-        try checkVk(
-            c.vkAllocateCommandBuffers(self.owner, &alloc_info, &handle),
-        );
-
-        return .{
-            .handle = handle,
-        };
-    }
+const CommandBufferState = enum(u8) {
+    Ready,
+    NotAllocated,
+    Recording,
+    RecordingEnded,
+    Submitted,
 };
 
 const CommandBuffer = struct {
+    const Self = @This();
+
     handle: c.VkCommandBuffer = undefined,
-};
+    state: CommandBufferState = .NotAllocated,
+    owner: c.VkDevice,
 
-const BufferUsage = enum(u8) {
-    Vertex,
-    Uniform,
-
-    pub fn getVkFlag(self: BufferUsage) c.VkBufferUsageFlags {
-        return switch (self) {
-            .Vertex => c.VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
-            .Uniform => c.VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+    pub fn allocate(pool: CommandPool, is_primary: bool) !Self {
+        assert(pool.handle != null);
+        var self = Self{
+            .owner = pool.owner,
         };
+        const alloc_info = c.VkCommandBufferAllocateInfo{
+            .commandPool = pool.handle,
+            .level = if (is_primary) c.VK_COMMAND_BUFFER_LEVEL_PRIMARY else c.VK_COMMAND_BUFFER_LEVEL_SECONDARY,
+            .commandBufferCount = 1,
+        };
+
+        try checkVk(
+            c.vkAllocateCommandBuffers(pool.owner, &alloc_info, &self.handle),
+        );
+        self.state = .Ready;
+
+        return self;
+    }
+
+    pub fn free(self: *Self, pool: CommandPool) void {
+        c.vkFreeCommandBuffers(self.owner, pool.handle, 1, &self.handle);
+    }
+
+    pub fn begin(self: *Self, is_single_use: bool) !void {
+        const begin_info = c.VkCommandBufferBeginInfo{
+            .flags = if (is_single_use) c.VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT else 0,
+        };
+        try checkVk(
+            c.vkBeginCommandBuffer(self.handle, &begin_info),
+        );
+        self.state = .Recording;
+    }
+
+    pub fn end(self: *Self) !void {
+        if (self.state != .Recording) @panic("Can't end. CommandBuffer not recording.");
+        try checkVk(
+            c.vkEndCommandBuffer(self.handle),
+        );
+        self.state = .RecordingEnded;
+    }
+
+    pub fn updateSubmitted(self: *Self) void {
+        self.state = .Submitted;
+    }
+
+    pub fn reset(self: *Self) void {
+        self.state = .Ready;
+    }
+
+    pub fn allocateAndBeginSingleUse(pool: CommandPool) !Self {
+        var handle = try CommandBuffer.allocate(pool, true);
+        try handle.begin(true);
+
+        return handle;
+    }
+
+    pub fn endSigleUse(self: *Self, pool: CommandPool, queue: Queue) !void {
+        try self.end();
+
+        const submit_info = c.VkSubmitInfo{
+            .commandBufferCount = 1,
+            .pCommandBuffers = &self.handle,
+        };
+
+        try checkVk(
+            c.vkQueueSubmit(queue.handle, 1, &submit_info, null),
+        );
+
+        try checkVk(
+            c.vkQueueWaitIdle(queue.handle),
+        );
+
+        self.free(pool);
     }
 };
 
@@ -727,28 +789,51 @@ const Fence = struct {
     }
 };
 
+const BufferUsage = enum(u8) {
+    Vertex,
+    Uniform,
+    TransferDst,
+    TransferSrc,
+
+    pub fn getVkFlag(self: BufferUsage) c.VkBufferUsageFlags {
+        return switch (self) {
+            .Vertex => c.VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+            .Uniform => c.VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+            .TransferDst => c.VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+            .TransferSrc => c.VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+        };
+    }
+};
+
 const Buffer = struct {
     const Self = @This();
 
     handle: c.VkBuffer = undefined,
     memory: c.VkDeviceMemory = undefined,
-    usage: BufferUsage,
+    size: u64,
+    usage: u32,
+    mem_property_flags: u32,
     owner: c.VkDevice,
+    mem_type_index: u32 = 0,
+    is_locked: bool = false,
 
     pub fn init(
         device: Device,
-        size: c.VkDeviceSize,
-        usage: BufferUsage,
-        properties: c.VkMemoryPropertyFlags,
+        size: u64,
+        usage: u32,
+        property_flags: u32,
+        bind_on_create: bool,
     ) !Self {
         var self = Self{
             .usage = usage,
             .owner = device.handle,
+            .size = size,
+            .mem_property_flags = property_flags,
         };
 
         var buffer_info = c.VkBufferCreateInfo{
             .size = size,
-            .usage = usage.getVkFlag(),
+            .usage = usage,
             .sharingMode = c.VK_SHARING_MODE_EXCLUSIVE,
         };
         try checkVk(
@@ -758,19 +843,20 @@ const Buffer = struct {
         var mem_reqs: c.VkMemoryRequirements = undefined;
         c.vkGetBufferMemoryRequirements(device.handle, self.handle, &mem_reqs);
 
-        const memory_type_index = try device.physical.findMemoryType(mem_reqs.memoryTypeBits, properties);
+        const mem_type_index = try device.physical.findMemoryType(mem_reqs.memoryTypeBits, property_flags);
+        self.mem_type_index = mem_type_index;
         var alloc_info = c.VkMemoryAllocateInfo{
             .allocationSize = mem_reqs.size,
-            .memoryTypeIndex = memory_type_index,
+            .memoryTypeIndex = mem_type_index,
         };
 
         try checkVk(
             c.vkAllocateMemory(device.handle, &alloc_info, null, &self.memory),
         );
 
-        try checkVk(
-            c.vkBindBufferMemory(device.handle, self.handle, self.memory, 0),
-        );
+        if (bind_on_create) {
+            try self.bind(0);
+        }
 
         return self;
     }
@@ -780,7 +866,71 @@ const Buffer = struct {
         c.vkDestroyBuffer(self.owner, self.handle, null);
     }
 
-    // pub fn getMappedSlice(self: Self) []Vertex {}
+    pub fn resize(self: *Self, new_size: u64) !void {
+        const new_buffer = try Buffer.init(self.owner, new_size, self.usage, self.mem_property_flags, true);
+        self.copyDataTo(new_buffer);
+
+        try checkVk(c.vkDeviceWaitIdle(self.owner));
+
+        self.deinit();
+        self.* = new_buffer;
+    }
+
+    pub fn bind(self: *Self, offset: u64) !void {
+        try checkVk(
+            c.vkBindBufferMemory(self.owner, self.handle, self.memory, offset),
+        );
+    }
+
+    pub fn loadData(self: *Self, offset: u64, size: u64, flags: u32, T: type, data: []T) !void {
+        const data_ptr = try self.lockMemory(offset, size, flags);
+        defer self.unlockMemory(data_ptr);
+
+        const mapped_many_item_ptr: [*]T = @ptrCast(@alignCast(data_ptr.?));
+        const mapped_slice = mapped_many_item_ptr[offset..size];
+
+        @memcpy(data, mapped_slice);
+    }
+
+    pub fn lockMemory(self: *Self, offset: u64, size: u64, flags: u32) !?*anyopaque {
+        var data_ptr: ?*anyopaque = undefined;
+        try checkVk(
+            c.vkMapMemory(self.owner, self.memory, offset, size, flags, &data_ptr),
+        );
+        self.is_locked = true;
+        return data_ptr;
+    }
+
+    pub fn unlockMemory(self: *Self) void {
+        c.vkUnmapMemory(self.owner, self.memory);
+        self.is_locked = false;
+    }
+
+    pub fn copyDataTo(
+        self: *Self,
+        pool: CommandPool,
+        // fence: Fence,
+        queue: Queue,
+        offset: u64,
+        other_buffer: Buffer,
+        other_offset: u64,
+        size: u64,
+    ) !void {
+        try checkVk(
+            c.vkQueueWaitIdle(queue.handle),
+        );
+
+        var tmp = try CommandBuffer.allocateAndBeginSingleUse(pool);
+        var region_copy = c.VkBufferCopy{
+            .srcOffset = offset,
+            .dstOffset = other_offset,
+            .size = size,
+        };
+
+        c.vkCmdCopyBuffer(tmp.handle, self.handle, other_buffer.handle, 1, &region_copy);
+
+        try tmp.endSigleUse(pool, queue);
+    }
 };
 
 const DescriptorType = enum(u8) {
@@ -903,7 +1053,7 @@ const DescriptorPool = struct {
         ubo: type,
     ) void {
         //TODO: remove on ubo/ descriptor refactor
-        assert(buffer.usage == .Uniform);
+        assert(buffer.usage == c.VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
 
         var desc_buffer_info = c.VkDescriptorBufferInfo{
             .buffer = buffer.handle,
@@ -1242,6 +1392,10 @@ const App = struct {
         // Initialize descriptor sets
         self.descriptor_set = try self.descriptor_pool.allocateDescriptorSet(self.descriptor_layout);
 
+        // Initialize command pool and buffer
+        self.command_pool = try CommandPool.init(self.device);
+        self.command_buffer = try CommandBuffer.allocate(self.command_pool, true);
+
         // Initialize buffers for the updateDescriptorSets call
         try self.initVertexBuffer();
         try self.initUniformBuffer();
@@ -1266,10 +1420,7 @@ const App = struct {
             self.swapchain,
         );
 
-        // Initialize command pool and buffer
-        self.command_pool = try CommandPool.init(self.device);
-        self.command_buffer = try self.command_pool.allocateCommandBuffer();
-
+        // Initialize semaphores and fence
         self.sync = try SyncObjects.init(self.device);
     }
 
@@ -1318,7 +1469,7 @@ const App = struct {
             std.math.maxInt(u64),
         ));
 
-        try self.updateUniformBuffer();
+        // try self.updateUniformBuffer();
 
         // Acquire an image from the swapchain.
         var image_index: u32 = 0;
@@ -1399,27 +1550,33 @@ const App = struct {
     /// Helper function
     fn initVertexBuffer(self: *Self) !void {
         // Calculate the total size needed for both axis and grid vertices.
-        const total_vertex_count = self.scene.axis.len + self.scene.grid.len;
-        const buffer_size = @sizeOf(Vertex) * total_vertex_count;
+        // const total_vertex_count = self.scene.axis.len + self.scene.grid.len;
+        const buffer_size = @sizeOf(Vertex) * 1024 * 1024;
 
-        if (buffer_size == 0) return; // Avoid creating a zero-size buffer
+        // if (buffer_size == 0) return; // Avoid creating a zero-size buffer
 
         self.vertex_buffer = try Buffer.init(
             self.device,
             buffer_size,
-            .Vertex,
-            c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+            c.VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | c.VK_BUFFER_USAGE_TRANSFER_SRC_BIT | c.VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+            c.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+            true,
         );
 
-        // --- Copy vertex data to the buffer ---
-        var data_ptr: ?*anyopaque = undefined;
-        try checkVk(
-            c.vkMapMemory(self.device.handle, self.vertex_buffer.memory, 0, buffer_size, 0, &data_ptr),
+        var staging_buffer = try Buffer.init(
+            self.device,
+            buffer_size,
+            c.VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+            c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+            true,
         );
-        defer c.vkUnmapMemory(self.device.handle, self.vertex_buffer.memory);
+
+        // Map and copy axis and grid data to the staging buffer
+        const data_ptr = try staging_buffer.lockMemory(0, buffer_size, 0);
+        defer staging_buffer.unlockMemory();
 
         const many_item_ptr: [*]Vertex = @ptrCast(@alignCast(data_ptr.?));
-        const mapped_vertex_slice = many_item_ptr[0..total_vertex_count];
+        const mapped_vertex_slice = many_item_ptr[0..self.scene.getTotalVertexCount()];
 
         // Copy the axis vertices to the beginning of the buffer.
         @memcpy(mapped_vertex_slice[0..self.scene.axis.len], &self.scene.axis);
@@ -1427,27 +1584,70 @@ const App = struct {
         // Copy the grid vertices immediately after the axis vertices.
         const grid_offset = self.scene.axis.len;
         @memcpy(mapped_vertex_slice[grid_offset .. grid_offset + self.scene.grid.len], self.scene.grid);
+
+        // Copy from staging buffer to device local vertex buffer
+        try staging_buffer.copyDataTo(
+            self.command_pool,
+            self.device.graphics_queue,
+            0,
+            self.vertex_buffer,
+            0,
+            buffer_size,
+        );
+
+        staging_buffer.deinit();
     }
 
     /// Helper function
     fn initUniformBuffer(self: *Self) !void {
-        // FIX: The buffer size must match the UniformBufferObject struct, not the Vertex struct.
         const ubo_size = @sizeOf(UniformBufferObject);
+        // TODO: maybe use staged buffer here too
         self.uniform_buffer = try Buffer.init(
             self.device,
             ubo_size,
-            .Uniform,
+            c.VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
             c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+            true,
         );
+        try self.updateUniformBuffer();
+    }
+
+    pub fn uploadDataRange(
+        self: *Self,
+        _: Fence,
+        queue: Queue,
+        buffer: Buffer,
+        offset: u64,
+        size: u64,
+        // data: ?*anyopaque,
+    ) !void {
+        const prop_flags = c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT;
+
+        const stage = try Buffer.init(
+            self.device,
+            size,
+            c.VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+            prop_flags,
+            true,
+        );
+
+        try stage.loadData(0, size, 0, Vertex, try std.mem.concat(self.allocator, Vertex, .{
+            &self.scene.axis,
+            self.scene.grid,
+        }));
+
+        stage.copyDataTo(self.descriptor_pool, queue, 0, buffer, offset, size);
+
+        stage.deinit();
     }
 
     fn updateUniformBuffer(self: *Self) !void {
         const ubo = UniformBufferObject{
-            .view_matrix = self.scene.view_matrix,
+            .view_matrix = self.scene.camera.view(),
             .perspective_matrix = blk: {
                 // FIX: This is the correct perspective matrix for Vulkan's coordinate system.
                 //TODO: Internalize this better, maybe use a function to generate it.
-                const fovy = std.math.degreesToRadians(45.0);
+                const fovy = std.math.degreesToRadians(90.0);
                 // TODO: Get these values from input and served window dimentions
                 const aspect: f32 = @as(f32, @floatFromInt(self.window.size.x)) / @as(f32, @floatFromInt(self.window.size.y));
                 const near = 0.1;
@@ -1472,7 +1672,9 @@ const App = struct {
 
     fn recreateSwapchain(self: *Self) !void {
         // Wait until the device is idle before we start destroying resources.
-        try checkVk(c.vkDeviceWaitIdle(self.device.handle));
+        try checkVk(
+            c.vkDeviceWaitIdle(self.device.handle),
+        );
 
         // --- 1. Destroy old resources ---
         // Destroy in reverse order of creation.
@@ -1540,7 +1742,7 @@ const App = struct {
             null,
         );
 
-        c.vkCmdDraw(self.command_buffer.handle, @intCast(self.scene.axis.len + self.scene.grid.len), 1, 0, 0);
+        c.vkCmdDraw(self.command_buffer.handle, @intCast(self.scene.axis.len + self.scene.grid.len + self.scene.lines.items.len), 1, 0, 0);
 
         c.vkCmdEndRenderPass(self.command_buffer.handle);
         try checkVk(c.vkEndCommandBuffer(self.command_buffer.handle));

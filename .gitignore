@@ -21,3 +21,6 @@ Thumbs.db
 
 #Shader binary
 src/shaders/spirv/bin/
+
+#fonts
+scr/fonts/assets/*
