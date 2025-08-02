@@ -1,11 +1,11 @@
 const std = @import("std");
 const vk = @import("../test.zig"); // Vulkan context and helpers
-const c = @import("c").c; // C imports for Vulkan
+const c = @import("c").imports; // C imports for Vulkan
 const font = @import("font");
 const util = @import("util");
 
-const gui_vert_shader_bin = @import("spirv").gui_vs;
-const gui_frag_shader_bin = @import("spirv").gui_fs;
+const gui_vert_shader_bin = @import("spirv").gui_vert;
+const gui_frag_shader_bin = @import("spirv").gui_frag;
 
 pub const TextBuffer = struct {
     const Self = @This();

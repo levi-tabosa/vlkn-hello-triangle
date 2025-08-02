@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const spv_path_opt = @import("spv_path");
+const spv_path_opt = @import("shaders");
 
 // Helper function
 fn embed(comptime filename: []const u8) []const u8 {
