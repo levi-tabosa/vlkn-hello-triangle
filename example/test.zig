@@ -36,6 +36,7 @@ pub fn vkCheck(result: c.VkResult) !void {
         c.VK_ERROR_NATIVE_WINDOW_IN_USE_KHR => error.NativeWindowInUse,
         c.VK_SUBOPTIMAL_KHR => error.VulkanSuboptimalKHR,
         c.VK_ERROR_OUT_OF_POOL_MEMORY => error.VulkanPoolOutOfMemory,
+        c.VK_ERROR_EXTENSION_NOT_PRESENT => error.VulkanExtensionNotPresent,
         else => error.VulkanDefault,
     };
 }
@@ -2034,7 +2035,7 @@ pub fn main() !void {
     defer c.glfwTerminate();
 
     var gpa = std.heap.DebugAllocator(.{}){};
-    defer _ = gpa.deinit();
+    // defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
     var app = try App.init(allocator);
