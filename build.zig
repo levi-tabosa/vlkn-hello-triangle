@@ -29,7 +29,7 @@ fn addShaderStep(
     return &install_step.step;
 }
 
-/// This function configures a `Module` with all necessary C dependencies.
+//// This function configures a `Module` with all necessary C dependencies.
 /// Any executable importing this module will automatically inherit these settings.
 fn configureVulkanAndGlfw(
     module: *std.Build.Module,
@@ -40,19 +40,25 @@ fn configureVulkanAndGlfw(
     vk_loader_dep: *std.Build.Dependency,
     vk_loader_lib: *std.Build.Step.Compile,
 ) void {
-    // _ = vk_headers_dep;
     module.linkLibrary(glfw_lib);
     module.addIncludePath(glfw_dep.path("include"));
+    module.linkLibrary(vk_loader_lib);
     module.addIncludePath(vk_headers_dep.path("include"));
     module.addIncludePath(vk_loader_dep.path("include"));
     module.addIncludePath(vk_loader_dep.path("loader"));
-    module.linkLibrary(vk_loader_lib);
 
-    // Platform-specific libraries
+    // Platform-specific libraries and source files
     switch (target.result.os.tag) {
         .windows => {
             module.linkSystemLibrary("gdi32", .{});
             module.linkSystemLibrary("shell32", .{});
+            vk_loader_lib.root_module.addCMacro("_CRT_SECURE_NO_WARNINGS", "NULL");
+
+            // Add the correct Windows-specific source files for the loader.
+            vk_loader_lib.addCSourceFiles(.{
+                .root = vk_loader_dep.path("loader"),
+                .files = &.{ "loader_windows.c", "dirent_on_windows.c", "wsi_win32.c" },
+            });
         },
         .linux => {
             module.linkSystemLibrary("m", .{});
@@ -65,42 +71,78 @@ fn configureVulkanAndGlfw(
             module.linkSystemLibrary("Xi", .{});
             module.linkSystemLibrary("Xcursor", .{});
             module.linkSystemLibrary("Xxf86vm", .{});
+
+            vk_loader_lib.root_module.addCMacro("SYSCONFDIR", "\"/etc\"");
+            vk_loader_lib.root_module.addCMacro("FALLBACK_CONFIG_DIRS", "\"/etc/xdg\"");
+            vk_loader_lib.root_module.addCMacro("FALLBACK_DATA_DIRS", "\"/usr/local/share:/usr/share\"");
+            vk_loader_lib.root_module.addCMacro("HAVE_SYS_STAT_H", "1");
+            vk_loader_lib.root_module.addCMacro("HAVE_XCB_H", "1");
+            vk_loader_lib.root_module.addCMacro("HAVE_STDATOMIC_H", "1");
+
+            // Add the correct Linux-specific source files for the loader.
+            vk_loader_lib.addCSourceFiles(.{
+                .root = vk_loader_dep.path("loader"),
+                .files = &.{ "loader_linux.c", "wsi.c" },
+            });
         },
         .macos => {
             module.linkFramework("Cocoa", .{});
             module.linkFramework("IOKit", .{});
             module.linkFramework("CoreFoundation", .{});
+
+            // For macOS, the Vulkan loader re-uses the Linux source file for loader discovery.
+            // Zig automatically defines __APPLE__ when targeting macOS, which the source uses.
+            vk_loader_lib.root_module.addCMacro("SYSCONFDIR", "\"/etc\"");
+            vk_loader_lib.root_module.addCMacro("HAVE_SYS_STAT_H", "1");
+            vk_loader_lib.root_module.addCMacro("HAVE_STDATOMIC_H", "1");
+
+            vk_loader_lib.addCSourceFiles(.{
+                .root = vk_loader_dep.path("loader"),
+                .files = &.{"loader_linux.c"},
+            });
+            // The macOS WSI file is Objective-C
+            vk_loader_lib.addCSourceFiles(.{
+                .root = vk_loader_dep.path("loader"),
+                .files = &.{
+                    "wsi_metal.m",
+                },
+            });
         },
-        else => {},
+        else => @panic("Unsupported OS."),
     }
 }
-
 pub fn build(b: *std.Build) !void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    // Declare dependencies and libs
     const glfw_dep = b.dependency("glfw", .{ .target = target, .optimize = optimize });
-    const vk_headers_dep = b.dependency("vulkan_headers", .{});
+    const vk_headers_dep = b.dependency("vulkan_headers", .{ .target = target, .optimize = optimize });
     const vk_loader_dep = b.dependency("vulkan_loader", .{ .target = target, .optimize = optimize });
     const glslc_dep = b.dependency("glslc", .{ .target = target, .optimize = optimize });
     const glslc_exe = glslc_dep.artifact("shader_compiler");
-
     const lib_glfw = b.addStaticLibrary(.{ .name = "glfw", .target = target, .optimize = optimize });
+    const lib_vulkan_loader = b.addStaticLibrary(.{ .name = "vulkan-loader", .target = target, .optimize = optimize });
+
+    // Linking
     lib_glfw.linkLibC();
-    lib_glfw.addIncludePath(glfw_dep.path("include"));
+    lib_vulkan_loader.linkLibC();
     lib_glfw.addCSourceFiles(.{
         .root = glfw_dep.path("src"),
         .files = &.{
-            "context.c",        "init.c",     "input.c",       "monitor.c",   "vulkan.c",       "window.c",
-            "osmesa_context.c", "platform.c", "egl_context.c", "null_init.c", "null_monitor.c", "null_joystick.c",
+            "context.c",        "init.c",         "input.c",
+            "monitor.c",        "vulkan.c",       "window.c",
+            "osmesa_context.c", "platform.c",     "egl_context.c",
+            "null_init.c",      "null_monitor.c", "null_joystick.c",
             "null_window.c",
         },
     });
     if (target.result.os.tag == .linux) {
         lib_glfw.addCSourceFiles(.{ .root = glfw_dep.path("src"), .files = &.{
-            "x11_init.c",    "x11_monitor.c",    "x11_window.c",   "xkb_unicode.c",
-            "posix_time.c",  "posix_thread.c",   "posix_module.c", "posix_poll.c",
-            "glx_context.c", "linux_joystick.c",
+            "x11_init.c",       "x11_monitor.c", "x11_window.c",
+            "xkb_unicode.c",    "posix_time.c",  "posix_thread.c",
+            "posix_module.c",   "posix_poll.c",  "glx_context.c",
+            "linux_joystick.c",
         } });
         lib_glfw.root_module.addCMacro("_GLFW_X11", "1");
     } else if (target.result.os.tag == .windows) {
@@ -119,47 +161,25 @@ pub fn build(b: *std.Build) !void {
         lib_glfw.root_module.addCMacro("_GLFW_COCOA", "1");
     }
 
-    const lib_vulkan_loader = b.addStaticLibrary(.{ .name = "vulkan-loader", .target = target, .optimize = optimize });
-
-    lib_vulkan_loader.linkLibC();
-    lib_vulkan_loader.addIncludePath(vk_headers_dep.path("include"));
-    lib_vulkan_loader.addIncludePath(vk_loader_dep.path("loader"));
-    lib_vulkan_loader.addIncludePath(vk_loader_dep.path("loader/generated"));
-
-    lib_vulkan_loader.root_module.addCMacro("VULKAN_LOADER_STATIC_LIB", "1");
-    lib_vulkan_loader.root_module.addCMacro("FALLTHROUGH_SUPPORTED", "1");
-
-    // This enables beta extensions like the ones for CUDA, fixing the VK_OBJECT_TYPE errors.
-    lib_vulkan_loader.root_module.addCMacro("VK_ENABLE_BETA_EXTENSIONS", "1");
-
-    if (target.result.os.tag == .linux) {
-        // These paths are normally configured by CMake. We provide standard defaults for Linux.
-        lib_vulkan_loader.root_module.addCMacro("SYSCONFDIR", "\"/etc\"");
-        lib_vulkan_loader.root_module.addCMacro("FALLBACK_CONFIG_DIRS", "\"/etc/xdg\"");
-        lib_vulkan_loader.root_module.addCMacro("FALLBACK_DATA_DIRS", "\"/usr/local/share:/usr/share\"");
-
-        // The loader's source code checks for these via #ifdef to include the right system headers.
-        lib_vulkan_loader.root_module.addCMacro("HAVE_SYS_STAT_H", "1");
-        lib_vulkan_loader.root_module.addCMacro("HAVE_XCB_H", "1");
-        lib_vulkan_loader.root_module.addCMacro("HAVE_STDATOMIC_H", "1");
-    } else if (target.result.os.tag == .windows) {
-        // Suppresses warnings about using "unsafe" C functions on Windows.
-        lib_vulkan_loader.root_module.addCMacro("_CRT_SECURE_NO_WARNINGS", "NULL");
-    } else if (target.result.os.tag == .macos) {
-        lib_vulkan_loader.root_module.addCMacro("SYSCONFDIR", "\"/etc\"");
-        lib_vulkan_loader.root_module.addCMacro("HAVE_SYS_STAT_H", "1");
-        lib_vulkan_loader.root_module.addCMacro("HAVE_STDATOMIC_H", "1");
-    }
-
+    // Generic source files, all located in the `loader` directory.
     lib_vulkan_loader.addCSourceFiles(.{
         .root = vk_loader_dep.path("loader"),
         .files = &.{
             "loader.c",           "allocation.c",         "unknown_function_handling.c", "trampoline.c",
             "terminator.c",       "wsi.c",                "log.c",                       "cJSON.c",
             "loader_json.c",      "loader_environment.c", "settings.c",                  "dev_ext_trampoline.c",
-            "extension_manual.c", "gpa_helper.c",         "debug_utils.c",
+            "extension_manual.c", "debug_utils.c",        "gpa_helper.c",
         },
     });
+
+    // Include paths
+    lib_glfw.addIncludePath(glfw_dep.path("include"));
+    lib_vulkan_loader.addIncludePath(vk_headers_dep.path("include"));
+    lib_vulkan_loader.addIncludePath(vk_loader_dep.path("loader"));
+    lib_vulkan_loader.addIncludePath(vk_loader_dep.path("loader/generated"));
+    lib_vulkan_loader.root_module.addCMacro("VULKAN_LOADER_STATIC_LIB", "1");
+    lib_vulkan_loader.root_module.addCMacro("FALLTHROUGH_SUPPORTED", "1");
+    lib_vulkan_loader.root_module.addCMacro("VK_ENABLE_BETA_EXTENSIONS", "1");
 
     const c_mod = b.createModule(.{
         .root_source_file = b.path("src/c/c.zig"),

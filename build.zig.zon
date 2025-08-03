@@ -14,12 +14,12 @@
         },
         // We now fetch the official C headers directly from Khronos.
         .vulkan_headers = .{
-            .url = "https://github.com/KhronosGroup/Vulkan-Headers/archive/refs/tags/v1.4.321.tar.gz",
-            .hash = "12202cc7418608d655643110f848558d577dd795a3c0e3a249203edf0c3dc8a2f4d4",
+            .url = "https://github.com/KhronosGroup/Vulkan-Headers/archive/refs/tags/v1.4.313.tar.gz",
+            .hash = "1220f8be037b5e8eb266538caf396519b76f571c61af052f808f6b0a9a1af7263de2",
         },
         .vulkan_loader = .{
-            .url = "https://github.com/KhronosGroup/Vulkan-Loader/archive/refs/tags/v1.4.321.tar.gz",
-            .hash = "1220a1178c62a4eef31d60ff3ee1941a68839459fbb564a4057826d44798f08b741b", // Replace with actual hash after fetching
+            .url = "https://github.com/KhronosGroup/Vulkan-Loader/archive/refs/tags/v1.4.313.tar.gz",
+            .hash = "122060c5696fed22114fc3d8bd926456d12c32b7ad2d90ac7a37cf707afa36208a97", // Replace with actual hash after fetching
         },
         .glslc = .{
             .url = "https://github.com/Games-by-Mason/shader_compiler/archive/refs/tags/v0.1.0.tar.gz",

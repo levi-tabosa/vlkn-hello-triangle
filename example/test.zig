@@ -363,7 +363,7 @@ const Instance = struct {
 
     handle: c.VkInstance = undefined,
 
-    pub fn init() !Self {
+    pub fn init(allocator: std.mem.Allocator) !Self {
         var self = Instance{};
         const app_info = c.VkApplicationInfo{
             .pApplicationName = "Vulkan Line App",
@@ -372,14 +372,39 @@ const Instance = struct {
             .engineVersion = c.VK_MAKE_API_VERSION(0, 1, 0, 0),
             .apiVersion = c.VK_API_VERSION_1_0,
         };
-        var extension_count: u32 = 0;
-        const required_extensions_ptr = c.glfwGetRequiredInstanceExtensions(&extension_count);
-        const required_extensions = required_extensions_ptr[0..extension_count];
+
+        var req_glfw_extension_count: u32 = 0;
+        const req_glfw_extensions_ptr = c.glfwGetRequiredInstanceExtensions(&req_glfw_extension_count);
+
+        var enabled_extensions = std.ArrayList([*c]const u8).init(allocator);
+        defer enabled_extensions.deinit();
+        try enabled_extensions.appendSlice(req_glfw_extensions_ptr[0..req_glfw_extension_count]);
+
+        // Debug
+        var available_extension_count: u32 = 0;
+        _ = c.vkEnumerateInstanceExtensionProperties(null, &available_extension_count, null);
+        const available_extensions = try allocator.alloc(c.VkExtensionProperties, available_extension_count);
+        defer allocator.free(available_extensions);
+        _ = c.vkEnumerateInstanceExtensionProperties(null, &available_extension_count, available_extensions.ptr);
+
+        std.debug.print("Available extensions:\n", .{});
+        for (available_extensions) |ext| {
+            std.debug.print("  {s}\n", .{ext.extensionName});
+        }
+
+        std.debug.print("Enabled extensions:\n", .{});
+        for (enabled_extensions.items) |ext| {
+            std.debug.print("  {s}\n", .{ext});
+        }
+
         const create_info = c.VkInstanceCreateInfo{
             .pApplicationInfo = &app_info,
-            .enabledExtensionCount = @intCast(required_extensions.len),
-            .ppEnabledExtensionNames = required_extensions.ptr,
+            .enabledExtensionCount = @intCast(enabled_extensions.items.len),
+            .ppEnabledExtensionNames = enabled_extensions.items.ptr,
+            .enabledLayerCount = 0,
+            .ppEnabledLayerNames = null,
         };
+
         try vkCheck(c.vkCreateInstance(&create_info, null, &self.handle));
         return self;
     }
@@ -1557,7 +1582,7 @@ pub const VulkanContext = struct {
     transfer_command_pool: CommandPool,
 
     pub fn init(allocator: Allocator, window: Window) !Self {
-        const instance = try Instance.init();
+        const instance = try Instance.init(allocator);
         const surface = try Surface.init(instance, window);
         const physical_device = try PhysicalDevice.init(allocator, instance, surface);
         const device = try Device.init(allocator, physical_device);
