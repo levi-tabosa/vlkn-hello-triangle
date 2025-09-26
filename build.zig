@@ -1,5 +1,4 @@
 const std = @import("std");
-
 /// Compiles a GLSL shader to SPIR-V using shader-compiler targeting Vulkan-1.3
 /// Returns a install step that associate with the artifact.
 fn addShaderStep(
@@ -121,8 +120,17 @@ pub fn build(b: *std.Build) !void {
     const vk_loader_dep = b.dependency("vulkan_loader", .{ .target = target, .optimize = optimize });
     const glslc_dep = b.dependency("glslc", .{ .target = target, .optimize = optimize });
     const glslc_exe = glslc_dep.artifact("shader_compiler");
-    const lib_glfw = b.addStaticLibrary(.{ .name = "glfw", .target = target, .optimize = optimize });
-    const lib_vulkan_loader = b.addStaticLibrary(.{ .name = "vulkan-loader", .target = target, .optimize = optimize });
+
+    const glfw_lib_mod = b.addModule("glfw-lib-module", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    const vk_loader_lib_mod = b.addModule("vk-loader-lib-module", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    const lib_glfw = b.addLibrary(.{ .name = "glfw", .root_module = glfw_lib_mod });
+    const lib_vulkan_loader = b.addLibrary(.{ .name = "vulkan-loader", .root_module = vk_loader_lib_mod });
 
     // Linking
     lib_glfw.linkLibC();
@@ -195,8 +203,8 @@ pub fn build(b: *std.Build) !void {
         .{ .name = "test", .path = "src/shaders/code/test" },
     };
 
-    var shader_install_steps = std.ArrayList(*std.Build.Step).init(b.allocator);
-    defer shader_install_steps.deinit();
+    var shader_install_steps: std.ArrayList(*std.Build.Step) = try .initCapacity(b.allocator, shaders.len * 2);
+    defer shader_install_steps.deinit(b.allocator);
 
     for (shaders) |shader| {
         const vert_source = b.fmt("{s}/{s}.vert", .{ shader.path, shader.name });
@@ -205,8 +213,8 @@ pub fn build(b: *std.Build) !void {
         const frag_output = b.fmt("{s}.frag.spv", .{shader.name});
         const install_vert_step = addShaderStep(b, glslc_exe, optimize, vert_source, vert_output);
         const install_frag_step = addShaderStep(b, glslc_exe, optimize, frag_source, frag_output);
-        try shader_install_steps.append(install_vert_step);
-        try shader_install_steps.append(install_frag_step);
+        try shader_install_steps.append(b.allocator, install_vert_step);
+        try shader_install_steps.append(b.allocator, install_frag_step);
     }
 
     const spirv_options = b.addOptions();
@@ -222,11 +230,14 @@ pub fn build(b: *std.Build) !void {
 
     for (execs) |exe_info| {
         const exe_id, const src = exe_info;
-        const exe = b.addExecutable(.{
-            .name = exe_id,
+        const exe_mod = b.addModule(b.fmt("{s} module ", .{exe_id}), .{
+            .root_source_file = b.path(src),
             .target = target,
             .optimize = optimize,
-            .root_source_file = b.path(src),
+        });
+        const exe = b.addExecutable(.{
+            .name = exe_id,
+            .root_module = exe_mod,
         });
 
         exe.root_module.addImport("c", c_mod);
