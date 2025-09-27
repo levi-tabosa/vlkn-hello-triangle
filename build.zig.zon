@@ -12,6 +12,10 @@
             .url = "https://github.com/glfw/glfw/archive/refs/tags/3.4.tar.gz",
             .hash = "1220c46ebcac607065f942193b82a21b87213fca4b0d50c83461f8f5e22955fcb88f",
         },
+        .x11 = .{
+            .url = "https://github.com/tiawl/X11.zig/archive/refs/tags/zig-0.15.1.tar.gz",
+            .hash = "X11_zig-1.0.0-UuAzbPsmQwA70CUq_-rbpkZggWaUMl284eiLLLGxSzUV",
+        },
         // We now fetch the official C headers directly from Khronos.
         .vulkan_headers = .{
             .url = "https://github.com/KhronosGroup/Vulkan-Headers/archive/refs/tags/v1.4.327.tar.gz",

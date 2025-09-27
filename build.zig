@@ -128,6 +128,7 @@ pub fn build(b: *std.Build) !void {
     const vk_loader_dep = b.dependency("vulkan_loader", .{ .target = target, .optimize = optimize });
     const glslc_dep = b.dependency("glslc", .{ .target = target, .optimize = optimize });
     const glslc_exe = glslc_dep.artifact("shader_compiler");
+    const x11_headers_dep = b.dependency("x11", .{ .target = target, .optimize = optimize });
 
     const glfw_lib_mod = b.addModule("glfw-lib-module", .{
         .target = target,
