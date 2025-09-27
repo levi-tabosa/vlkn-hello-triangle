@@ -64,19 +64,26 @@ fn configureVulkanAndGlfw(
             module.linkSystemLibrary("pthread", .{});
             module.linkSystemLibrary("dl", .{});
             module.linkSystemLibrary("X11", .{});
-            module.linkSystemLibrary("xcb", .{});
+            // module.linkSystemLibrary("xcb", .{});
             module.linkSystemLibrary("Xrandr", .{});
             module.linkSystemLibrary("Xinerama", .{});
             module.linkSystemLibrary("Xi", .{});
             module.linkSystemLibrary("Xcursor", .{});
             module.linkSystemLibrary("Xxf86vm", .{});
 
+            // Tell the loader sources we have these system headers / features
             vk_loader_lib.root_module.addCMacro("SYSCONFDIR", "\"/etc\"");
             vk_loader_lib.root_module.addCMacro("FALLBACK_CONFIG_DIRS", "\"/etc/xdg\"");
             vk_loader_lib.root_module.addCMacro("FALLBACK_DATA_DIRS", "\"/usr/local/share:/usr/share\"");
             vk_loader_lib.root_module.addCMacro("HAVE_SYS_STAT_H", "1");
-            vk_loader_lib.root_module.addCMacro("HAVE_XCB_H", "1");
+            // vk_loader_lib.root_module.addCMacro("HAVE_XCB_H", "1");
             vk_loader_lib.root_module.addCMacro("HAVE_STDATOMIC_H", "1");
+
+            // Add these two lines (and optional _GNU_SOURCE) to make dladdr/Dl_info visible
+            vk_loader_lib.root_module.addCMacro("HAVE_DLFCN_H", "1");
+            vk_loader_lib.root_module.addCMacro("HAVE_DLADDR", "1");
+            // optional, sometimes source expects GNU extensions:
+            vk_loader_lib.root_module.addCMacro("_GNU_SOURCE", "1");
 
             // Add the correct Linux-specific source files for the loader.
             vk_loader_lib.addCSourceFiles(.{
@@ -85,6 +92,7 @@ fn configureVulkanAndGlfw(
             });
         },
         .macos => {
+            // Untested stub
             module.linkFramework("Cocoa", .{});
             module.linkFramework("IOKit", .{});
             module.linkFramework("CoreFoundation", .{});
@@ -133,8 +141,8 @@ pub fn build(b: *std.Build) !void {
     const lib_vulkan_loader = b.addLibrary(.{ .name = "vulkan-loader", .root_module = vk_loader_lib_mod });
 
     // Linking
-    lib_glfw.linkLibC();
-    lib_vulkan_loader.linkLibC();
+    lib_glfw.linkLibCpp();
+    lib_vulkan_loader.linkLibCpp();
     lib_glfw.addCSourceFiles(.{
         .root = glfw_dep.path("src"),
         .files = &.{

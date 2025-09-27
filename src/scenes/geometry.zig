@@ -186,14 +186,14 @@ pub const Scene = struct {
             .allocator = allocator,
             .axis = createAxis(resolution),
             .grid = try createGrid(allocator, resolution),
-            .lines = std.ArrayList(V3).init(allocator),
+            .lines = try std.ArrayList(V3).initCapacity(allocator, 20),
             .camera = Camera.init(20.0),
         };
     }
 
     pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
         allocator.free(self.grid);
-        self.lines.deinit();
+        self.lines.deinit(self.allocator);
     }
 
     pub fn clear(self: *Self) void {
@@ -235,8 +235,8 @@ pub const Scene = struct {
     }
 
     pub fn addLine(self: *Self, start: [3]f32, end: [3]f32) !void {
-        try self.lines.append(.{ .coor = start, .color = .{ 1.0, 0.0, 1.0, 1.0 } });
-        try self.lines.append(.{ .coor = end, .color = .{ 1.0, 0.0, 1.0, 1.0 } });
+        try self.lines.append(self.allocator, .{ .coor = start, .color = .{ 1.0, 0.0, 1.0, 1.0 } });
+        try self.lines.append(self.allocator, .{ .coor = end, .color = .{ 1.0, 0.0, 1.0, 1.0 } });
     }
 
     pub fn getTotalVertexCount(self: Self) usize {

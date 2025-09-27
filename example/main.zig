@@ -107,7 +107,7 @@ fn createBuffer(
 
 fn createShaderModule(allocator: std.mem.Allocator, device: c.VkDevice, code: []const u8) !c.VkShaderModule {
     std.debug.assert(code.len % 4 == 0);
-    const aligned_code_slice = try allocator.alignedAlloc(u32, 4, code.len / @sizeOf(u32));
+    const aligned_code_slice = try allocator.alignedAlloc(u32, .@"4", code.len / @sizeOf(u32));
     defer allocator.free(aligned_code_slice);
     @memcpy(std.mem.sliceAsBytes(aligned_code_slice), code);
 
@@ -553,7 +553,7 @@ pub fn main() !void {
         var mouse_y: f64 = 0;
         c.glfwGetCursorPos(window, &mouse_x, &mouse_y);
         const cb: c.GLFWmousebuttonfun = struct {
-            fn callback(wd: ?*c.GLFWwindow, button: c_int, action: c_int, mods: c_int) callconv(.C) void {
+            fn callback(wd: ?*c.GLFWwindow, button: c_int, action: c_int, mods: c_int) callconv(.c) void {
                 var mx: f64 = 0;
                 var my: f64 = 0;
                 c.glfwGetCursorPos(wd, &mx, &my);
