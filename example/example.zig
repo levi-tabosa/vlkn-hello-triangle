@@ -176,15 +176,15 @@ const Instance = struct {
 
     handle: c.VkInstance = undefined,
 
-    // In test.zig
-
-    // ... inside const Instance = struct { ... }
-
     pub fn init(allocator: Allocator) !Self {
         var self = Instance{};
 
         const app_info = c.VkApplicationInfo{
-            // ... (rest of app_info is correct)
+            .pApplicationName = "Vulkan Line App",
+            .applicationVersion = c.VK_MAKE_API_VERSION(0, 1, 0, 0),
+            .pEngineName = "No Engine",
+            .engineVersion = c.VK_MAKE_API_VERSION(0, 1, 0, 0),
+            .apiVersion = c.VK_API_VERSION_1_0,
         };
 
         // --- 1. Get required extensions from GLFW ---
@@ -211,7 +211,6 @@ const Instance = struct {
         }
 
         // --- 3. Verify that all required extensions are available ---
-        // V V V THIS IS THE FIX V V V
         for (required_extensions_slice) |required_ext_ptr| {
             const required_name = std.mem.span(required_ext_ptr);
             var found = false;
@@ -248,7 +247,6 @@ const Instance = struct {
         return self;
     }
 
-    // ... (rest of the file)
     pub fn deinit(self: *Self) void {
         c.vkDestroyInstance(self.handle, null);
     }
