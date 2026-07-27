@@ -8,9 +8,13 @@ const text = @import("text3d/text3d.zig");
 const fps_tracker = @import("fps_tracker/performance_tracker.zig");
 //TODO: remove
 const rand = std.Random;
-const c = @import("c").imports;
-
 const Allocator = std.mem.Allocator;
+
+pub const c = @cImport({
+    @cDefine("GLFW_INCLUDE_VULKAN", {});
+    @cInclude("vulkan/vulkan.h");
+    @cInclude("GLFW/glfw3.h");
+});
 
 // --- Shader Bytecode ---
 const vert_shader_bin = spirv.test_vert;
@@ -90,23 +94,23 @@ const UniformBufferObject = extern struct {
 
 // --- Callbacks and Window ---
 const Callbacks = struct {
-    fn cbCursorPos(wd: ?*c.GLFWwindow, xpos: f64, ypos: f64) callconv(.C) void {
-        const app: *App = @alignCast(@ptrCast(c.glfwGetWindowUserPointer(wd) orelse unreachable));
+    fn cbCursorPos(wd: ?*c.GLFWwindow, xpos: f64, ypos: f64) callconv(.c) void {
+        const app: *App = @ptrCast(@alignCast(c.glfwGetWindowUserPointer(wd) orelse unreachable));
         app.gui_renderer.handleCursorPos(xpos, ypos);
         app.wd_ctx.handleCursorPos(xpos, ypos);
     }
 
-    fn cbMouseButton(wd: ?*c.GLFWwindow, button: c_int, action: c_int, mods: c_int) callconv(.C) void {
-        const app: *App = @alignCast(@ptrCast(c.glfwGetWindowUserPointer(wd) orelse unreachable));
+    fn cbMouseButton(wd: ?*c.GLFWwindow, button: c_int, action: c_int, mods: c_int) callconv(.c) void {
+        const app: *App = @ptrCast(@alignCast(c.glfwGetWindowUserPointer(wd) orelse unreachable));
         app.gui_renderer.handleMouseButton(button, action, mods);
         app.wd_ctx.handleMouseButton(button, action);
     }
 
     // in test.zig, inside Callbacks struct
-    fn cbKey(wd: ?*c.GLFWwindow, key: c_int, code: c_int, action: c_int, mods: c_int) callconv(.C) void {
+    fn cbKey(wd: ?*c.GLFWwindow, key: c_int, code: c_int, action: c_int, mods: c_int) callconv(.c) void {
         _ = code;
         _ = mods;
-        const app: *App = @alignCast(@ptrCast(c.glfwGetWindowUserPointer(wd) orelse unreachable));
+        const app: *App = @ptrCast(@alignCast(c.glfwGetWindowUserPointer(wd) orelse unreachable));
 
         // MODIFIED: Forward key events to the GUI
         app.gui_renderer.handleKey(key, action, &app.main_ui);
@@ -115,23 +119,23 @@ const Callbacks = struct {
         if (key == c.GLFW_KEY_G and action == c.GLFW_PRESS) {}
     }
 
-    fn cbFramebufferResize(wd: ?*c.GLFWwindow, width: c_int, height: c_int) callconv(.C) void {
-        const app: *App = @alignCast(@ptrCast(c.glfwGetWindowUserPointer(wd) orelse unreachable));
+    fn cbFramebufferResize(wd: ?*c.GLFWwindow, width: c_int, height: c_int) callconv(.c) void {
+        const app: *App = @ptrCast(@alignCast(c.glfwGetWindowUserPointer(wd) orelse unreachable));
         app.window.size.x = width;
         app.window.size.y = height;
         app.framebuffer_resized = true;
     }
 
-    fn cbScroll(wd: ?*c.GLFWwindow, xoffset: f64, yoffset: f64) callconv(.C) void {
+    fn cbScroll(wd: ?*c.GLFWwindow, xoffset: f64, yoffset: f64) callconv(.c) void {
         const user_ptr = c.glfwGetWindowUserPointer(wd) orelse unreachable;
-        const app: *App = @alignCast(@ptrCast(user_ptr));
+        const app: *App = @ptrCast(@alignCast(user_ptr));
 
         app.wd_ctx.handleScroll(xoffset, yoffset);
     }
 };
 
 fn addLineCallback(ptr: *anyopaque) void {
-    const app: *App = @alignCast(@ptrCast(ptr));
+    const app: *App = @ptrCast(@alignCast(ptr));
     std.log.info("Button clicked: Adding a new line...", .{});
 
     const x = std.fmt.parseFloat(f32, app.line_x_buf.slice()) catch blk: {
@@ -149,7 +153,7 @@ fn addLineCallback(ptr: *anyopaque) void {
 
     var end_pos = @Vector(3, f32){ x, y, z };
     if (x == 0 and y == 0 and z == 0) {
-        var prng = rand.DefaultPrng.init(@intCast(std.time.milliTimestamp()));
+        var prng = rand.DefaultPrng.init(42);
         const random = prng.random();
 
         end_pos = .{
@@ -173,26 +177,26 @@ fn addLineCallback(ptr: *anyopaque) void {
 }
 
 fn clearLinesCallback(ptr: *anyopaque) void {
-    const app: *App = @alignCast(@ptrCast(ptr));
+    const app: *App = @ptrCast(@alignCast(ptr));
     std.log.info("Button clicked: Clearing lines.", .{});
     app.scene.clear();
     app.text_scene.clearText();
 }
 
 fn quitCallback(ptr: *anyopaque) void {
-    const app: *App = @alignCast(@ptrCast(ptr));
+    const app: *App = @ptrCast(@alignCast(ptr));
     std.log.info("Button clicked: Quitting.", .{});
     c.glfwSetWindowShouldClose(app.window.handle, 1);
 }
 
 fn toggleCameraModeCallback(ptr: *anyopaque) void {
-    const app: *App = @alignCast(@ptrCast(ptr));
+    const app: *App = @ptrCast(@alignCast(ptr));
     std.log.info("Button clicked: Toggling camera mode.", .{});
     app.scene.camera.toggleMode();
 }
 
 fn fovSliderCallback(ptr: *anyopaque, new_value: f32) void {
-    const app: *App = @alignCast(@ptrCast(ptr));
+    const app: *App = @ptrCast(@alignCast(ptr));
     const min: f32 = 5.0;
     const max: f32 = 180;
 
@@ -200,7 +204,7 @@ fn fovSliderCallback(ptr: *anyopaque, new_value: f32) void {
 }
 
 fn nearPlaneSliderCallback(ptr: *anyopaque, new_value: f32) void {
-    const app: *App = @alignCast(@ptrCast(ptr));
+    const app: *App = @ptrCast(@alignCast(ptr));
     const min: f32 = 0.001;
     const max: f32 = 50.0;
 
@@ -208,7 +212,7 @@ fn nearPlaneSliderCallback(ptr: *anyopaque, new_value: f32) void {
 }
 
 fn setGridCallback(ptr: *anyopaque) void {
-    const app: *App = @alignCast(@ptrCast(ptr));
+    const app: *App = @ptrCast(@alignCast(ptr));
     std.debug.print("{any}\n", .{app.grid_res_buff.buf});
     app.scene.setGridResolution(
         std.fmt.parseInt(u32, app.grid_res_buff.slice(), 10) catch blk: {
@@ -572,11 +576,11 @@ const Device = struct {
 
         // Create a VkDeviceQueueCreateInfo for each unique family
         var queue_create_infos = try std.ArrayList(c.VkDeviceQueueCreateInfo).initCapacity(allocator, unique_queue_families.count());
-        defer queue_create_infos.deinit();
+        defer queue_create_infos.deinit(allocator);
 
         var it = unique_queue_families.iterator(.{});
         while (it.next()) |family_index| {
-            try queue_create_infos.append(.{
+            try queue_create_infos.append(allocator, .{
                 .queueFamilyIndex = @intCast(family_index),
                 .queueCount = 1,
                 .pQueuePriorities = &queue_priority,
@@ -771,9 +775,11 @@ pub const Swapchain = struct {
         var img_count: u32 = undefined;
         try vkCheck(c.vkGetSwapchainImagesKHR(vk_ctx.device.handle, self.handle, &img_count, null));
         self.images = try vk_ctx.allocator.alloc(c.VkImage, img_count);
+        errdefer vk_ctx.allocator.free(self.images);
         try vkCheck(c.vkGetSwapchainImagesKHR(vk_ctx.device.handle, self.handle, &img_count, self.images.ptr));
 
         self.image_views = try vk_ctx.allocator.alloc(c.VkImageView, image_count);
+        errdefer vk_ctx.allocator.free(self.image_views);
         for (self.images, 0..) |image, i| {
             const info = c.VkImageViewCreateInfo{
                 .image = image,
@@ -1410,7 +1416,7 @@ pub const ShaderModule = struct {
 
     pub fn init(allocator: Allocator, vk_ctx: *VulkanContext, code: []const u8) !Self {
         var self = Self{};
-        const aligned_code = try allocator.alignedAlloc(u32, @alignOf(u32), code.len / @sizeOf(u32));
+        const aligned_code = try allocator.alignedAlloc(u32, std.mem.Alignment.of(u32), code.len / @sizeOf(u32));
         defer allocator.free(aligned_code);
         @memcpy(std.mem.sliceAsBytes(aligned_code), code);
         var create_info = c.VkShaderModuleCreateInfo{ .codeSize = code.len, .pCode = aligned_code.ptr };
@@ -1628,23 +1634,45 @@ pub const App = struct {
     line_z_buf: gui.TextBuffer = .{},
     grid_res_buff: gui.TextBuffer = .{},
 
+    io: std.Io,
+
     /// Caller owns memory
-    pub fn init(allocator: Allocator) !*Self {
-        const window = try Window.init(null, WINDOW_WIDTH, WINDOW_HEIGHT, "Vulkan Line App", null, null);
+    pub fn init(allocator: Allocator, io: std.Io) !*Self {
+        var window = try Window.init(null, WINDOW_WIDTH, WINDOW_HEIGHT, "Vulkan Line App", null, null);
+        errdefer window.deinit();
+
         const vk_ctx = try allocator.create(VulkanContext);
+        errdefer allocator.destroy(vk_ctx);
         vk_ctx.* = try VulkanContext.init(allocator, window);
+        errdefer vk_ctx.deinit();
 
         const app = try allocator.create(App);
-        app.* = Self{
-            .allocator = allocator,
-            .window = window,
-            .vk_ctx = vk_ctx,
-            .wd_ctx = .{},
-            .scene = try Scene.init(allocator, 20),
-            .main_ui = gui.UI.init(allocator),
-            .text_scene = try text.Text3DScene.init(allocator, 20),
-            .perf = fps_tracker.PerformanceTracker.init(allocator),
-        };
+        errdefer allocator.destroy(app);
+
+        app.allocator = allocator;
+        app.io = io;
+        app.window = window;
+        app.vk_ctx = vk_ctx;
+        app.wd_ctx = .{};
+
+        app.scene = try Scene.init(allocator, 20);
+        errdefer app.scene.deinit(allocator);
+
+        app.main_ui = try gui.UI.init(allocator);
+        errdefer app.main_ui.deinit();
+
+        app.text_scene = try text.Text3DScene.init(allocator, 20);
+        errdefer app.text_scene.deinit();
+
+        app.perf = fps_tracker.PerformanceTracker.init(allocator, io);
+        errdefer app.perf.deinit();
+
+        app.line_x_buf = .{};
+        app.line_y_buf = .{};
+        app.line_z_buf = .{};
+        app.grid_res_buff = .{};
+        app.framebuffer_resized = false;
+
         try app.initUi();
         try app.initVulkanResources();
 
@@ -1655,21 +1683,33 @@ pub const App = struct {
     // Initialize Vulkan resources after the context is created
     fn initVulkanResources(self: *Self) !void {
         self.swapchain = try Swapchain.init(self.vk_ctx);
+        errdefer self.swapchain.deinit(self.vk_ctx);
+
         self.depth_buffer = try DepthBuffer.init(self.vk_ctx, self.swapchain.extent.width, self.swapchain.extent.height);
+        errdefer self.depth_buffer.deinit(self.vk_ctx);
+
         self.descriptor_layout = try DescriptorSetLayout.init(
             self.vk_ctx,
             &.{.{ .stage_flags = c.VK_SHADER_STAGE_VERTEX_BIT, .type = c.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER }},
         );
+        errdefer self.descriptor_layout.deinit(self.vk_ctx);
+
         self.descriptor_pool = try DescriptorPool.init(self.vk_ctx, 1, &.{
             .{ .type = c.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .count = 1 },
         });
+        errdefer self.descriptor_pool.deinit(self.vk_ctx);
 
         self.descriptor_set = try self.descriptor_pool.allocateSet(self.vk_ctx, self.descriptor_layout);
         self.command_buffer = try CommandBuffer.allocate(self.vk_ctx, self.vk_ctx.command_pool, true);
+
         self.sync = try SyncObjects.init(self.vk_ctx);
+        errdefer self.sync.deinit(self.vk_ctx);
 
         try self.initVertexBuffer();
+        errdefer self.vertex_buffer.deinit(self.vk_ctx);
+
         try self.initUniformBuffer();
+        errdefer self.uniform_buffer.deinit(self.vk_ctx);
 
         try self.descriptor_set.update(self.vk_ctx, &.{
             .{
@@ -1686,16 +1726,24 @@ pub const App = struct {
         });
 
         self.render_pass = try RenderPass.init(self.vk_ctx, &self.swapchain);
+        errdefer self.render_pass.deinit(self.vk_ctx);
+
         try self.render_pass.initFrameBuffer(self.vk_ctx, &self.swapchain, self.depth_buffer.view);
+
         self.pipeline_layout = try PipelineLayout.init(self.vk_ctx, .{
             .pSetLayouts = &[_]c.VkDescriptorSetLayout{self.descriptor_layout.handle},
             .setLayoutCount = 1,
         });
+        errdefer self.pipeline_layout.deinit(self.vk_ctx);
+
         self.pipeline = try Pipeline.init(self.vk_ctx, self.render_pass, self.pipeline_layout);
+        errdefer self.pipeline.deinit(self.vk_ctx);
 
         // Initialize GUI at the end
-        self.gui_renderer = try gui.GuiRenderer.init(self.vk_ctx, self.render_pass);
-        self.text_renderer = try text.Text3DRenderer.init(self.vk_ctx, self.render_pass, self.descriptor_layout);
+        self.gui_renderer = try gui.GuiRenderer.init(self.vk_ctx, self.render_pass, self.io);
+        errdefer self.gui_renderer.deinit();
+
+        self.text_renderer = try text.Text3DRenderer.init(self.vk_ctx, self.render_pass, self.descriptor_layout, self.io);
     }
     // In your App struct
     pub fn initUi(self: *Self) !void {
@@ -1822,7 +1870,7 @@ pub const App = struct {
                 continue;
             }
 
-            self.perf.beginScope("GUI");
+            try self.perf.beginScope("GUI");
             self.gui_renderer.beginFrame();
 
             if (self.gui_renderer.processAndDraw(&self.main_ui, self, self.window.size.x, self.window.size.y) or
@@ -1833,14 +1881,14 @@ pub const App = struct {
 
             self.perf.endScope("GUI");
 
-            self.perf.beginScope("Text");
+            try self.perf.beginScope("Text");
             self.text_renderer.beginFrame();
 
             self.text_renderer.processAndDrawTextScene(&self.text_scene);
             self.perf.endScope("Text");
 
             // This measures the time it takes to build and submit command buffers and present the frame.
-            self.perf.beginScope("Draw");
+            try self.perf.beginScope("Draw");
             try self.draw();
             self.perf.endScope("Draw");
             self.perf.endFrame();
@@ -2029,15 +2077,13 @@ pub const App = struct {
     }
 };
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
     try checkGlfw(c.glfwInit());
     defer c.glfwTerminate();
+    const allocator = init.gpa;
+    const io = init.io;
 
-    var gpa = std.heap.DebugAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
-
-    var app = try App.init(allocator);
+    var app = try App.init(allocator, io);
     defer allocator.destroy(app);
     defer app.deinit();
 
