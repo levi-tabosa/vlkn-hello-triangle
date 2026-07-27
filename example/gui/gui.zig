@@ -1,9 +1,13 @@
 const std = @import("std");
 const vk = @import("../test.zig"); // Vulkan context and helpers
-const c = @import("c").imports; // C imports for Vulkan
-const font = @import("font");
+
+pub const c = vk.c;
+
+// C imports for Vulkan
 const png = @import("png");
-const Font = font.Font;
+const font = @import("font");
+const Font = font.FontAsset;
+const FontLoader = font.FontLoader;
 // Note: The `util` import for Pool is no longer needed.
 
 const gui_vert_shader_bin = @import("spirv").gui_vert;
@@ -153,13 +157,13 @@ pub const Widget = struct {
                 for (container.children.items) |*child| {
                     child.deinit();
                 }
-                container.children.deinit();
+                container.children.deinit(self.allocator);
             },
             .tree_node => |*node| {
                 for (node.children.items) |*child| {
                     child.deinit();
                 }
-                node.children.deinit();
+                node.children.deinit(self.allocator);
             },
         }
     }
@@ -189,14 +193,14 @@ pub const Widget = struct {
         const id = next_id.*;
         next_id.* += 1;
 
-        try children.append(.{
+        try children.append(self.allocator, .{
             .id = id,
             .rel_rect = rel_rect,
             .background = bg,
             .allocator = self.allocator,
             .data = .{
                 .container = .{
-                    .children = std.ArrayList(Widget).init(self.allocator),
+                    .children = try std.ArrayList(Widget).initCapacity(self.allocator, 10),
                     // Set the layout using the new parameter
                     .layout = layout,
                 },
@@ -223,7 +227,7 @@ pub const Widget = struct {
         const id = next_id.*;
         next_id.* += 1;
 
-        try children.append(.{
+        try children.append(self.allocator, .{
             .id = id,
             .rel_rect = rel_rect,
             .background = bg,
@@ -232,7 +236,7 @@ pub const Widget = struct {
             .data = .{
                 .tree_node = .{
                     .label = label,
-                    .children = std.ArrayList(Widget).init(self.allocator),
+                    .children = try std.ArrayList(Widget).initCapacity(self.allocator, 10),
                     .layout = layout,
                 },
             },
@@ -260,7 +264,7 @@ pub const Widget = struct {
 
         const id = next_id.*;
         next_id.* += 1;
-        try children.append(.{
+        try children.append(self.allocator, .{
             .id = id,
             .rel_rect = rel_rect,
             .background = bg,
@@ -293,7 +297,7 @@ pub const Widget = struct {
 
         const id = next_id.*;
         next_id.* += 1;
-        try children.append(.{
+        try children.append(self.allocator, .{
             .id = id,
             .rel_rect = rect,
             .foreground = foreground,
@@ -328,7 +332,7 @@ pub const Widget = struct {
 
         const id = next_id.*;
         next_id.* += 1;
-        try children.append(.{
+        try children.append(self.allocator, .{
             .id = id,
             .rel_rect = rel_rect,
             .background = bg,
@@ -361,7 +365,7 @@ pub const Widget = struct {
 
         const id = next_id.*;
         next_id.* += 1;
-        try children.append(.{
+        try children.append(self.allocator, .{
             .id = id,
             .rel_rect = rel_rect,
             .background = bg,
@@ -379,7 +383,7 @@ pub const UI = struct {
     root: Widget,
     next_id: u32 = 1,
 
-    pub fn init(allocator: std.mem.Allocator) Self {
+    pub fn init(allocator: std.mem.Allocator) !Self {
         return .{
             .root = .{
                 .id = 0, // Root is ID 0
@@ -388,7 +392,7 @@ pub const UI = struct {
                 .allocator = allocator,
                 .data = .{
                     .container = .{
-                        .children = std.ArrayList(Widget).init(allocator),
+                        .children = try std.ArrayList(Widget).initCapacity(allocator, 20),
                         .layout = .Manual, // Change from .Vertical to .Manual
                         .padding = .{ 0, 0, 0, 0 },
                     },
@@ -454,17 +458,23 @@ pub const GuiRenderer = struct {
     mapped_indices: [*]u32,
     vertex_count: u32 = 0,
     index_count: u32 = 0,
-    font: Font,
+    font: FontLoader,
     mouse_state: MouseState = .{},
     active_id: u32 = 0,
     hot_id: u32 = 0,
     focused_id: u32 = 0,
     cursor_pos: u32 = 0,
     png_handle: png.PngImage,
+    io: std.Io,
 
-    pub fn init(vk_ctx: *vk.VulkanContext, render_pass: vk.RenderPass) !Self {
+    pub fn init(vk_ctx: *vk.VulkanContext, render_pass: vk.RenderPass, io: std.Io) !Self {
+        const font_asset = font.FontAsset.hermit_light;
+        var png_path_buf: [128]u8 = undefined;
+        const png_path = font_asset.pngPath(&png_path_buf);
+
         var self = Self{
             .vk_ctx = vk_ctx,
+            .io = io,
             .pipeline = undefined,
             .pipeline_layout = undefined,
             .push_constants = vk.PushConstantRange.init([16]f32),
@@ -479,11 +489,10 @@ pub const GuiRenderer = struct {
             .index_buffer = undefined,
             .mapped_vertices = undefined,
             .mapped_indices = undefined,
-            .font = Font.init(vk_ctx.allocator),
-            .png_handle = try png.loadPng(vk_ctx.allocator, font.hermit_light_png),
+            .font = try .init(vk_ctx.allocator, .helvetica, io),
+            .png_handle = try png.loadPngFile(vk_ctx.allocator, io, png_path),
         };
 
-        try self.font.loadFNT(font.hermit_light_fnt);
         try self.createTextureAndSampler();
         self.font.scale_h = @as(f32, @floatFromInt(self.png_handle.height + 1));
         try self.createDescriptors();
@@ -704,7 +713,7 @@ pub const GuiRenderer = struct {
                     var child_abs_rect: Rect = undefined;
 
                     switch (layout) {
-                        .Manual => |_| child_abs_rect = child.rel_rect.toAbsolute(content_rect),
+                        .Manual => child_abs_rect = child.rel_rect.toAbsolute(content_rect),
                         .Vertical => |vl| {
                             child_abs_rect = .{
                                 .x = cursor[0],
@@ -923,8 +932,8 @@ pub const GuiRenderer = struct {
 
                 if (self.focused_id == id) {
                     // Draw blinking cursor
-                    const time_ms = std.time.milliTimestamp();
-                    if (@mod(@divFloor(time_ms, 500), 2) == 0) {
+                    const time_ms = std.Io.Clock.now(.awake, self.io);
+                    if (@mod(@divFloor(time_ms.toMilliseconds(), 500), 2) == 0) {
                         const text_up_to_cursor = data.buffer.buf[0..self.cursor_pos];
                         const cursor_x_offset = self.measureText(text_up_to_cursor, scale);
                         const cursor_rect = Rect{ .x = abs_rect.x + 5 + cursor_x_offset, .y = abs_rect.y + (abs_rect.height * 0.15), .width = 2, .height = abs_rect.height * 0.7 };

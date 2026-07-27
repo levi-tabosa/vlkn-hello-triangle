@@ -1,7 +1,8 @@
 // text3d.zig
 const std = @import("std");
 const vk = @import("../test.zig");
-const c = @import("c").imports;
+pub const c = vk.c;
+
 //TODO: move font stuff to another file and import that
 const gui = @import("../gui/gui.zig");
 const font = @import("font");
@@ -50,6 +51,7 @@ const DynamicText = struct {
 pub const Text3DScene = struct {
     const Self = @This();
 
+    allocator: std.mem.Allocator,
     string_pool: util.Pool([256]u8),
     list: std.ArrayList(DynamicText),
     axis: [3]DynamicText = undefined,
@@ -57,12 +59,17 @@ pub const Text3DScene = struct {
     last_view_matrix: [16]f32 = undefined,
 
     pub fn init(allocator: std.mem.Allocator, res: u32) !Self {
-        const list = std.ArrayList(DynamicText).init(allocator);
+        var list = try std.ArrayList(DynamicText).initCapacity(allocator, 100);
+        errdefer list.deinit(allocator);
+
         var string_pool = util.Pool([256]u8).init(allocator);
+        errdefer string_pool.deinit();
+
         const buff = try string_pool.new();
         const labels = try string_pool.arena.allocator().alloc(DynamicText, res * 4);
 
         return .{
+            .allocator = allocator,
             .string_pool = string_pool,
             .list = list,
             .axis = blk: {
@@ -115,7 +122,7 @@ pub const Text3DScene = struct {
     }
 
     pub fn deinit(self: *Self) void {
-        self.list.deinit();
+        self.list.deinit(self.allocator);
         self.string_pool.deinit();
     }
 
@@ -123,7 +130,7 @@ pub const Text3DScene = struct {
         const t = (try self.string_pool.new())[0..text.len];
         @memcpy(t, text);
 
-        try self.list.append(.{
+        try self.list.append(self.allocator, .{
             .text = t,
             .transform = .{ .static = modal },
             .color = color orelse .{ 0.5, 0.5, 0.5, 1.0 },
@@ -137,7 +144,7 @@ pub const Text3DScene = struct {
 
         const billboard_visual_offset = @Vector(3, f32){ 0.1, 0.1, -0.1 };
 
-        try self.list.append(.{
+        try self.list.append(self.allocator, .{
             .text = t,
             .transform = .{ .billboard = .{ .position = position - billboard_visual_offset } },
             .color = color orelse .{ 0.5, 0.5, 0.5, 1.0 },
@@ -149,7 +156,7 @@ pub const Text3DScene = struct {
         for (self.list.items) |*d_text| {
             self.string_pool.delete(d_text.text.ptr);
         }
-        self.list.clearAndFree();
+        self.list.clearAndFree(self.allocator);
     }
 
     /// Takes a camera matrix to manage the billboard text
@@ -225,7 +232,7 @@ pub const Text3DRenderer = struct {
     index_count: u32 = 0,
     draw_count: u32 = 0, // Counter for indirect draw calls
 
-    font: font.Font = undefined,
+    font: font.FontLoader,
     png_handle: png.PngImage = undefined,
     last_cam_matrix: [16]f32 = undefined,
 
@@ -234,14 +241,16 @@ pub const Text3DRenderer = struct {
     const MAX_INDICES = MAX_VERTICES * 3 / 2;
     const MAX_DRAW_CALLS = MAX_VERTICES / 2; // Max number of unique strings per frame
 
-    pub fn init(vk_ctx: *vk.VulkanContext, render_pass: vk.RenderPass, main_scene_ds_layout: vk.DescriptorSetLayout) !Self {
+    pub fn init(vk_ctx: *vk.VulkanContext, render_pass: vk.RenderPass, main_scene_ds_layout: vk.DescriptorSetLayout, io: std.Io) !Self {
+        const font_asset = font.FontAsset.helvetica;
+        var path_buff: [128]u8 = undefined;
+        const png_path = font_asset.pngPath(path_buff[0..]);
         var self: Self = .{
             .vk_ctx = vk_ctx,
-            .font = font.Font.init(vk_ctx.allocator),
-            .png_handle = try png.loadPng(vk_ctx.allocator, font.report_regular_png),
+            .font = try .init(vk_ctx.allocator, .helvetica, io),
+            .png_handle = try png.loadPngFile(vk_ctx.allocator, io, png_path),
         };
 
-        try self.font.loadFNT(font.report_regular_fnt);
         try self.createTextureAndSampler();
         self.font.scale_h = @as(f32, @floatFromInt(self.png_handle.height + 1));
         try self.createDescriptors();

@@ -12,10 +12,8 @@ pub const PerformanceTracker = struct {
         avg_ms: f32 = 0.0,
     };
 
-    allocator: std.mem.Allocator,
-
     // Main frame timers
-    last_frame_time: i128,
+    last_frame_time: std.Io.Timestamp,
     frame_times: [SAMPLES]f32 = .{0} ** SAMPLES,
     frame_index: usize = 0,
     frames_recorded: usize = 0,
@@ -28,16 +26,19 @@ pub const PerformanceTracker = struct {
     mapped_string: ?[]u8 = null,
 
     // --- Data structures for scoped timers ---
+    allocator: std.mem.Allocator,
     active_scopes: std.StringHashMap(i128), // Stores start times for currently running scopes
     scope_data: std.StringHashMap(ScopeData), // Stores historical data and averages for each scope
+    io: std.Io,
 
-    // --- MODIFIED: init now requires an allocator ---
-    pub fn init(allocator: std.mem.Allocator) Self {
+    // --_ init now requires an allocator ---
+    pub fn init(allocator: std.mem.Allocator, io: std.Io) Self {
         return .{
             .allocator = allocator,
-            .last_frame_time = std.time.nanoTimestamp(),
+            .last_frame_time = std.Io.Clock.now(.awake, io),
             .active_scopes = std.StringHashMap(i128).init(allocator),
             .scope_data = std.StringHashMap(ScopeData).init(allocator),
+            .io = io,
         };
     }
 
@@ -60,25 +61,23 @@ pub const PerformanceTracker = struct {
     }
 
     pub fn beginFrame(self: *Self) void {
-        const current_time = std.time.nanoTimestamp();
-        const elapsed_nanos = current_time - self.last_frame_time;
-        self.last_frame_time = current_time;
+        const curr = std.Io.Clock.now(.awake, self.io);
+        const elapsed_nanos = self.last_frame_time.durationTo(curr).toNanoseconds();
+        self.last_frame_time = curr;
 
         self.delta_time_ms = @as(f32, @floatFromInt(elapsed_nanos)) / 1_000_000.0;
         self.frame_times[self.frame_index] = self.delta_time_ms;
     }
 
     // --- Start timing a named scope ---
-    pub fn beginScope(self: *Self, name: []const u8) void {
+    pub fn beginScope(self: *Self, name: []const u8) !void {
         // Put the current time into the map, overwriting any previous entry for safety.
-        self.active_scopes.put(name, std.time.nanoTimestamp()) catch |err| {
-            std.log.err("Failed to begin scope '{s}': {any}", .{ name, err });
-        };
+        try self.active_scopes.put(name, std.Io.Clock.now(.awake, self.io).toMilliseconds());
     }
 
     // --- End timing a named scope and record the duration ---
     pub fn endScope(self: *Self, name: []const u8) void {
-        const end_time = std.time.nanoTimestamp();
+        const end_time = std.Io.Clock.now(.awake, self.io).toMilliseconds();
         const start_time = self.active_scopes.fetchRemove(name) orelse return;
 
         const duration_ms = @as(f32, @floatFromInt(end_time - start_time.value)) / 1_000_000.0;
@@ -98,7 +97,7 @@ pub const PerformanceTracker = struct {
         gop.value_ptr.times[self.frame_index] = duration_ms;
     }
 
-    // --- MODIFIED: endFrame now calculates scope averages and updates the string ---
+    // --_ endFrame now calculates scope averages and updates the string ---
     pub fn endFrame(self: *Self) void {
         // --- Part 1: Advance frame counters ---
         self.frame_index = (self.frame_index + 1) % SAMPLES;
@@ -128,19 +127,20 @@ pub const PerformanceTracker = struct {
 
         // --- Part 4: Format the output string ---
         if (self.mapped_string) |buffer| {
-            var fbs = std.io.fixedBufferStream(buffer);
-            const writer = fbs.writer();
+            var writer: std.Io.Writer = .fixed(buffer);
 
             writer.print("fps:{d:.1}\n", .{self.avg_fps}) catch {};
 
-            // Iterate again to print the now-calculated averages
+            // Itera de novo pra imprimir as médias já calculadas
             it = self.scope_data.iterator();
             while (it.next()) |entry| {
                 writer.print("{s}:{d:.2}ms\n", .{ entry.key_ptr.*, entry.value_ptr.avg_ms }) catch {};
             }
-            writer.print(&.{170}, .{}) catch {};
-            // Fill remaining space with null terminators/spaces for cleanup
-            const written_len = try fbs.getPos();
+
+            writer.writeByte(170) catch {}; // sentinela 0xAA
+
+            // Writer.fixed() escreve direto no buffer; .end é quantos bytes já foram gravados
+            const written_len = writer.end;
             @memset(buffer[written_len..], 0);
         }
     }

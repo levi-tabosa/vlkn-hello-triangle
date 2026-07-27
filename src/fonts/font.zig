@@ -1,27 +1,5 @@
 const std = @import("std");
 
-pub const periclesW01_fnt = @embedFile("./assets/pericles-W01-regular-fed68123.fnt");
-pub const periclesW01_png = @embedFile("./assets/pericles-W01-regular-fed68123.png");
-pub const consolas_regular_fnt = @embedFile("./assets/consolas-regular-fed68123.fnt");
-pub const consolas_regular_png = @embedFile("./assets/consolas-regular-fed68123.png");
-// pub const inter_24pt_bold_fnt = @embedFile("./assets/inter_24pt-bold-6d0e72dd.fnt");
-// pub const inter_24pt_bold_png = @embedFile("./assets/inter_24pt-bold-6d0e72dd.png");
-pub const report_regular_fnt = @embedFile("./assets/report-regular-fed68123.fnt");
-pub const report_regular_png = @embedFile("./assets/report-regular-fed68123.png");
-pub const swanseabold_fnt = @embedFile("./assets/swanseabold-d0ox.fnt");
-pub const swanseabold_png = @embedFile("./assets/swanseabold-d0ox.png");
-pub const notosanstc_variablefont_wght_fnt = @embedFile("./assets/notosanstc-variablefont_wght-fed68123.fnt");
-pub const notosanstc_variablefont_wght_png = @embedFile("./assets/notosanstc-variablefont_wght-fed68123.png");
-pub const hermit_light_fnt = @embedFile("./assets/hermit_light-fed68123.fnt");
-pub const hermit_light_png = @embedFile("./assets/hermit_light-fed68123.png");
-pub const exo2_0_regular_fnt = @embedFile("./assets/exo2_0_regular-fed68123.fnt");
-pub const exo2_0_regular_png = @embedFile("./assets/exo2_0_regular-fed68123.png");
-pub const helvetica_fnt = @embedFile("./assets/helvetica-fed68123.fnt");
-pub const helvetica_png = @embedFile("./assets/helvetica-fed68123.png");
-// pub const _fnt = @embedFile("./assets/swanseabold-d0ox.fnt");
-// pub const _png = @embedFile("./assets/swanseabold-d0ox.png");
-
-// Font glyph structure
 pub const Glyph = struct {
     id: u32 = 0,
     x: u32 = 0,
@@ -33,8 +11,43 @@ pub const Glyph = struct {
     xadvance: f32 = 0,
 };
 
-// Font data and glyph management
-pub const Font = struct {
+/// Substitui os antigos @embedFile: cada variante conhece seu caminho base
+/// em disco (sem extensão) e deriva ".fnt" / ".png" sob demanda.
+pub const FontAsset = enum {
+    pericles_w01,
+    consolas_regular,
+    report_regular,
+    swanseabold,
+    notosanstc_variablefont_wght,
+    hermit_light,
+    exo2_0_regular,
+    helvetica,
+
+    fn basePath(self: FontAsset) []const u8 {
+        return switch (self) {
+            .pericles_w01 => "src/fonts/assets/pericles-W01-regular-fed68123",
+            .consolas_regular => "src/fonts/assets/consolas-regular-fed68123",
+            .report_regular => "src/fonts/assets/report-regular-fed68123",
+            .swanseabold => "src/fonts/assets/swanseabold-d0ox",
+            .notosanstc_variablefont_wght => "src/fonts/assets/notosanstc-variablefont_wght-fed68123",
+            .hermit_light => "src/fonts/assets/hermit_light-fed68123",
+            .exo2_0_regular => "src/fonts/assets/exo2_0_regular-fed68123",
+            .helvetica => "src/fonts/assets/helvetica-fed68123",
+        };
+    }
+
+    pub fn fntPath(self: FontAsset, buf: []u8) []const u8 {
+        return std.fmt.bufPrint(buf, "{s}.fnt", .{self.basePath()}) catch unreachable;
+    }
+
+    pub fn pngPath(self: FontAsset, buf: []u8) []const u8 {
+        return std.fmt.bufPrint(buf, "{s}.png", .{self.basePath()}) catch unreachable;
+    }
+};
+
+pub const FontLoader = struct {
+    const Self = @This();
+
     glyphs: std.AutoHashMap(u32, Glyph),
     line_height: f32 = 0,
     base: f32 = 0,
@@ -42,19 +55,39 @@ pub const Font = struct {
     scale_h: f32 = 0,
     font_size: f32 = 0,
 
-    const Entry = struct { key: []const u8, value: []const u8 };
+    /// Lê o .fnt do `asset` do disco via `io` e faz o parse.
+    /// Não carrega o PNG do atlas — use png.loadPngFile(allocator, io, asset.pngPath(buf))
+    /// pra isso, como no GuiRenderer.init abaixo.
+    pub fn init(allocator: std.mem.Allocator, asset: FontAsset, io: std.Io) !Self {
+        var path_buf: [128]u8 = undefined;
+        const fnt_path = asset.fntPath(&path_buf);
+        std.debug.print("{s}\n", .{fnt_path});
 
-    pub fn init(allocator: std.mem.Allocator) Font {
-        return .{
+        var file = try std.Io.Dir.cwd().openFile(io, fnt_path, .{ .mode = .read_only });
+        defer file.close(io);
+
+        const size = try file.length(io);
+        const data = try allocator.alloc(u8, size);
+        defer allocator.free(data);
+
+        var reader = file.reader(io, data);
+        reader.interface.readSliceAll(data) catch |err| switch (err) {
+            error.ReadFailed => return reader.err orelse err,
+            else => return err,
+        };
+
+        var self = Self{
             .glyphs = std.AutoHashMap(u32, Glyph).init(allocator),
         };
+        try self.loadFNT(data);
+        return self;
     }
 
-    pub fn deinit(self: *Font) void {
+    pub fn deinit(self: *Self) void {
         self.glyphs.deinit();
     }
 
-    fn parseKeyValue(part: []const u8) ?Entry {
+    fn parseKeyValue(part: []const u8) ?struct { key: []const u8, value: []const u8 } {
         const eq_idx = std.mem.indexOfScalar(u8, part, '=') orelse return null;
         const key = part[0..eq_idx];
         var value = part[eq_idx + 1 ..];
@@ -64,7 +97,7 @@ pub const Font = struct {
         return .{ .key = key, .value = value };
     }
 
-    pub fn loadFNT(self: *Font, data: []const u8) !void {
+    pub fn loadFNT(self: *Self, data: []const u8) !void {
         var lines = std.mem.splitScalar(u8, data, '\n');
         while (lines.next()) |line| {
             const trimmed_line = std.mem.trim(u8, line, " \r");

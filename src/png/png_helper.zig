@@ -1,6 +1,5 @@
 const std = @import("std");
 
-// paethPredictor is required for PNG filter type 4.
 fn paethPredictor(a: i64, b: i64, C: i64) i64 {
     const p = a + b - C;
     const pa = @abs(p - a);
@@ -31,8 +30,6 @@ pub const PngImage = struct {
     pixels: []u8,
 };
 
-// A helper function to unfilter a single scanline. This is used for both
-// non-interlaced and each pass of interlaced images.
 fn unfilterScanline(
     output_scanline: []u8,
     filtered_scanline: []const u8,
@@ -50,18 +47,17 @@ fn unfilterScanline(
         const recon_c = if (prior_scanline.len > 0 and x >= bytes_per_pixel) prior_scanline[x - bytes_per_pixel] else 0;
 
         const predictor = switch (filter_type) {
-            0 => 0, // None
-            1 => recon_a, // Sub
-            2 => recon_b, // Up
-            3 => @as(u8, @intCast((@as(u16, recon_a) + @as(u16, recon_b)) / 2)), // Average
-            4 => @as(u8, @intCast(paethPredictor(@as(i64, recon_a), @as(i64, recon_b), @as(i64, recon_c)))), // Paeth
+            0 => 0,
+            1 => recon_a,
+            2 => recon_b,
+            3 => @as(u8, @intCast((@as(u16, recon_a) + @as(u16, recon_b)) / 2)),
+            4 => @as(u8, @intCast(paethPredictor(@as(i64, recon_a), @as(i64, recon_b), @as(i64, recon_c)))),
             else => return PngParseError.InvalidFilterType,
         };
         output_scanline[x] = @addWithOverflow(filt_x, predictor)[0];
     }
 }
 
-// TODO: make return error set
 pub fn loadPng(allocator: std.mem.Allocator, png_data: []const u8) !PngImage {
     const png_signature = [_]u8{ 137, 80, 78, 71, 13, 10, 26, 10 };
     if (png_data.len < 8 or !std.mem.eql(u8, png_data[0..8], &png_signature)) {
@@ -75,8 +71,8 @@ pub fn loadPng(allocator: std.mem.Allocator, png_data: []const u8) !PngImage {
         channels: u8,
         interlace_method: u8,
     } = null;
-    var idat_stream = std.ArrayList(u8).init(allocator);
-    defer idat_stream.deinit();
+    var idat_stream = try std.ArrayList(u8).initCapacity(allocator, 1024);
+    defer idat_stream.deinit(allocator);
 
     var cursor: usize = 8;
     while (cursor < png_data.len) {
@@ -95,20 +91,17 @@ pub fn loadPng(allocator: std.mem.Allocator, png_data: []const u8) !PngImage {
             const color_type = chunk_data[9];
             const interlace_method = chunk_data[12];
 
-            // For now, only 8-bit depth is supported by the unified unfilter function.
             if (bit_depth != 8) {
                 std.log.warn("Unsupported bit depth supported by unified unfilter function: {d}", .{bit_depth});
-                // return error.UnsupportedFormat;
             }
 
             const channels: u8 = switch (color_type) {
-                0 => 1, // Grayscale
-                2 => 3, // Truecolor (RGB)
-                6 => 4, // Truecolor with alpha (RGBA)
+                0 => 1,
+                2 => 3,
+                6 => 4,
                 else => return PngParseError.UnsupportedFormat,
             };
 
-            // Check for valid interlace method
             if (interlace_method > 1) return PngParseError.UnsupportedInterlace;
 
             ihdr = .{
@@ -120,11 +113,11 @@ pub fn loadPng(allocator: std.mem.Allocator, png_data: []const u8) !PngImage {
             };
         } else if (std.mem.eql(u8, chunk_type, "IDAT")) {
             if (ihdr == null) return PngParseError.MissingIhdr;
-            try idat_stream.appendSlice(chunk_data);
+            try idat_stream.appendSlice(allocator, chunk_data);
         } else if (std.mem.eql(u8, chunk_type, "IEND")) {
             break;
         }
-        cursor += data_len + 4; // Skip CRC
+        cursor += data_len + 4;
     }
 
     const header = ihdr orelse return PngParseError.MissingIhdr;
@@ -133,24 +126,37 @@ pub fn loadPng(allocator: std.mem.Allocator, png_data: []const u8) !PngImage {
         return PngImage{ .width = 0, .height = 0, .bit_depth = header.bit_depth, .channels = header.channels, .pixels = &[_]u8{} };
     }
 
-    var decompressed_buffer = std.ArrayList(u8).init(allocator);
-    defer decompressed_buffer.deinit();
-    {
-        var compressed_reader = std.io.fixedBufferStream(idat_stream.items);
-        var decompressor = std.compress.zlib.decompressor(compressed_reader.reader());
-        try decompressor.reader().readAllArrayList(&decompressed_buffer, std.math.maxInt(usize));
-    }
+    // --- Descompressão zlib com a nova interface std.Io (0.16.0) ---
+    // std.compress.zlib.decompressor(...) não existe mais; agora é
+    // std.compress.flate.Decompress, que recebe um *std.Io.Reader e expõe
+    // um .reader (também um std.Io.Reader) para consumir a saída descomprimida.
+    var idat_reader: std.Io.Reader = .fixed(idat_stream.items);
+
+    // Buffer vazio = modo "direct" (sem janela própria), suficiente aqui
+    // porque vamos descarregar tudo de uma vez com streamRemaining.
+    var decompress: std.compress.flate.Decompress = .init(&idat_reader, .zlib, &.{});
+
+    var decompressed_writer: std.Io.Writer.Allocating = .init(allocator);
+    defer decompressed_writer.deinit();
+
+    _ = decompress.reader.streamRemaining(&decompressed_writer.writer) catch |err| {
+        // Se quiser diagnóstico mais fino, decompress.err / decompressed_writer.err
+        // (quando existirem) trazem o erro subjacente de leitura/escrita — vale
+        // conferir contra o std atual, essa parte do 0.16 ainda está mudando.
+        return err;
+    };
+
+    const decompressed = decompressed_writer.written();
 
     const bytes_per_pixel = header.channels * (header.bit_depth / 8);
     const final_pixels = try allocator.alloc(u8, header.width * header.height * bytes_per_pixel);
 
     if (header.interlace_method == 0) {
-        // --- NON-INTERLACED PATH ---
         const scanline_length = header.width * bytes_per_pixel;
         const expected_filtered_size = header.height * (1 + scanline_length);
-        if (decompressed_buffer.items.len != expected_filtered_size) return PngParseError.DecompressionError;
+        if (decompressed.len != expected_filtered_size) return PngParseError.DecompressionError;
 
-        const filtered_scanlines = decompressed_buffer.items;
+        const filtered_scanlines = decompressed;
         var prior_scanline: []const u8 = &[_]u8{};
 
         for (0..header.height) |y| {
@@ -166,7 +172,6 @@ pub fn loadPng(allocator: std.mem.Allocator, png_data: []const u8) !PngImage {
             prior_scanline = current_output;
         }
     } else if (header.interlace_method == 1) {
-        // --- INTERLACED (ADAM7) PATH ---
         const adam7_passes = [_]struct { x_start: u32, y_start: u32, x_step: u32, y_step: u32 }{
             .{ .x_start = 0, .y_start = 0, .x_step = 8, .y_step = 8 },
             .{ .x_start = 4, .y_start = 0, .x_step = 8, .y_step = 8 },
@@ -178,7 +183,7 @@ pub fn loadPng(allocator: std.mem.Allocator, png_data: []const u8) !PngImage {
         };
 
         var data_offset: usize = 0;
-        const filtered_data = decompressed_buffer.items;
+        const filtered_data = decompressed;
 
         for (adam7_passes) |pass| {
             const pass_width = (header.width - pass.x_start + pass.x_step - 1) / pass.x_step;
@@ -227,4 +232,23 @@ pub fn loadPng(allocator: std.mem.Allocator, png_data: []const u8) !PngImage {
         .channels = header.channels,
         .pixels = final_pixels,
     };
+}
+
+/// Lê um arquivo do disco com a nova interface std.Io e faz o parse como PNG.
+/// É o que o font.zig vai chamar no lugar do antigo @embedFile + loadPng.
+pub fn loadPngFile(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !PngImage {
+    var file = try std.Io.Dir.cwd().openFile(io, path, .{ .mode = .read_only });
+    defer file.close(io);
+
+    const size = try file.length(io);
+    const buf = try allocator.alloc(u8, size);
+    defer allocator.free(buf);
+
+    var reader = file.reader(io, buf);
+    reader.interface.readSliceAll(buf) catch |err| switch (err) {
+        error.ReadFailed => return reader.err orelse err,
+        else => return err,
+    };
+
+    return loadPng(allocator, buf);
 }

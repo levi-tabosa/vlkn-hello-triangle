@@ -1,12 +1,17 @@
 const std = @import("std");
 
-pub fn Pool(T: type) type {
+pub fn Pool(comptime T: type) type {
     return struct {
         const Self = @This();
-        const List = std.SinglyLinkedList(T);
+
+        /// Estrutura que contém o nó da lista e o dado do usuário.
+        const Item = struct {
+            node: std.SinglyLinkedList.Node = .{},
+            data: T,
+        };
 
         arena: std.heap.ArenaAllocator,
-        free: List = .{},
+        free: std.SinglyLinkedList = .{},
 
         pub fn init(allocator: std.mem.Allocator) Self {
             return .{
@@ -16,35 +21,38 @@ pub fn Pool(T: type) type {
 
         pub fn deinit(self: *Self) void {
             self.arena.deinit();
+            self.* = undefined;
         }
 
+        /// Aloca (ou reutiliza) um item e retorna um ponteiro para o dado.
         pub fn new(self: *Self) !*T {
-            const node = if (self.free.popFirst()) |pop|
-                pop
-            else
-                try self.arena.allocator().create(List.Node);
-
-            return &node.data;
+            // Tenta reutilizar um nó da lista livre
+            if (self.free.popFirst()) |node| {
+                const item: *Item = @alignCast(@fieldParentPtr("node", node));
+                return &item.data;
+            }
+            // Caso contrário, aloca um novo Item no arena
+            const item = try self.arena.allocator().create(Item);
+            item.* = .{ .data = undefined };
+            return &item.data;
         }
 
+        /// Libera um item previamente obtido com `new` e o coloca na lista livre.
+        /// O ponteiro `obj` deve ser exatamente aquele retornado por `new`.
         pub fn delete(self: *Self, obj: *anyopaque) void {
-            // Print raw pointer
-            std.log.info("Deleting object at address: {p}", .{obj});
+            // Converte o ponteiro opaco para um ponteiro alinhado a T
+            const data_ptr: *T = @ptrCast(@alignCast(obj));
+            const item: *Item = @alignCast(@fieldParentPtr("data", data_ptr));
 
-            const casted: *[256]u8 = @alignCast(@ptrCast(obj));
-            const node: *List.Node = @alignCast(@fieldParentPtr("data", casted));
+            // (Opcional) Log para debug
+            // std.log.info("Deleting object at address: {*}", .{item});
+            // const data_bytes = @as([*]const u8, @ptrCast(data_ptr));
+            // std.log.info("First few data bytes: {d}, {d}, {d}, {d}", .{
+            //     data_bytes[0], data_bytes[1], data_bytes[2], data_bytes[3],
+            // });
 
-            // Optionally print part of the data for verification
-            const data_ptr = &node.data;
-            const data_bytes = @as([*]const u8, @ptrCast(data_ptr));
-            std.log.info("First few data bytes: {d}, {d}, {d}, {d}", .{
-                data_bytes[0],
-                data_bytes[1],
-                data_bytes[2],
-                data_bytes[3],
-            });
-
-            self.free.prepend(node);
+            // Devolve o nó para a lista livre
+            self.free.prepend(&item.node);
         }
     };
 }
