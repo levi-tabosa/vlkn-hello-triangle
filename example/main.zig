@@ -3,7 +3,12 @@
 const std = @import("std");
 const spirv = @import("spirv");
 const math = std.math;
-const c = @import("c").imports;
+
+pub const c = @cImport({
+    @cDefine("GLFW_INCLUDE_VULKAN", {});
+    @cInclude("vulkan/vulkan.h");
+    @cInclude("GLFW/glfw3.h");
+});
 
 const vert_shader_code = spirv.triangle_vert;
 const frag_shader_code = spirv.triangle_frag;

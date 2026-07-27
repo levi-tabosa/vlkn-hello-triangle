@@ -7,7 +7,12 @@ const Allocator = std.mem.Allocator;
 const spirv = @import("spirv");
 const scene = @import("geometry");
 const fonts = @import("font");
-const c = @import("c").imports;
+
+pub const c = @cImport({
+    @cDefine("GLFW_INCLUDE_VULKAN", {});
+    @cInclude("vulkan/vulkan.h");
+    @cInclude("GLFW/glfw3.h");
+});
 
 // --- Shader Bytecode ---
 // We embed the compiled SPIR-V files directly into the executable.
@@ -97,7 +102,7 @@ const Callbacks = struct {
     // https://www.glfw.org/docs/3.0/group__input
     fn cbCursorPos(wd: ?*c.GLFWwindow, xpos: f64, ypos: f64) callconv(.C) void {
         const user_ptr = c.glfwGetWindowUserPointer(wd orelse return) orelse @panic("No window user ptr");
-        const app: *App = @alignCast(@ptrCast(user_ptr));
+        const app: *App = @ptrCast(@alignCast(user_ptr));
 
         const ndc_x = @as(f32, @floatCast(xpos)) / @as(f32, @floatFromInt(WINDOW_WIDTH)) * 2.0 - 1.0;
         // Y conversion from screen space to NDC space.
@@ -113,7 +118,7 @@ const Callbacks = struct {
 
     fn cbKey(wd: ?*c.GLFWwindow, char: c_int, code: c_int, btn: c_int, mods: c_int) callconv(.C) void {
         const user_ptr = c.glfwGetWindowUserPointer(wd orelse return) orelse @panic("No window user ptr");
-        const app: *App = @alignCast(@ptrCast(user_ptr));
+        const app: *App = @ptrCast(@alignCast(user_ptr));
 
         std.debug.print("{}; code : {} action : {} mods : {} \n", .{ char, code, btn, mods });
 
@@ -125,7 +130,7 @@ const Callbacks = struct {
 
     fn cbFramebufferResize(wd: ?*c.GLFWwindow, width: c_int, height: c_int) callconv(.C) void {
         const user_ptr = c.glfwGetWindowUserPointer(wd orelse return) orelse @panic("No window user ptr");
-        const app: *App = @alignCast(@ptrCast(user_ptr));
+        const app: *App = @ptrCast(@alignCast(user_ptr));
         std.debug.print("reszi\n", .{});
         app.window.size.x = width;
         app.window.size.y = height;
