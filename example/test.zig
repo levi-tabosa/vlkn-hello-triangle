@@ -2077,11 +2077,19 @@ pub const App = struct {
     }
 };
 
+fn glfwErrorCallback(err_code: c_int, description: [*c]const u8) callconv(.c) void {
+    std.debug.print("[GLFW error {d}]: {s}\n", .{ err_code, description });
+}
+
 pub fn main(init: std.process.Init) !void {
-    try checkGlfw(c.glfwInit());
-    defer c.glfwTerminate();
     const allocator = init.gpa;
     const io = init.io;
+
+    _ = c.glfwSetErrorCallback(glfwErrorCallback);
+    _ = c.glfwInitVulkanLoader(c.vkGetInstanceProcAddr);
+
+    try checkGlfw(c.glfwInit());
+    defer c.glfwTerminate();
 
     var app = try App.init(allocator, io);
     defer allocator.destroy(app);

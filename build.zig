@@ -41,17 +41,15 @@ pub fn build(b: *std.Build) !void {
     const optimize = b.standardOptimizeOption(.{});
 
     const glfw_dep = b.dependency("glfw", .{ .target = target, .optimize = optimize });
-    const vk_headers_dep = b.dependency("vulkan_headers", .{});
-    _ = vk_headers_dep;
-    const vk_loader_dep = b.dependency("vulkan_loader", .{ .target = target, .optimize = optimize });
-    _ = vk_loader_dep;
+    const vk_loader_dep = b.dependency("vulkan_loader", .{});
+    const vk_loader_mod = b.addModule("Vulkan Loader Module", .{ .target = target, .optimize = optimize, .link_libcpp = true });
+
     const glslc_dep = b.dependency("glslc", .{ .target = target, .optimize = optimize });
     const glslc_exe = glslc_dep.artifact("mr_glsl");
 
     // Compile GLFW as a Static Library
     const glfw_mod = b.addModule("glfw", .{ .target = target, .optimize = optimize, .link_libc = true });
-    const glew_dep = b.dependency("glew", .{ .target = target, .optimize = optimize });
-    const glew_mod = b.addModule("glew", .{ .target = target, .optimize = optimize, .link_libc = true });
+    const vk_headers_dep = b.dependency("vulkan_headers", .{});
 
     // Add include paths and source files for GLFW for all platforms
     glfw_mod.addIncludePath(glfw_dep.path("include"));
@@ -125,22 +123,63 @@ pub fn build(b: *std.Build) !void {
         else => {},
     }
 
+    // Arquivos comuns (todas as plataformas)
+    var vk_loader_files = try std.ArrayList([]const u8).initCapacity(b.allocator, 20);
+    vk_loader_files.appendSlice(b.allocator, &.{
+        "allocation.c",
+        "asm_offset.c",
+        "cJSON.c",
+        "debug_utils.c",
+        "dev_ext_trampoline.c",
+        "extension_manual.c",
+        "gpa_helper.c",
+        "loader.c",
+        "loader_environment.c",
+        "loader_json.c",
+        "log.c",
+        "phys_dev_ext.c",
+        "settings.c",
+        "terminator.c",
+        "trampoline.c",
+        "unknown_function_handling.c",
+        "wsi.c",
+    }) catch @panic("OOM");
+
+    if (target.result.os.tag == .linux) {
+        vk_loader_files.append(b.allocator, "loader_linux.c") catch @panic("OOM");
+    } else if (target.result.os.tag == .windows) {
+        vk_loader_files.appendSlice(b.allocator, &.{
+            "loader_windows.c",
+            "dirent_on_windows.c",
+        }) catch @panic("OOM");
+    }
+
+    vk_loader_mod.addCSourceFiles(.{
+        .root = vk_loader_dep.path("loader"),
+        .files = vk_loader_files.items,
+    });
+
+    vk_loader_mod.addIncludePath(vk_loader_dep.path("loader"));
+    vk_loader_mod.addIncludePath(vk_loader_dep.path("loader/generated"));
+
+    if (target.result.os.tag == .linux) {
+        vk_loader_mod.addCMacro("VK_USE_PLATFORM_XCB_KHR", "1");
+        vk_loader_mod.linkSystemLibrary("xcb", .{});
+        vk_loader_mod.addCMacro("_GNU_SOURCE", "1");
+        vk_loader_mod.addCMacro("VK_ENABLE_BETA_EXTENSIONS", "1");
+        vk_loader_mod.addCMacro("SYSCONFDIR", "\"/etc\"");
+        vk_loader_mod.addCMacro("FALLBACK_CONFIG_DIRS", "\"/etc/xdg\"");
+        vk_loader_mod.addCMacro("FALLBACK_DATA_DIRS", "\"/usr/local/share:/usr/share\"");
+        glfw_mod.linkSystemLibrary("X11-xcb", .{});
+        //vk_miod.addCMacro("VK_ENABLE_BETA_EXTENSIONS", "1");
+    }
+
+    const vk_loader_lib = b.addLibrary(.{ .name = "Vulkan Loader Library", .root_module = vk_loader_mod });
+
     const glfw_lib = b.addLibrary(.{
         .name = "glfw-library",
         .root_module = glfw_mod,
     });
-
-    // Add GLEW source files to the GLEW module
-    glew_mod.addCSourceFiles(.{
-        .root = glew_dep.path("src"),
-        .files = &.{
-            "glew.c",
-            "glewinfo.c",
-            "visualinfo.c",
-        },
-    });
-
-    glfw_mod.addIncludePath(glfw_dep.path("include"));
 
     const shaders = [_]struct { name: []const u8, path: []const u8 }{
         .{ .name = "gui", .path = "src/shaders/code/gui" },
@@ -211,9 +250,11 @@ pub fn build(b: *std.Build) !void {
         module.addAnonymousImport("geometry", .{ .root_source_file = b.path("src/scenes/geometry.zig") });
         module.addAnonymousImport("util", .{ .root_source_file = b.path("src/util/util.zig") });
         // Shaders should be installed before compiling the executable.
-        module.linkSystemLibrary("vulkan", .{});
         module.addIncludePath(glfw_dep.path("include"));
         module.linkLibrary(glfw_lib);
+        module.linkLibrary(vk_loader_lib);
+        module.addIncludePath(.{ .dependency = .{ .dependency = vk_headers_dep, .sub_path = "include" } });
+
         for (shader_install_steps.items) |shader_step| {
             exe.step.dependOn(shader_step);
         }
