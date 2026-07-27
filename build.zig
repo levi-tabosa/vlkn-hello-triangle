@@ -36,62 +36,26 @@ fn addShaderStep(
     return &install_step.step;
 }
 
-/// This function configures a `Module` with all necessary C dependencies.
-/// Any executable importing this module will automatically inherit these settings.
-fn configureVulkanAndGlfw(
-    module: *std.Build.Module,
-    target: std.Build.ResolvedTarget,
-    lib_glfw: *std.Build.Step.Compile,
-    glfw_dep: *std.Build.Dependency,
-    vk_headers_dep: *std.Build.Dependency,
-) void {
-    module.linkLibrary(lib_glfw);
-    module.addIncludePath(glfw_dep.path("include"));
-    module.addIncludePath(vk_headers_dep.path("include"));
-    module.linkSystemLibrary("vulkan", .{});
-
-    // Platform-specific libraries
-    switch (target.result.os.tag) {
-        .windows => {
-            module.linkSystemLibrary("gdi32", .{});
-            module.linkSystemLibrary("shell32", .{});
-        },
-        .linux => {
-            module.linkSystemLibrary("m", .{});
-            module.linkSystemLibrary("pthread", .{});
-            module.linkSystemLibrary("dl", .{});
-            module.linkSystemLibrary("X11", .{});
-            module.linkSystemLibrary("xcb", .{});
-            module.linkSystemLibrary("Xrandr", .{});
-            module.linkSystemLibrary("Xinerama", .{});
-            module.linkSystemLibrary("Xi", .{});
-            module.linkSystemLibrary("Xcursor", .{});
-            module.linkSystemLibrary("Xxf86vm", .{});
-        },
-        .macos => {
-            module.linkFramework("Cocoa", .{});
-            module.linkFramework("IOKit", .{});
-            module.linkFramework("CoreFoundation", .{});
-        },
-        else => {},
-    }
-}
-
 pub fn build(b: *std.Build) !void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
     const glfw_dep = b.dependency("glfw", .{ .target = target, .optimize = optimize });
-
     const vk_headers_dep = b.dependency("vulkan_headers", .{});
+    _ = vk_headers_dep;
+    const vk_loader_dep = b.dependency("vulkan_loader", .{ .target = target, .optimize = optimize });
+    _ = vk_loader_dep;
     const glslc_dep = b.dependency("glslc", .{ .target = target, .optimize = optimize });
-    const glslc_exe = glslc_dep.artifact("shader_compiler");
+    const glslc_exe = glslc_dep.artifact("mr_glsl");
 
-    // --- Compile GLFW as a Static Library ---
-    const lib_glfw = b.addStaticLibrary(.{ .name = "glfw", .target = target, .optimize = optimize });
-    lib_glfw.linkLibC();
-    lib_glfw.addIncludePath(glfw_dep.path("include"));
-    lib_glfw.addCSourceFiles(.{
+    // Compile GLFW as a Static Library
+    const glfw_mod = b.addModule("glfw", .{ .target = target, .optimize = optimize, .link_libc = true });
+    const glew_dep = b.dependency("glew", .{ .target = target, .optimize = optimize });
+    const glew_mod = b.addModule("glew", .{ .target = target, .optimize = optimize, .link_libc = true });
+
+    // Add include paths and source files for GLFW for all platforms
+    glfw_mod.addIncludePath(glfw_dep.path("include"));
+    glfw_mod.addCSourceFiles(.{
         .root = glfw_dep.path("src"),
         .files = &.{
             "context.c",
@@ -109,57 +73,74 @@ pub fn build(b: *std.Build) !void {
             "null_window.c",
         },
     });
-    if (target.result.os.tag == .linux) {
-        lib_glfw.addCSourceFiles(.{ .root = glfw_dep.path("src"), .files = &.{
-            "x11_init.c",
-            "x11_monitor.c",
-            "x11_window.c",
-            "xkb_unicode.c",
-            "posix_time.c",
-            "posix_thread.c",
-            "posix_module.c",
-            "posix_poll.c",
-            "glx_context.c",
-            "linux_joystick.c",
-        } });
-        lib_glfw.root_module.addCMacro("_GLFW_X11", "1");
-        lib_glfw.linkSystemLibrary("X11");
-        lib_glfw.linkSystemLibrary("Xrandr");
-        lib_glfw.linkSystemLibrary("Xinerama");
-        lib_glfw.linkSystemLibrary("Xi");
-        lib_glfw.linkSystemLibrary("Xcursor");
-        lib_glfw.linkSystemLibrary("Xxf86vm");
-    } else if (target.result.os.tag == .windows) {
-        lib_glfw.addCSourceFiles(.{ .root = glfw_dep.path("src"), .files = &.{
-            "win32_init.c",
-            "win32_joystick.c",
-            "win32_monitor.c",
-            "win32_time.c",
-            "win32_thread.c",
-            "win32_window.c",
-        } });
-        lib_glfw.root_module.addCMacro("_GLFW_WIN32", "1");
-        lib_glfw.linkSystemLibrary("gdi32");
-        lib_glfw.linkSystemLibrary("shell32");
-    } else if (target.result.os.tag == .macos) {
-        lib_glfw.addCSourceFiles(.{ .root = glfw_dep.path("src"), .files = &.{
-            "cocoa_init.m",
-            "cocoa_joystick.m",
-            "cocoa_monitor.m",
-            "cocoa_time.m",
-            "cocoa_window.m",
-        } });
-        lib_glfw.root_module.addCMacro("_GLFW_COCOA", "1");
+    // Platform-specific libraries
+    switch (target.result.os.tag) {
+        .windows => {
+            glfw_mod.addCSourceFiles(.{ .root = glfw_dep.path("src"), .files = &.{
+                "win32_init.c",
+                "win32_joystick.c",
+                "win32_monitor.c",
+                "win32_time.c",
+                "win32_thread.c",
+                "win32_window.c",
+            } });
+            glfw_mod.addCMacro("_GLFW_WIN32", "1");
+            glfw_mod.linkSystemLibrary("gdi32", .{});
+            glfw_mod.linkSystemLibrary("shell32", .{});
+        },
+        .linux => {
+            glfw_mod.addCSourceFiles(.{ .root = glfw_dep.path("src"), .files = &.{
+                "x11_init.c",
+                "x11_monitor.c",
+                "x11_window.c",
+                "xkb_unicode.c",
+                "posix_time.c",
+                "posix_thread.c",
+                "posix_module.c",
+                "posix_poll.c",
+                "glx_context.c",
+                "linux_joystick.c",
+            } });
+            glfw_mod.addCMacro("_GLFW_X11", "1");
+            glfw_mod.linkSystemLibrary("X11", .{});
+            glfw_mod.linkSystemLibrary("Xrandr", .{});
+            glfw_mod.linkSystemLibrary("Xinerama", .{});
+            glfw_mod.linkSystemLibrary("Xi", .{});
+            glfw_mod.linkSystemLibrary("Xcursor", .{});
+            glfw_mod.linkSystemLibrary("Xxf86vm", .{});
+        },
+        .macos => {
+            glfw_mod.addCSourceFiles(.{ .root = glfw_dep.path("src"), .files = &.{
+                "cocoa_init.m",
+                "cocoa_joystick.m",
+                "cocoa_monitor.m",
+                "cocoa_time.m",
+                "cocoa_window.m",
+            } });
+            glfw_mod.addCMacro("_GLFW_COCOA", "1");
+            glfw_mod.linkFramework("Cocoa", .{});
+            glfw_mod.linkFramework("IOKit", .{});
+            glfw_mod.linkFramework("CoreFoundation", .{});
+        },
+        else => {},
     }
 
-    // This module is created and configured with all C dependencies.
-    // Any executable that imports "c" will now automatically get all the correct
-    // include paths and library links.
-    const c_mod = b.createModule(.{
-        .root_source_file = b.path("src/c/c.zig"),
-        .target = target,
+    const glfw_lib = b.addLibrary(.{
+        .name = "glfw-library",
+        .root_module = glfw_mod,
     });
-    configureVulkanAndGlfw(c_mod, target, lib_glfw, glfw_dep, vk_headers_dep);
+
+    // Add GLEW source files to the GLEW module
+    glew_mod.addCSourceFiles(.{
+        .root = glew_dep.path("src"),
+        .files = &.{
+            "glew.c",
+            "glewinfo.c",
+            "visualinfo.c",
+        },
+    });
+
+    glfw_mod.addIncludePath(glfw_dep.path("include"));
 
     const shaders = [_]struct { name: []const u8, path: []const u8 }{
         .{ .name = "gui", .path = "src/shaders/code/gui" },
@@ -170,8 +151,8 @@ pub fn build(b: *std.Build) !void {
     };
 
     // Compile all shaders and collect their install steps.
-    var shader_install_steps = std.ArrayList(*std.Build.Step).init(b.allocator);
-    defer shader_install_steps.deinit();
+    var shader_install_steps = try std.ArrayList(*std.Build.Step).initCapacity(b.allocator, shaders.len * 2);
+    defer shader_install_steps.deinit(b.allocator);
 
     for (shaders) |shader| {
         const vert_source = b.fmt("{s}/{s}.vert", .{ shader.path, shader.name });
@@ -182,8 +163,8 @@ pub fn build(b: *std.Build) !void {
         const install_vert_step = addShaderStep(b, glslc_exe, optimize, vert_source, vert_output);
         const install_frag_step = addShaderStep(b, glslc_exe, optimize, frag_source, frag_output);
 
-        try shader_install_steps.append(install_vert_step);
-        try shader_install_steps.append(install_frag_step);
+        try shader_install_steps.append(b.allocator, install_vert_step);
+        try shader_install_steps.append(b.allocator, install_frag_step);
     }
 
     // TODO: add shader binaries as anonymous imports
@@ -203,7 +184,7 @@ pub fn build(b: *std.Build) !void {
 
     spirv_mod.addOptions("shaders", spirv_options);
 
-    // Define and Build Executables
+    // Define and Build Demos
     const execs = [_]struct { []const u8, []const u8 }{
         .{ "triangle", "example/main.zig" },
         .{ "example", "example/example.zig" },
@@ -212,23 +193,27 @@ pub fn build(b: *std.Build) !void {
 
     for (execs) |exe_info| {
         const exe_id, const src = exe_info;
-        const exe = b.addExecutable(.{
-            .name = exe_id,
-            .target = target,
+        const module = b.addModule(b.fmt("{s}_mod", .{exe_id}), .{
             .optimize = optimize,
+            .target = target,
             .root_source_file = b.path(src),
         });
 
-        exe.root_module.addImport("c", c_mod);
-        exe.root_module.addImport("spirv", spirv_mod);
+        const exe = b.addExecutable(.{
+            .name = exe_id,
+            .root_module = module,
+        });
 
-        exe.root_module.addAnonymousImport("font", .{ .root_source_file = b.path("src/fonts/font.zig") });
-        exe.root_module.addAnonymousImport("png", .{ .root_source_file = b.path("src/png/png_helper.zig") });
+        module.addImport("spirv", spirv_mod);
+        module.addAnonymousImport("font", .{ .root_source_file = b.path("src/fonts/font.zig") });
+        module.addAnonymousImport("png", .{ .root_source_file = b.path("src/png/png_helper.zig") });
         // TODO: Make this import a scene interface instead so scenes can be user code
-        exe.root_module.addAnonymousImport("geometry", .{ .root_source_file = b.path("src/scenes/geometry.zig") });
-        exe.root_module.addAnonymousImport("util", .{ .root_source_file = b.path("src/util/util.zig") });
-
+        module.addAnonymousImport("geometry", .{ .root_source_file = b.path("src/scenes/geometry.zig") });
+        module.addAnonymousImport("util", .{ .root_source_file = b.path("src/util/util.zig") });
         // Shaders should be installed before compiling the executable.
+        module.linkSystemLibrary("vulkan", .{});
+        module.addIncludePath(glfw_dep.path("include"));
+        module.linkLibrary(glfw_lib);
         for (shader_install_steps.items) |shader_step| {
             exe.step.dependOn(shader_step);
         }

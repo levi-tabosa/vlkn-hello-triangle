@@ -10,16 +10,33 @@
     .dependencies = .{
         .glfw = .{
             .url = "https://github.com/glfw/glfw/releases/download/3.4/glfw-3.4.zip",
-            .hash = "1220625fa7ce79733c6889844cb02ea1f6e4b81b46a3fabacec181714879947f4abd",
+            .hash = "N-V-__8AAGILeQBiX6fOeXM8aImETLAuofbkuBtGo_q6zsGB",
+            .lazy = false,
         },
-        // We now fetch the official C headers directly from Khronos.
+        .glew = .{
+            .url = "https://github.com/nigels-com/glew/releases/download/glew-2.2.0/glew-2.2.0.tgz",
+            .hash = "N-V-__8AALvZUgBXsSu50duYTsVOY2m9SxPX-wGgNzo4-EHJ",
+            .lazy = false,
+        },
         .vulkan_headers = .{
-            .url = "https://github.com/KhronosGroup/Vulkan-Headers/archive/refs/tags/v1.3.283.tar.gz",
-            .hash = "1220a7e73d72a0d56bc2a65f9d8999a7c019e42260a0744c408d1cded111bc205e10",
+            .url = "https://github.com/KhronosGroup/Vulkan-Headers/archive/refs/tags/vulkan-sdk-1.4.350.0.tar.gz",
+            .hash = "N-V-__8AAPnEbQK6L3hGtJefy0xZjeg7KOxIEj8_obZC2_lF",
+            .lazy = false,
+        },
+        .vulkan_loader = .{
+            .url = "https://github.com/KhronosGroup/Vulkan-Loader/archive/refs/tags/vulkan-sdk-1.4.350.0.tar.gz",
+            .hash = "N-V-__8AAJT_kQD6CFBMUVgvy7My2RpKDIGBj0RasjO4C2io",
+            .lazy = false,
+        },
+        .opengl_registry = .{
+            .url = "https://github.com/KhronosGroup/OpenGL-Registry/archive/HEAD.tar.gz",
+            .hash = "N-V-__8AAKvw5gqJ9WMMj3y2vzwl49x4DlLnu5UB50P-Gcf3",
+            .lazy = false,
         },
         .glslc = .{
-            .url = "https://github.com/Games-by-Mason/shader_compiler/archive/refs/tags/v0.1.0.tar.gz",
-            .hash = "1220eca903ef543443f9b4a4402c03050c74e9d572ad0c2cd0414a65277138a7a55f",
+            .url = "https://codeberg.org/Games-by-Mason/mr_glsl/archive/main.tar.gz",
+            .hash = "mr_glsl-1.1.0-TvZVkD29AAAw12RovIdV-MtFXnoIw3U6xaCB9YXZ3FOL",
+            .lazy = false,
         },
     },
 
