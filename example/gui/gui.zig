@@ -489,7 +489,7 @@ pub const GuiRenderer = struct {
             .index_buffer = undefined,
             .mapped_vertices = undefined,
             .mapped_indices = undefined,
-            .font = try .init(vk_ctx.allocator, .helvetica, io),
+            .font = try .init(vk_ctx.allocator, font_asset, io),
             .png_handle = try png.loadPngFile(vk_ctx.allocator, io, png_path),
         };
 
