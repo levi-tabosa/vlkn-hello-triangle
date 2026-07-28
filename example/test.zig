@@ -680,16 +680,9 @@ const CommandBuffer = struct {
     fn endSingleTimeCommands(self: Self, vk_ctx: *VulkanContext, command_pool: CommandPool, queue: Queue) !void {
         try vkCheck(c.vkEndCommandBuffer(self.handle));
 
-        // const submit_info = c.VkSubmitInfo{
-        //     .commandBufferCount = 1,
-        //     .pCommandBuffers = &self.handle,
-        // };
         try queue.submit(self, null);
         try queue.waitIdle();
         self.free(vk_ctx, command_pool);
-        // try vkCheck(c.vkQueueSubmit(queue.handle, 1, &submit_info, null));
-        // try vkCheck(c.vkQueueWaitIdle(queue.handle));
-        // c.vkFreeCommandBuffers(vk_ctx.device.handle, command_pool.handle, 1, &self.handle);
     }
 };
 
