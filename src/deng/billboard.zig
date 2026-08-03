@@ -1,16 +1,16 @@
 // text3d.zig
 const std = @import("std");
-const vk = @import("../test.zig");
+const vk = @import("vulkan");
 pub const c = vk.c;
 
 //TODO: move font stuff to another file and import that
-const gui = @import("../gui/gui.zig");
+const gui = @import("gui");
 const font = @import("font");
 const png = @import("png");
 const util = @import("util");
 
-const text3d_vert_shader_bin = @import("spirv").text_vert;
-const text3d_frag_shader_bin = @import("spirv").text_frag;
+pub const text3d_vert_shader_bin = @import("spirv").text_vert;
+pub const text3d_frag_shader_bin = @import("spirv").text_frag;
 
 const Text3DVertex = extern struct {
     pos: [3]f32,
@@ -317,6 +317,7 @@ pub const Text3DRenderer = struct {
         self.texture_view = try self.texture.createView(self.vk_ctx, c.VK_IMAGE_ASPECT_COLOR_BIT);
 
         const sampler_info = c.VkSamplerCreateInfo{
+            .sType = c.VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
             .magFilter = c.VK_FILTER_LINEAR,
             .minFilter = c.VK_FILTER_LINEAR,
             .addressModeU = c.VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
@@ -452,19 +453,21 @@ pub const Text3DRenderer = struct {
         defer frag_mod.deinit(self.vk_ctx);
 
         const shader_stages = [_]c.VkPipelineShaderStageCreateInfo{
-            .{ .stage = c.VK_SHADER_STAGE_VERTEX_BIT, .module = vert_mod.handle, .pName = "main" },
-            .{ .stage = c.VK_SHADER_STAGE_FRAGMENT_BIT, .module = frag_mod.handle, .pName = "main" },
+            .{ .sType = c.VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = c.VK_SHADER_STAGE_VERTEX_BIT, .module = vert_mod.handle, .pName = "main" },
+            .{ .sType = c.VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = c.VK_SHADER_STAGE_FRAGMENT_BIT, .module = frag_mod.handle, .pName = "main" },
         };
 
         const binding_desc = Text3DVertex.getBindingDescription();
         const attrib_desc = Text3DVertex.getAttributeDescriptions();
         const vertex_input_info = c.VkPipelineVertexInputStateCreateInfo{
+            .sType = c.VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
             .vertexBindingDescriptionCount = 1,
             .pVertexBindingDescriptions = &binding_desc,
             .vertexAttributeDescriptionCount = attrib_desc.len,
             .pVertexAttributeDescriptions = &attrib_desc,
         };
         const input_assembly = c.VkPipelineInputAssemblyStateCreateInfo{
+            .sType = c.VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
             .topology = c.VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
         };
 
@@ -480,12 +483,14 @@ pub const Text3DRenderer = struct {
             .alphaBlendOp = c.VK_BLEND_OP_ADD,
         };
         const color_blending = c.VkPipelineColorBlendStateCreateInfo{
+            .sType = c.VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
             .attachmentCount = 1,
             .pAttachments = &color_blend_attachment,
         };
 
         // IMPORTANT: Enable depth testing so text is occluded correctly
         const depth_stencil = c.VkPipelineDepthStencilStateCreateInfo{
+            .sType = c.VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
             .depthTestEnable = c.VK_TRUE, // MUST BE TRUE
             .depthWriteEnable = c.VK_TRUE, // Write depth so text occludes other text
             .depthCompareOp = c.VK_COMPARE_OP_GREATER_OR_EQUAL, // MUST MATCH MAIN SCENE
@@ -495,6 +500,7 @@ pub const Text3DRenderer = struct {
 
         // Other states can be copied/adapted from GuiRenderer's pipeline
         const rasterizer = c.VkPipelineRasterizationStateCreateInfo{
+            .sType = c.VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
             .depthClampEnable = c.VK_FALSE,
             .rasterizerDiscardEnable = c.VK_FALSE,
             .polygonMode = c.VK_POLYGON_MODE_FILL,
@@ -502,15 +508,34 @@ pub const Text3DRenderer = struct {
             .cullMode = c.VK_CULL_MODE_NONE,
         };
         const multisampling = c.VkPipelineMultisampleStateCreateInfo{
+            .sType = c.VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
             .sampleShadingEnable = c.VK_FALSE,
             .rasterizationSamples = c.VK_SAMPLE_COUNT_1_BIT,
         };
 
+        const viewport_state = c.VkPipelineViewportStateCreateInfo{
+            .sType = c.VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+            .viewportCount = 1,
+            .scissorCount = 1,
+        };
+        const dynamic_states = [_]c.VkDynamicState{
+            c.VK_DYNAMIC_STATE_VIEWPORT,
+            c.VK_DYNAMIC_STATE_SCISSOR,
+        };
+        const dynamic_states_create_info = c.VkPipelineDynamicStateCreateInfo{
+            .sType = c.VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+            .dynamicStateCount = dynamic_states.len,
+            .pDynamicStates = &dynamic_states,
+        };
+
         const pipeline_info = c.VkGraphicsPipelineCreateInfo{
+            .sType = c.VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
             .stageCount = shader_stages.len,
             .pStages = &shader_stages,
             .pVertexInputState = &vertex_input_info,
             .pInputAssemblyState = &input_assembly,
+            .pViewportState = &viewport_state,
+            .pDynamicState = &dynamic_states_create_info,
             .pRasterizationState = &rasterizer,
             .pMultisampleState = &multisampling,
             .pColorBlendState = &color_blending,

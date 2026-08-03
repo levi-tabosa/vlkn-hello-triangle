@@ -182,11 +182,11 @@ pub fn build(b: *std.Build) !void {
     });
 
     const shaders = [_]struct { name: []const u8, path: []const u8 }{
-        .{ .name = "gui", .path = "src/shaders/code/gui" },
-        .{ .name = "text", .path = "src/shaders/code/text" },
-        .{ .name = "triangle", .path = "src/shaders/code/triangle" },
-        .{ .name = "example", .path = "src/shaders/code/example" },
-        .{ .name = "test", .path = "src/shaders/code/test" },
+        .{ .name = "gui", .path = "example/shaders/code/gui" },
+        .{ .name = "text", .path = "example/shaders/code/text" },
+        .{ .name = "triangle", .path = "example/shaders/code/triangle" },
+        .{ .name = "example", .path = "example/shaders/code/example" },
+        .{ .name = "test", .path = "example/shaders/code/test" },
     };
 
     // Compile all shaders and collect their install steps.
@@ -243,12 +243,68 @@ pub fn build(b: *std.Build) !void {
             .root_module = module,
         });
 
+        // --- Shared named modules ---
+
+        // vulkan: low-level Vulkan context & primitives
+        const vulkan_mod = b.createModule(.{
+            .root_source_file = b.path("src/deng/renderer/vulkan/vulkan.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+        vulkan_mod.addIncludePath(glfw_dep.path("include"));
+        vulkan_mod.addIncludePath(.{ .dependency = .{ .dependency = vk_headers_dep, .sub_path = "include" } });
+        vulkan_mod.linkLibrary(glfw_lib);
+        vulkan_mod.linkLibrary(vk_loader_lib);
+
+        // font and png (shared helpers)
+        const font_mod = b.createModule(.{ .root_source_file = b.path("src/fonts/font.zig"), .target = target, .optimize = optimize });
+        const png_mod = b.createModule(.{ .root_source_file = b.path("src/png/png_helper.zig"), .target = target, .optimize = optimize });
+        const util_mod = b.createModule(.{ .root_source_file = b.path("src/util/util.zig"), .target = target, .optimize = optimize });
+
+        // gui: UI renderer
+        const gui_mod = b.createModule(.{
+            .root_source_file = b.path("src/deng/gui.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        gui_mod.addImport("vulkan", vulkan_mod);
+        gui_mod.addImport("spirv", spirv_mod);
+        gui_mod.addImport("font", font_mod);
+        gui_mod.addImport("png", png_mod);
+        gui_mod.addImport("util", util_mod);
+
+        // text3d: 3D billboard text renderer (billboard.zig)
+        const text3d_mod = b.createModule(.{
+            .root_source_file = b.path("src/deng/billboard.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        text3d_mod.addImport("vulkan", vulkan_mod);
+        text3d_mod.addImport("gui", gui_mod);
+        text3d_mod.addImport("spirv", spirv_mod);
+        text3d_mod.addImport("font", font_mod);
+        text3d_mod.addImport("png", png_mod);
+        text3d_mod.addImport("util", util_mod);
+
+        // fps_tracker: performance tracker (debug.zig)
+        const fps_tracker_mod = b.createModule(.{
+            .root_source_file = b.path("src/deng/debug.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+
+        // Wire all imports into the executable module
         module.addImport("spirv", spirv_mod);
-        module.addAnonymousImport("font", .{ .root_source_file = b.path("src/fonts/font.zig") });
-        module.addAnonymousImport("png", .{ .root_source_file = b.path("src/png/png_helper.zig") });
+        module.addImport("vulkan", vulkan_mod);
+        module.addImport("gui", gui_mod);
+        module.addImport("text3d", text3d_mod);
+        module.addImport("fps_tracker", fps_tracker_mod);
+        module.addImport("font", font_mod);
+        module.addImport("png", png_mod);
+        module.addImport("util", util_mod);
         // TODO: Make this import a scene interface instead so scenes can be user code
-        module.addAnonymousImport("geometry", .{ .root_source_file = b.path("src/scenes/geometry.zig") });
-        module.addAnonymousImport("util", .{ .root_source_file = b.path("src/util/util.zig") });
+        module.addAnonymousImport("geometry", .{ .root_source_file = b.path("example/scenes/geometry.zig") });
         // Shaders should be installed before compiling the executable.
         module.addIncludePath(glfw_dep.path("include"));
         module.linkLibrary(glfw_lib);

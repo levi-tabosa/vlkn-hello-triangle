@@ -1,5 +1,5 @@
 const std = @import("std");
-const vk = @import("../test.zig"); // Vulkan context and helpers
+const vk = @import("vulkan"); // Vulkan context and helpers
 
 pub const c = vk.c;
 
@@ -10,8 +10,8 @@ const Font = font.FontAsset;
 const FontLoader = font.FontLoader;
 // Note: The `util` import for Pool is no longer needed.
 
-const gui_vert_shader_bin = @import("spirv").gui_vert;
-const gui_frag_shader_bin = @import("spirv").gui_frag;
+pub const gui_vert_shader_bin = @import("spirv").gui_vert;
+pub const gui_frag_shader_bin = @import("spirv").gui_frag;
 
 // --- Basic UI Data Structures ---
 
@@ -501,6 +501,11 @@ pub const GuiRenderer = struct {
         return self;
     }
 
+    pub fn destroyPipeline(self: *Self) void {
+        self.pipeline_layout.deinit(self.vk_ctx);
+        self.pipeline.deinit(self.vk_ctx);
+    }
+
     pub fn deinit(self: *Self) void {
         c.vkDestroySampler(self.vk_ctx.device.handle, self.sampler, null);
         c.vkDestroyImageView(self.vk_ctx.device.handle, self.texture_view, null);
@@ -508,8 +513,7 @@ pub const GuiRenderer = struct {
         self.vk_ctx.allocator.free(self.png_handle.pixels);
         self.descriptor_pool.deinit(self.vk_ctx);
         self.descriptor_set_layout.deinit(self.vk_ctx);
-        self.pipeline_layout.deinit(self.vk_ctx);
-        self.pipeline.deinit(self.vk_ctx);
+        self.destroyPipeline();
         self.vertex_buffer.unmap(self.vk_ctx);
         self.index_buffer.unmap(self.vk_ctx);
         self.vertex_buffer.deinit(self.vk_ctx);
@@ -543,7 +547,16 @@ pub const GuiRenderer = struct {
 
         self.texture_view = try self.texture.createView(self.vk_ctx, c.VK_IMAGE_ASPECT_COLOR_BIT);
 
-        const sampler_info = c.VkSamplerCreateInfo{ .magFilter = c.VK_FILTER_LINEAR, .minFilter = c.VK_FILTER_LINEAR, .addressModeU = c.VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, .addressModeV = c.VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, .addressModeW = c.VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, .borderColor = c.VK_BORDER_COLOR_INT_OPAQUE_BLACK, .unnormalizedCoordinates = c.VK_FALSE };
+        const sampler_info = c.VkSamplerCreateInfo{
+            .sType = c.VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+            .magFilter = c.VK_FILTER_LINEAR,
+            .minFilter = c.VK_FILTER_LINEAR,
+            .addressModeU = c.VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+            .addressModeV = c.VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+            .addressModeW = c.VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+            .borderColor = c.VK_BORDER_COLOR_INT_OPAQUE_BLACK,
+            .unnormalizedCoordinates = c.VK_FALSE,
+        };
         try vk.vkCheck(c.vkCreateSampler(self.vk_ctx.device.handle, &sampler_info, null, &self.sampler));
     }
 
@@ -573,22 +586,35 @@ pub const GuiRenderer = struct {
         var frag_mod = try vk.ShaderModule.init(self.vk_ctx.allocator, self.vk_ctx, gui_frag_shader_bin);
         defer frag_mod.deinit(self.vk_ctx);
         const shader_stages = [_]c.VkPipelineShaderStageCreateInfo{
-            .{ .stage = c.VK_SHADER_STAGE_VERTEX_BIT, .module = vert_mod.handle, .pName = "main" },
-            .{ .stage = c.VK_SHADER_STAGE_FRAGMENT_BIT, .module = frag_mod.handle, .pName = "main" },
+            .{
+                .sType = c.VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                .stage = c.VK_SHADER_STAGE_VERTEX_BIT,
+                .module = vert_mod.handle,
+                .pName = "main",
+            },
+            .{
+                .sType = c.VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                .stage = c.VK_SHADER_STAGE_FRAGMENT_BIT,
+                .module = frag_mod.handle,
+                .pName = "main",
+            },
         };
         const binding_desc = GuiVertex.getBindingDescription();
         const attrib_desc = GuiVertex.getAttributeDescriptions();
         const vertex_input_info = c.VkPipelineVertexInputStateCreateInfo{
+            .sType = c.VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
             .vertexBindingDescriptionCount = 1,
             .pVertexBindingDescriptions = &binding_desc,
             .vertexAttributeDescriptionCount = attrib_desc.len,
             .pVertexAttributeDescriptions = &attrib_desc,
         };
         const input_assembly = c.VkPipelineInputAssemblyStateCreateInfo{
+            .sType = c.VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
             .topology = c.VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
             .primitiveRestartEnable = c.VK_FALSE,
         };
         const rasterizer = c.VkPipelineRasterizationStateCreateInfo{
+            .sType = c.VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
             .depthClampEnable = c.VK_FALSE,
             .rasterizerDiscardEnable = c.VK_FALSE,
             .polygonMode = c.VK_POLYGON_MODE_FILL,
@@ -596,7 +622,11 @@ pub const GuiRenderer = struct {
             .cullMode = c.VK_CULL_MODE_NONE,
             .frontFace = c.VK_FRONT_FACE_CLOCKWISE,
         };
-        const multisampling = c.VkPipelineMultisampleStateCreateInfo{ .sampleShadingEnable = c.VK_FALSE, .rasterizationSamples = c.VK_SAMPLE_COUNT_1_BIT };
+        const multisampling = c.VkPipelineMultisampleStateCreateInfo{
+            .sType = c.VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+            .sampleShadingEnable = c.VK_FALSE,
+            .rasterizationSamples = c.VK_SAMPLE_COUNT_1_BIT,
+        };
         const color_blend_attachment = c.VkPipelineColorBlendAttachmentState{
             .colorWriteMask = c.VK_COLOR_COMPONENT_R_BIT | c.VK_COLOR_COMPONENT_G_BIT | c.VK_COLOR_COMPONENT_B_BIT | c.VK_COLOR_COMPONENT_A_BIT,
             .blendEnable = c.VK_TRUE,
@@ -607,12 +637,36 @@ pub const GuiRenderer = struct {
             .dstAlphaBlendFactor = c.VK_BLEND_FACTOR_ZERO,
             .alphaBlendOp = c.VK_BLEND_OP_ADD,
         };
-        const color_blending = c.VkPipelineColorBlendStateCreateInfo{ .logicOpEnable = c.VK_FALSE, .attachmentCount = 1, .pAttachments = &color_blend_attachment };
+        const color_blending = c.VkPipelineColorBlendStateCreateInfo{
+            .sType = c.VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+            .logicOpEnable = c.VK_FALSE,
+            .attachmentCount = 1,
+            .pAttachments = &color_blend_attachment,
+        };
+
+        const viewport_state = c.VkPipelineViewportStateCreateInfo{
+            .sType = c.VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+            .viewportCount = 1,
+            .scissorCount = 1,
+        };
+        const dynamic_states = [_]c.VkDynamicState{
+            c.VK_DYNAMIC_STATE_VIEWPORT,
+            c.VK_DYNAMIC_STATE_SCISSOR,
+        };
+        const dynamic_states_create_info = c.VkPipelineDynamicStateCreateInfo{
+            .sType = c.VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+            .dynamicStateCount = dynamic_states.len,
+            .pDynamicStates = &dynamic_states,
+        };
+
         const pipeline_info = c.VkGraphicsPipelineCreateInfo{
+            .sType = c.VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
             .stageCount = shader_stages.len,
             .pStages = &shader_stages,
             .pVertexInputState = &vertex_input_info,
             .pInputAssemblyState = &input_assembly,
+            .pViewportState = &viewport_state,
+            .pDynamicState = &dynamic_states_create_info,
             .pRasterizationState = &rasterizer,
             .pMultisampleState = &multisampling,
             .pColorBlendState = &color_blending,
